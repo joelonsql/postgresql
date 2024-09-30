@@ -57,6 +57,7 @@ my %replace_token = (
 # or in the block
 my %replace_string = (
 	'FORMAT_LA' => 'format',
+	'KEY_LA' => 'key',
 	'NOT_LA' => 'not',
 	'NULLS_LA' => 'nulls',
 	'WITH_LA' => 'with',

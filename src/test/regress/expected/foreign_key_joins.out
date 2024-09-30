@@ -1,0 +1,377 @@
+--
+-- Test Foreign Key Joins.
+--
+CREATE TABLE t1
+(
+    c1 int not null,
+    c2 int not null,
+    CONSTRAINT t1_pkey PRIMARY KEY (c1)
+);
+CREATE TABLE t2
+(
+    c3 int not null,
+    c4 int not null,
+    CONSTRAINT t2_pkey PRIMARY KEY (c3),
+    CONSTRAINT t2_c3_fkey FOREIGN KEY (c3) REFERENCES t1 (c1)
+);
+INSERT INTO t1 (c1, c2) VALUES (1, 10);
+INSERT INTO t1 (c1, c2) VALUES (2, 20);
+INSERT INTO t1 (c1, c2) VALUES (3, 30);
+INSERT INTO t2 (c3, c4) VALUES (1, 10);
+INSERT INTO t2 (c3, c4) VALUES (3, 30);
+--
+-- Test renaming tables and columns.
+--
+CREATE VIEW v1 AS
+SELECT *
+FROM t1
+JOIN t2 KEY (c3) TO t1 (c1);
+\d+ v1
+                             View "public.v1"
+ Column |  Type   | Collation | Nullable | Default | Storage | Description 
+--------+---------+-----------+----------+---------+---------+-------------
+ c1     | integer |           |          |         | plain   | 
+ c2     | integer |           |          |         | plain   | 
+ c3     | integer |           |          |         | plain   | 
+ c4     | integer |           |          |         | plain   | 
+View definition:
+ SELECT t1.c1,
+    t1.c2,
+    t2.c3,
+    t2.c4
+   FROM t1
+     JOIN t2 KEY (c3) TO t1 (c1);
+
+SELECT * FROM v1; -- ok
+ c1 | c2 | c3 | c4 
+----+----+----+----
+  1 | 10 |  1 | 10
+  3 | 30 |  3 | 30
+(2 rows)
+
+ALTER TABLE t1 RENAME COLUMN c1 TO c1_renamed;
+ALTER TABLE t2 RENAME COLUMN c3 TO c3_renamed;
+ALTER TABLE t1 RENAME TO t1_renamed;
+ALTER TABLE t2 RENAME TO t2_renamed;
+\d+ v1
+                             View "public.v1"
+ Column |  Type   | Collation | Nullable | Default | Storage | Description 
+--------+---------+-----------+----------+---------+---------+-------------
+ c1     | integer |           |          |         | plain   | 
+ c2     | integer |           |          |         | plain   | 
+ c3     | integer |           |          |         | plain   | 
+ c4     | integer |           |          |         | plain   | 
+View definition:
+ SELECT t1_renamed.c1_renamed AS c1,
+    t1_renamed.c2,
+    t2_renamed.c3_renamed AS c3,
+    t2_renamed.c4
+   FROM t1_renamed
+     JOIN t2_renamed KEY (c3_renamed) TO t1_renamed (c1_renamed);
+
+SELECT * FROM v1; -- ok
+ c1 | c2 | c3 | c4 
+----+----+----+----
+  1 | 10 |  1 | 10
+  3 | 30 |  3 | 30
+(2 rows)
+
+-- Undo the effect of the renames
+ALTER TABLE t2_renamed RENAME TO t2;
+ALTER TABLE t1_renamed RENAME TO t1;
+ALTER TABLE t2 RENAME COLUMN c3_renamed TO c3;
+ALTER TABLE t1 RENAME COLUMN c1_renamed TO c1;
+\d+ v1
+                             View "public.v1"
+ Column |  Type   | Collation | Nullable | Default | Storage | Description 
+--------+---------+-----------+----------+---------+---------+-------------
+ c1     | integer |           |          |         | plain   | 
+ c2     | integer |           |          |         | plain   | 
+ c3     | integer |           |          |         | plain   | 
+ c4     | integer |           |          |         | plain   | 
+View definition:
+ SELECT t1.c1,
+    t1.c2,
+    t2.c3,
+    t2.c4
+   FROM t1
+     JOIN t2 KEY (c3) TO t1 (c1);
+
+SELECT * FROM v1; -- ok
+ c1 | c2 | c3 | c4 
+----+----+----+----
+  1 | 10 |  1 | 10
+  3 | 30 |  3 | 30
+(2 rows)
+
+SELECT * FROM t1 JOIN t2 KEY (c3) TO t1 (c1); -- ok
+ c1 | c2 | c3 | c4 
+----+----+----+----
+  1 | 10 |  1 | 10
+  3 | 30 |  3 | 30
+(2 rows)
+
+SELECT * FROM t1 JOIN t2 KEY (c3) TO t1 (c2); -- error
+ERROR:  there is no foreign key constraint on table "t2" (c3) referencing table "t1" (c2)
+LINE 1: SELECT * FROM t1 JOIN t2 KEY (c3) TO t1 (c2);
+                                 ^
+SELECT * FROM t1 JOIN t2 KEY (c4) TO t1 (c1); -- error
+ERROR:  there is no foreign key constraint on table "t2" (c4) referencing table "t1" (c1)
+LINE 1: SELECT * FROM t1 JOIN t2 KEY (c4) TO t1 (c1);
+                                 ^
+SELECT * FROM t1 JOIN t2 KEY (c3,c4) TO t1 (c1,c2); -- error
+ERROR:  there is no foreign key constraint on table "t2" (c3, c4) referencing table "t1" (c1, c2)
+LINE 1: SELECT * FROM t1 JOIN t2 KEY (c3,c4) TO t1 (c1,c2);
+                                 ^
+SELECT * FROM t1 JOIN t2 KEY (c3) FROM t1 (c1); -- error
+ERROR:  there is no foreign key constraint on table "t1" (c1) referencing table "t2" (c3)
+LINE 1: SELECT * FROM t1 JOIN t2 KEY (c3) FROM t1 (c1);
+                                 ^
+SELECT * FROM t1 JOIN t2 KEY (c1) FROM t1 (c3); -- error
+ERROR:  there is no foreign key constraint on table "t1" (c3) referencing table "t2" (c1)
+LINE 1: SELECT * FROM t1 JOIN t2 KEY (c1) FROM t1 (c3);
+                                 ^
+SELECT * FROM t1 JOIN t2 KEY (c3) FROM t1 (c2); -- error
+ERROR:  there is no foreign key constraint on table "t1" (c2) referencing table "t2" (c3)
+LINE 1: SELECT * FROM t1 JOIN t2 KEY (c3) FROM t1 (c2);
+                                 ^
+SELECT * FROM t1 JOIN t2 KEY (c4) FROM t1 (c1); -- error
+ERROR:  there is no foreign key constraint on table "t1" (c1) referencing table "t2" (c4)
+LINE 1: SELECT * FROM t1 JOIN t2 KEY (c4) FROM t1 (c1);
+                                 ^
+SELECT * FROM t1 JOIN t2 KEY (c3,c4) FROM t1 (c1,c2); -- error
+ERROR:  there is no foreign key constraint on table "t1" (c1, c2) referencing table "t2" (c3, c4)
+LINE 1: SELECT * FROM t1 JOIN t2 KEY (c3,c4) FROM t1 (c1,c2);
+                                 ^
+SELECT * FROM t2 JOIN t1 KEY (c1) FROM t2 (c3); -- ok
+ c3 | c4 | c1 | c2 
+----+----+----+----
+  1 | 10 |  1 | 10
+  3 | 30 |  3 | 30
+(2 rows)
+
+SELECT * FROM t2 JOIN t1 KEY (c1) FROM t2 (c4); -- error
+ERROR:  there is no foreign key constraint on table "t2" (c4) referencing table "t1" (c1)
+LINE 1: SELECT * FROM t2 JOIN t1 KEY (c1) FROM t2 (c4);
+                                 ^
+SELECT * FROM t2 JOIN t1 KEY (c2) FROM t2 (c3); -- error
+ERROR:  there is no foreign key constraint on table "t2" (c3) referencing table "t1" (c2)
+LINE 1: SELECT * FROM t2 JOIN t1 KEY (c2) FROM t2 (c3);
+                                 ^
+SELECT * FROM t2 JOIN t1 KEY (c1,c2) FROM t2 (c3,c4); -- error
+ERROR:  there is no foreign key constraint on table "t2" (c3, c4) referencing table "t1" (c1, c2)
+LINE 1: SELECT * FROM t2 JOIN t1 KEY (c1,c2) FROM t2 (c3,c4);
+                                 ^
+SELECT * FROM t2 JOIN t1 KEY (c1) TO t2 (c3); -- error
+ERROR:  there is no foreign key constraint on table "t1" (c1) referencing table "t2" (c3)
+LINE 1: SELECT * FROM t2 JOIN t1 KEY (c1) TO t2 (c3);
+                                 ^
+SELECT * FROM t2 JOIN t1 KEY (c1) TO t2 (c4); -- error
+ERROR:  there is no foreign key constraint on table "t1" (c1) referencing table "t2" (c4)
+LINE 1: SELECT * FROM t2 JOIN t1 KEY (c1) TO t2 (c4);
+                                 ^
+SELECT * FROM t2 JOIN t1 KEY (c2) TO t2 (c3); -- error
+ERROR:  there is no foreign key constraint on table "t1" (c2) referencing table "t2" (c3)
+LINE 1: SELECT * FROM t2 JOIN t1 KEY (c2) TO t2 (c3);
+                                 ^
+SELECT * FROM t2 JOIN t1 KEY (c1,c2) TO t2 (c3,c4); -- error
+ERROR:  there is no foreign key constraint on table "t1" (c1, c2) referencing table "t2" (c3, c4)
+LINE 1: SELECT * FROM t2 JOIN t1 KEY (c1,c2) TO t2 (c3,c4);
+                                 ^
+ALTER TABLE t2 DROP CONSTRAINT t2_c3_fkey;
+SELECT * FROM t1 JOIN t2 KEY (c3) TO t1 (c1); -- error
+ERROR:  there is no foreign key constraint on table "t2" (c3) referencing table "t1" (c1)
+LINE 1: SELECT * FROM t1 JOIN t2 KEY (c3) TO t1 (c1);
+                                 ^
+SELECT * FROM t2 JOIN t1 KEY (c1) FROM t2 (c3); -- error
+ERROR:  there is no foreign key constraint on table "t2" (c3) referencing table "t1" (c1)
+LINE 1: SELECT * FROM t2 JOIN t1 KEY (c1) FROM t2 (c3);
+                                 ^
+ALTER TABLE t1 ADD UNIQUE (c1,c2);
+ALTER TABLE t2 ADD CONSTRAINT t2_c3_c4_fkey FOREIGN KEY (c3,c4) REFERENCES t1 (c1,c2);
+CREATE VIEW v2 AS
+SELECT * FROM t1 JOIN t2 KEY (c3,c4) TO t1 (c1,c2); -- ok
+SELECT * FROM t1 JOIN t2 KEY (c3,c4) TO t1 (c1,c2); -- ok
+ c1 | c2 | c3 | c4 
+----+----+----+----
+  1 | 10 |  1 | 10
+  3 | 30 |  3 | 30
+(2 rows)
+
+SELECT * FROM v2; -- ok
+ c1 | c2 | c3 | c4 
+----+----+----+----
+  1 | 10 |  1 | 10
+  3 | 30 |  3 | 30
+(2 rows)
+
+\d+ v2
+                             View "public.v2"
+ Column |  Type   | Collation | Nullable | Default | Storage | Description 
+--------+---------+-----------+----------+---------+---------+-------------
+ c1     | integer |           |          |         | plain   | 
+ c2     | integer |           |          |         | plain   | 
+ c3     | integer |           |          |         | plain   | 
+ c4     | integer |           |          |         | plain   | 
+View definition:
+ SELECT t1.c1,
+    t1.c2,
+    t2.c3,
+    t2.c4
+   FROM t1
+     JOIN t2 KEY (c3, c4) TO t1 (c1, c2);
+
+CREATE VIEW v3 AS
+SELECT * FROM t2 JOIN t1 KEY (c1,c2) FROM t2 (c3,c4); -- ok
+SELECT * FROM t2 JOIN t1 KEY (c1,c2) FROM t2 (c3,c4); -- ok
+ c3 | c4 | c1 | c2 
+----+----+----+----
+  1 | 10 |  1 | 10
+  3 | 30 |  3 | 30
+(2 rows)
+
+\d+ v3
+                             View "public.v3"
+ Column |  Type   | Collation | Nullable | Default | Storage | Description 
+--------+---------+-----------+----------+---------+---------+-------------
+ c3     | integer |           |          |         | plain   | 
+ c4     | integer |           |          |         | plain   | 
+ c1     | integer |           |          |         | plain   | 
+ c2     | integer |           |          |         | plain   | 
+View definition:
+ SELECT t2.c3,
+    t2.c4,
+    t1.c1,
+    t1.c2
+   FROM t2
+     JOIN t1 KEY (c1, c2) FROM t2 (c3, c4);
+
+SELECT * FROM v3; -- ok
+ c3 | c4 | c1 | c2 
+----+----+----+----
+  1 | 10 |  1 | 10
+  3 | 30 |  3 | 30
+(2 rows)
+
+SELECT * FROM t1 JOIN t2 KEY (c3) TO t1 (c1); -- error
+ERROR:  there is no foreign key constraint on table "t2" (c3) referencing table "t1" (c1)
+LINE 1: SELECT * FROM t1 JOIN t2 KEY (c3) TO t1 (c1);
+                                 ^
+SELECT * FROM t2 JOIN t1 KEY (c1) FROM t2 (c3); -- error
+ERROR:  there is no foreign key constraint on table "t2" (c3) referencing table "t1" (c1)
+LINE 1: SELECT * FROM t2 JOIN t1 KEY (c1) FROM t2 (c3);
+                                 ^
+SELECT * FROM t1 JOIN t2 KEY (c3,c4) FROM t1 (c1,c2); -- error
+ERROR:  there is no foreign key constraint on table "t1" (c1, c2) referencing table "t2" (c3, c4)
+LINE 1: SELECT * FROM t1 JOIN t2 KEY (c3,c4) FROM t1 (c1,c2);
+                                 ^
+SELECT * FROM t2 JOIN t1 KEY (c1,c2) TO t2 (c3,c4); -- error
+ERROR:  there is no foreign key constraint on table "t1" (c1, c2) referencing table "t2" (c3, c4)
+LINE 1: SELECT * FROM t2 JOIN t1 KEY (c1,c2) TO t2 (c3,c4);
+                                 ^
+--
+-- Test nulls and multiple tables
+--
+CREATE TABLE t3
+(
+    c5 int,
+    c6 int,
+    CONSTRAINT t3_c5_c6_fkey FOREIGN KEY (c5, c6) REFERENCES t1 (c1, c2)
+);
+INSERT INTO t3 (c5, c6) VALUES (1, 10); -- ok
+INSERT INTO t3 (c5, c6) VALUES (3, 30); -- ok
+INSERT INTO t3 (c5, c6) VALUES (3, NULL); -- ok
+INSERT INTO t3 (c5, c6) VALUES (NULL, 30); -- ok
+INSERT INTO t3 (c5, c6) VALUES (1234, NULL); -- ok
+INSERT INTO t3 (c5, c6) VALUES (NULL, 5678); -- ok
+INSERT INTO t3 (c5, c6) VALUES (NULL, NULL); -- ok
+SELECT *
+FROM t1
+JOIN t2 KEY (c3,c4) TO t1 (c1,c2)
+JOIN t3 KEY (c5,c6) TO t1 (c1,c2);
+ c1 | c2 | c3 | c4 | c5 | c6 
+----+----+----+----+----+----
+  1 | 10 |  1 | 10 |  1 | 10
+  3 | 30 |  3 | 30 |  3 | 30
+(2 rows)
+
+SELECT *
+FROM t1
+JOIN t2 KEY (c3,c4) TO t1 (c1,c2)
+LEFT JOIN t3 KEY (c5,c6) TO t1 (c1,c2);
+ c1 | c2 | c3 | c4 | c5 | c6 
+----+----+----+----+----+----
+  1 | 10 |  1 | 10 |  1 | 10
+  3 | 30 |  3 | 30 |  3 | 30
+(2 rows)
+
+SELECT *
+FROM t1
+JOIN t2 KEY (c3,c4) TO t1 (c1,c2)
+RIGHT JOIN t3 KEY (c5,c6) TO t1 (c1,c2);
+ c1 | c2 | c3 | c4 |  c5  |  c6  
+----+----+----+----+------+------
+  1 | 10 |  1 | 10 |    1 |   10
+  3 | 30 |  3 | 30 |    3 |   30
+    |    |    |    |    3 |     
+    |    |    |    | 1234 |     
+    |    |    |    |      |   30
+    |    |    |    |      | 5678
+    |    |    |    |      |     
+(7 rows)
+
+--
+-- Test defining foreign key constraints with MATCH FULL
+--
+CREATE TABLE t4
+(
+    c7 int,
+    c8 int,
+    CONSTRAINT t4_c7_c8_fkey FOREIGN KEY (c7, c8) REFERENCES t1 (c1, c2) MATCH FULL
+);
+INSERT INTO t4 (c7, c8) VALUES (1, 10); -- ok
+INSERT INTO t4 (c7, c8) VALUES (3, 30); -- ok
+INSERT INTO t4 (c7, c8) VALUES (3, NULL); -- error
+ERROR:  insert or update on table "t4" violates foreign key constraint "t4_c7_c8_fkey"
+DETAIL:  MATCH FULL does not allow mixing of null and nonnull key values.
+INSERT INTO t4 (c7, c8) VALUES (NULL, 30); -- error
+ERROR:  insert or update on table "t4" violates foreign key constraint "t4_c7_c8_fkey"
+DETAIL:  MATCH FULL does not allow mixing of null and nonnull key values.
+INSERT INTO t4 (c7, c8) VALUES (1234, NULL); -- error
+ERROR:  insert or update on table "t4" violates foreign key constraint "t4_c7_c8_fkey"
+DETAIL:  MATCH FULL does not allow mixing of null and nonnull key values.
+INSERT INTO t4 (c7, c8) VALUES (NULL, 5678); -- error
+ERROR:  insert or update on table "t4" violates foreign key constraint "t4_c7_c8_fkey"
+DETAIL:  MATCH FULL does not allow mixing of null and nonnull key values.
+INSERT INTO t4 (c7, c8) VALUES (NULL, NULL); -- ok
+SELECT *
+FROM t1
+JOIN t2 KEY (c3,c4) TO t1 (c1,c2)
+JOIN t4 KEY (c7,c8) TO t1 (c1,c2);
+ c1 | c2 | c3 | c4 | c7 | c8 
+----+----+----+----+----+----
+  1 | 10 |  1 | 10 |  1 | 10
+  3 | 30 |  3 | 30 |  3 | 30
+(2 rows)
+
+SELECT *
+FROM t1
+JOIN t2 KEY (c3,c4) TO t1 (c1,c2)
+LEFT JOIN t4 KEY (c7,c8) TO t1 (c1,c2);
+ c1 | c2 | c3 | c4 | c7 | c8 
+----+----+----+----+----+----
+  1 | 10 |  1 | 10 |  1 | 10
+  3 | 30 |  3 | 30 |  3 | 30
+(2 rows)
+
+SELECT *
+FROM t1
+JOIN t2 KEY (c3,c4) TO t1 (c1,c2)
+RIGHT JOIN t4 KEY (c7,c8) TO t1 (c1,c2);
+ c1 | c2 | c3 | c4 | c7 | c8 
+----+----+----+----+----+----
+  1 | 10 |  1 | 10 |  1 | 10
+  3 | 30 |  3 | 30 |  3 | 30
+    |    |    |    |    |   
+(3 rows)
+

@@ -79,6 +79,7 @@ filtered_base_yylex(void)
 	switch (cur_token)
 	{
 		case FORMAT:
+		case KEY:
 		case NOT:
 		case NULLS_P:
 		case WITH:
@@ -118,6 +119,16 @@ filtered_base_yylex(void)
 			{
 				case JSON:
 					cur_token = FORMAT_LA;
+					break;
+			}
+			break;
+
+		case KEY:
+			/* Replace KEY by KEY_LA if it's followed by ( */
+			switch (next_token)
+			{
+				case '(':
+					cur_token = KEY_LA;
 					break;
 			}
 			break;
