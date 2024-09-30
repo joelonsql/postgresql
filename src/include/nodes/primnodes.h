@@ -2246,6 +2246,22 @@ typedef struct RangeTblRef
 	int			rtindex;
 } RangeTblRef;
 
+typedef enum ForeignKeyDirection
+{
+	FKDIR_FROM,
+	FKDIR_TO
+} ForeignKeyDirection;
+
+typedef struct ForeignKeyJoinNode
+{
+	NodeTag             type;
+	ForeignKeyDirection fkdir;
+	Index               referencingVarno;    /* varno of the referencing relation */
+	List               *referencingAttnums;  /* List of attribute numbers (int) */
+	Index               referencedVarno;     /* varno of the referenced relation */
+	List               *referencedAttnums;   /* List of attribute numbers (int) */
+} ForeignKeyJoinNode;
+
 /*----------
  * JoinExpr - for SQL JOIN expressions
  *
@@ -2285,6 +2301,8 @@ typedef struct JoinExpr
 	List	   *usingClause pg_node_attr(query_jumble_ignore);
 	/* alias attached to USING clause, if any */
 	Alias	   *join_using_alias pg_node_attr(query_jumble_ignore);
+	/* KEY clause, if any */
+	Node	   *fkJoin;			/* ForeignKeyClause or ForeignKeyJoinNode */
 	/* qualifiers on join, if any */
 	Node	   *quals;
 	/* user-written alias clause, if any */
