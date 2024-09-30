@@ -59,7 +59,7 @@ SELECT [ ALL | DISTINCT [ ON ( <replaceable class="parameter">expression</replac
     [ LATERAL ] <replaceable class="parameter">function_name</replaceable> ( [ <replaceable class="parameter">argument</replaceable> [, ...] ] ) AS ( <replaceable class="parameter">column_definition</replaceable> [, ...] )
     [ LATERAL ] ROWS FROM( <replaceable class="parameter">function_name</replaceable> ( [ <replaceable class="parameter">argument</replaceable> [, ...] ] ) [ AS ( <replaceable class="parameter">column_definition</replaceable> [, ...] ) ] [, ...] )
                 [ WITH ORDINALITY ] [ [ AS ] <replaceable class="parameter">alias</replaceable> [ ( <replaceable class="parameter">column_alias</replaceable> [, ...] ) ] ]
-    <replaceable class="parameter">from_item</replaceable> <replaceable class="parameter">join_type</replaceable> <replaceable class="parameter">from_item</replaceable> { ON <replaceable class="parameter">join_condition</replaceable> | USING ( <replaceable class="parameter">join_column</replaceable> [, ...] ) [ AS <replaceable class="parameter">join_using_alias</replaceable> ] }
+    <replaceable class="parameter">from_item</replaceable> <replaceable class="parameter">join_type</replaceable> <replaceable class="parameter">from_item</replaceable> { ON <replaceable class="parameter">join_condition</replaceable> | USING ( <replaceable class="parameter">join_column</replaceable> [, ...] ) [ AS <replaceable class="parameter">join_using_alias</replaceable> ] | KEY ( <replaceable class="parameter">column_name</replaceable> [, ...] ) { &lt;- | -&gt; } <replaceable class="parameter">from_reference</replaceable> ( <replaceable class="parameter">column_name</replaceable> [, ...] ) }
     <replaceable class="parameter">from_item</replaceable> NATURAL <replaceable class="parameter">join_type</replaceable> <replaceable class="parameter">from_item</replaceable>
     <replaceable class="parameter">from_item</replaceable> CROSS JOIN <replaceable class="parameter">from_item</replaceable>
 
@@ -613,6 +613,10 @@ TABLE [ ONLY ] <replaceable class="parameter">table_name</replaceable> [ * ]
         class="parameter">join_condition</replaceable></literal>,
         <literal>USING (<replaceable
         class="parameter">join_column</replaceable> [, ...])</literal>,
+        <literal>KEY ( <replaceable class="parameter">column_name</replaceable>
+        [, ...] ) { &lt;- | -&gt; } <replaceable
+        class="parameter">from_reference</replaceable> ( <replaceable
+        class="parameter">column_name</replaceable> [, ...] )</literal>,
         or <literal>NATURAL</literal>.  See below for the meaning.
        </para>
 
@@ -690,6 +694,15 @@ TABLE [ ONLY ] <replaceable class="parameter">table_name</replaceable> [ * ]
         <replaceable class="parameter">alias</replaceable>, you cannot write a
         column alias list &mdash; the output names of the join columns are the
         same as they appear in the <literal>USING</literal> list.
+       </para>
+      </listitem>
+     </varlistentry>
+
+     <varlistentry>
+      <term><literal>KEY ( <replaceable class="parameter">column_name</replaceable> [, ...] ) { &lt;- | -&gt; } <replaceable class="parameter">from_reference</replaceable> ( <replaceable class="parameter">column_name</replaceable> [, ...] )</literal></term>
+      <listitem>
+       <para>
+        TODO: Write me!
        </para>
       </listitem>
      </varlistentry>

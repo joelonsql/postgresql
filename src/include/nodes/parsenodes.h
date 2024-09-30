@@ -4319,4 +4319,14 @@ typedef struct DropSubscriptionStmt
 	DropBehavior behavior;		/* RESTRICT or CASCADE behavior */
 } DropSubscriptionStmt;
 
+typedef struct ForeignKeyClause
+{
+	NodeTag		type;
+	List	   *localCols;
+	ForeignKeyDirection fkdir;
+	char	   *refAlias;
+	List	   *refCols;
+	ParseLoc	location;		/* token location, or -1 if unknown */
+} ForeignKeyClause;
+
 #endif							/* PARSENODES_H */
