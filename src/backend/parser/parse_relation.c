@@ -20,6 +20,7 @@
 #include "access/relation.h"
 #include "access/sysattr.h"
 #include "access/table.h"
+#include "access/xact.h"
 #include "catalog/heap.h"
 #include "catalog/namespace.h"
 #include "catalog/pg_type.h"
@@ -36,7 +37,10 @@
 #include "utils/rel.h"
 #include "utils/syscache.h"
 #include "utils/varlena.h"
+#include "rewrite/rewriteHandler.h"
 
+/* Static variable for global base relation indexing */
+static Index next_baserelindex = 1;
 
 /*
  * Support for fuzzily matching columns.
@@ -1547,6 +1551,69 @@ addRangeTableEntry(ParseState *pstate,
 	 */
 	pstate->p_rtable = lappend(pstate->p_rtable, rte);
 
+	if (rte->relkind == RELKIND_RELATION || rte->relkind == RELKIND_PARTITIONED_TABLE)
+	{
+		/* Create default RTEId for any relation type */
+		RTEId	   *rteid = makeNode(RTEId);
+		FullTransactionId fxid = ReadNextFullTransactionId();
+
+		rteid->fxid = fxid.value;
+		rteid->procnumber = (int) MyProcNumber;
+		rteid->baserelindex = next_baserelindex++;
+		rte->rteid = rteid;
+
+		/*
+		 * Uniqueness/FD properties depend on the assigned ID for regular
+		 * tables
+		 */
+		rte->uniqueness_preservation = list_make1(rteid);
+		if (!rel->rd_rel->relrowsecurity)
+			rte->functional_dependencies = list_make2(rteid, rteid);
+	}
+	else if (rte->relkind == RELKIND_VIEW)
+	{
+		Query	   *viewquery = get_view_query(rel);
+
+		if (viewquery->jointree && list_length(viewquery->jointree->fromlist) == 1)
+		{
+			Node	   *fromitem = linitial(viewquery->jointree->fromlist);
+			bool		is_not_filtered = (viewquery->jointree->quals == NULL && viewquery->limitOffset == NULL && viewquery->limitCount == NULL);
+
+			if (IsA(fromitem, JoinExpr))
+			{
+				JoinExpr   *join = (JoinExpr *) fromitem;
+
+				if (join->fkJoin)
+				{
+					ForeignKeyJoinNode *fkjoin = castNode(ForeignKeyJoinNode, join->fkJoin);
+
+					rte->uniqueness_preservation = list_copy(fkjoin->uniqueness_preservation);
+					if (is_not_filtered)
+						rte->functional_dependencies = list_copy(fkjoin->functional_dependencies);
+				}
+			}
+			else if (IsA(fromitem, RangeTblRef))
+			{
+				/*
+				 * If this view references another RTE, get its properties
+				 */
+				RangeTblRef *rtr = (RangeTblRef *) fromitem;
+				RangeTblEntry *sub_rte = rt_fetch(rtr->rtindex, viewquery->rtable);
+
+				/* Copy the properties from the underlying RTE */
+				if (sub_rte->uniqueness_preservation)
+				{
+					rte->uniqueness_preservation = list_copy(sub_rte->uniqueness_preservation);
+				}
+
+				if (sub_rte->functional_dependencies && is_not_filtered)
+				{
+					rte->functional_dependencies = list_copy(sub_rte->functional_dependencies);
+				}
+			}
+		}
+	}
+
 	/*
 	 * Build a ParseNamespaceItem, but don't add it to the pstate's namespace
 	 * list --- caller must do that if appropriate.
@@ -1725,6 +1792,46 @@ addRangeTableEntryForSubquery(ParseState *pstate,
 	 * appropriate.
 	 */
 	pstate->p_rtable = lappend(pstate->p_rtable, rte);
+
+	/*
+	 * Propagate uniqueness_preservation and functional_dependencies. If the
+	 * subquery's jointree has exactly one RangeTblRef, propagate these fields
+	 * from the underlying RTE. Also propagate if the subquery's jointree has
+	 * exactly one JoinExpr, fetching the properties from the corresponding
+	 * join RTE.
+	 */
+	if (subquery->jointree &&
+		list_length(subquery->jointree->fromlist) == 1)
+	{
+		Node	   *fromitem = linitial(subquery->jointree->fromlist);
+		RangeTblEntry *sub_rte = NULL;
+
+		if (IsA(fromitem, RangeTblRef))
+		{
+			RangeTblRef *rtr = (RangeTblRef *) fromitem;
+
+			sub_rte = rt_fetch(rtr->rtindex, subquery->rtable);
+		}
+		else if (IsA(fromitem, JoinExpr))
+		{
+			JoinExpr   *j = (JoinExpr *) fromitem;
+
+			/* Fetch the corresponding join RTE from the subquery's rtable */
+			sub_rte = rt_fetch(j->rtindex, subquery->rtable);
+			Assert(sub_rte->rtekind == RTE_JOIN);
+		}
+
+		if (sub_rte)
+		{
+			rte->uniqueness_preservation = list_copy(sub_rte->uniqueness_preservation);
+			if (subquery->jointree->quals == NULL &&
+				subquery->limitOffset == NULL &&
+				subquery->limitCount == NULL)
+			{
+				rte->functional_dependencies = list_copy(sub_rte->functional_dependencies);
+			}
+		}
+	}
 
 	/*
 	 * Build a ParseNamespaceItem, but don't add it to the pstate's namespace
@@ -2375,6 +2482,47 @@ addRangeTableEntryForCTE(ParseState *pstate,
 					 errmsg("WITH query \"%s\" does not have a RETURNING clause",
 							cte->ctename),
 					 parser_errposition(pstate, rv->location)));
+
+		/*
+		 * Propagate uniqueness_preservation and functional_dependencies. If
+		 * the ctequery's jointree has exactly one RangeTblRef, propagate
+		 * these fields from the underlying RTE.
+		 */
+		if (ctequery->jointree &&
+			list_length(ctequery->jointree->fromlist) == 1)
+		{
+			Node	   *fromitem = linitial(ctequery->jointree->fromlist);
+			RangeTblEntry *sub_rte = NULL;
+
+			if (IsA(fromitem, RangeTblRef))
+			{
+				RangeTblRef *rtr = (RangeTblRef *) fromitem;
+
+				sub_rte = rt_fetch(rtr->rtindex, ctequery->rtable);
+			}
+			else if (IsA(fromitem, JoinExpr))
+			{
+				JoinExpr   *j = (JoinExpr *) fromitem;
+
+				/*
+				 * Fetch the corresponding join RTE from the CTE query's
+				 * rtable
+				 */
+				sub_rte = rt_fetch(j->rtindex, ctequery->rtable);
+				Assert(sub_rte->rtekind == RTE_JOIN);
+			}
+
+			if (sub_rte)
+			{
+				rte->uniqueness_preservation = list_copy(sub_rte->uniqueness_preservation);
+				if (ctequery->jointree->quals == NULL &&
+					ctequery->limitOffset == NULL &&
+					ctequery->limitCount == NULL)
+				{
+					rte->functional_dependencies = list_copy(sub_rte->functional_dependencies);
+				}
+			}
+		}
 	}
 
 	rte->coltypes = list_copy(cte->ctecoltypes);
