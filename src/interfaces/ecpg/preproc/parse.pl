@@ -68,7 +68,8 @@ my %replace_string = (
 	'EQUALS_GREATER' => '=>',
 	'LESS_EQUALS' => '<=',
 	'GREATER_EQUALS' => '>=',
-	'NOT_EQUALS' => '<>',);
+	'NOT_EQUALS' => '<>',
+	'LEFT_ARROW' => '<-');
 
 # specific replace_types for specific non-terminals - never include the ':'
 # ECPG-only replace_types are defined in ecpg-replace_types

@@ -29,7 +29,7 @@ INSERT INTO t2 (c3, c4) VALUES (3, 30);
 CREATE VIEW v1 AS
 SELECT *
 FROM t1
-JOIN t2 KEY (c3) TO t1 (c1);
+JOIN t2 KEY (c3) -> t1 (c1);
 \d+ v1
 SELECT * FROM v1; -- ok
 
@@ -50,50 +50,50 @@ ALTER TABLE t1 RENAME COLUMN c1_renamed TO c1;
 
 SELECT * FROM v1; -- ok
 
-SELECT * FROM t1 JOIN t2 KEY (c3) TO t1 (c1); -- ok
-SELECT * FROM t1 JOIN t2 KEY (c3) TO t1 (c2); -- error
-SELECT * FROM t1 JOIN t2 KEY (c4) TO t1 (c1); -- error
-SELECT * FROM t1 JOIN t2 KEY (c3,c4) TO t1 (c1,c2); -- error
-SELECT * FROM t1 JOIN t2 KEY (c3) FROM t1 (c1); -- error
-SELECT * FROM t1 JOIN t2 KEY (c1) FROM t1 (c3); -- error
-SELECT * FROM t1 JOIN t2 KEY (c3) FROM t1 (c2); -- error
-SELECT * FROM t1 JOIN t2 KEY (c4) FROM t1 (c1); -- error
-SELECT * FROM t1 JOIN t2 KEY (c3,c4) FROM t1 (c1,c2); -- error
+SELECT * FROM t1 JOIN t2 KEY (c3) -> t1 (c1); -- ok
+SELECT * FROM t1 JOIN t2 KEY (c3) -> t1 (c2); -- error
+SELECT * FROM t1 JOIN t2 KEY (c4) -> t1 (c1); -- error
+SELECT * FROM t1 JOIN t2 KEY (c3,c4) -> t1 (c1,c2); -- error
+SELECT * FROM t1 JOIN t2 KEY (c3) <- t1 (c1); -- error
+SELECT * FROM t1 JOIN t2 KEY (c1) <- t1 (c3); -- error
+SELECT * FROM t1 JOIN t2 KEY (c3) <- t1 (c2); -- error
+SELECT * FROM t1 JOIN t2 KEY (c4) <- t1 (c1); -- error
+SELECT * FROM t1 JOIN t2 KEY (c3,c4) <- t1 (c1,c2); -- error
 
-SELECT * FROM t2 JOIN t1 KEY (c1) FROM t2 (c3); -- ok
-SELECT * FROM t2 JOIN t1 KEY (c1) FROM t2 (c4); -- error
-SELECT * FROM t2 JOIN t1 KEY (c2) FROM t2 (c3); -- error
-SELECT * FROM t2 JOIN t1 KEY (c1,c2) FROM t2 (c3,c4); -- error
-SELECT * FROM t2 JOIN t1 KEY (c1) TO t2 (c3); -- error
-SELECT * FROM t2 JOIN t1 KEY (c1) TO t2 (c4); -- error
-SELECT * FROM t2 JOIN t1 KEY (c2) TO t2 (c3); -- error
-SELECT * FROM t2 JOIN t1 KEY (c1,c2) TO t2 (c3,c4); -- error
+SELECT * FROM t2 JOIN t1 KEY (c1) <- t2 (c3); -- ok
+SELECT * FROM t2 JOIN t1 KEY (c1) <- t2 (c4); -- error
+SELECT * FROM t2 JOIN t1 KEY (c2) <- t2 (c3); -- error
+SELECT * FROM t2 JOIN t1 KEY (c1,c2) <- t2 (c3,c4); -- error
+SELECT * FROM t2 JOIN t1 KEY (c1) -> t2 (c3); -- error
+SELECT * FROM t2 JOIN t1 KEY (c1) -> t2 (c4); -- error
+SELECT * FROM t2 JOIN t1 KEY (c2) -> t2 (c3); -- error
+SELECT * FROM t2 JOIN t1 KEY (c1,c2) -> t2 (c3,c4); -- error
 
 ALTER TABLE t2 DROP CONSTRAINT t2_c3_fkey;
 
-SELECT * FROM t1 JOIN t2 KEY (c3) TO t1 (c1); -- error
-SELECT * FROM t2 JOIN t1 KEY (c1) FROM t2 (c3); -- error
+SELECT * FROM t1 JOIN t2 KEY (c3) -> t1 (c1); -- error
+SELECT * FROM t2 JOIN t1 KEY (c1) <- t2 (c3); -- error
 
 ALTER TABLE t1 ADD UNIQUE (c1,c2);
 ALTER TABLE t2 ADD CONSTRAINT t2_c3_c4_fkey FOREIGN KEY (c3,c4) REFERENCES t1 (c1,c2);
 
 CREATE VIEW v2 AS
-SELECT * FROM t1 JOIN t2 KEY (c3,c4) TO t1 (c1,c2); -- ok
-SELECT * FROM t1 JOIN t2 KEY (c3,c4) TO t1 (c1,c2); -- ok
+SELECT * FROM t1 JOIN t2 KEY (c3,c4) -> t1 (c1,c2); -- ok
+SELECT * FROM t1 JOIN t2 KEY (c3,c4) -> t1 (c1,c2); -- ok
 SELECT * FROM v2; -- ok
 \d+ v2
 
 CREATE VIEW v3 AS
-SELECT * FROM t2 JOIN t1 KEY (c1,c2) FROM t2 (c3,c4); -- ok
-SELECT * FROM t2 JOIN t1 KEY (c1,c2) FROM t2 (c3,c4); -- ok
+SELECT * FROM t2 JOIN t1 KEY (c1,c2) <- t2 (c3,c4); -- ok
+SELECT * FROM t2 JOIN t1 KEY (c1,c2) <- t2 (c3,c4); -- ok
 \d+ v3
 
 SELECT * FROM v3; -- ok
 
-SELECT * FROM t1 JOIN t2 KEY (c3) TO t1 (c1); -- error
-SELECT * FROM t2 JOIN t1 KEY (c1) FROM t2 (c3); -- error
-SELECT * FROM t1 JOIN t2 KEY (c3,c4) FROM t1 (c1,c2); -- error
-SELECT * FROM t2 JOIN t1 KEY (c1,c2) TO t2 (c3,c4); -- error
+SELECT * FROM t1 JOIN t2 KEY (c3) -> t1 (c1); -- error
+SELECT * FROM t2 JOIN t1 KEY (c1) <- t2 (c3); -- error
+SELECT * FROM t1 JOIN t2 KEY (c3,c4) <- t1 (c1,c2); -- error
+SELECT * FROM t2 JOIN t1 KEY (c1,c2) -> t2 (c3,c4); -- error
 
 --
 -- Test nulls and multiple tables
@@ -115,18 +115,18 @@ INSERT INTO t3 (c5, c6) VALUES (NULL, NULL); -- ok
 
 SELECT *
 FROM t1
-JOIN t2 KEY (c3,c4) TO t1 (c1,c2)
-JOIN t3 KEY (c5,c6) TO t1 (c1,c2);
+JOIN t2 KEY (c3,c4) -> t1 (c1,c2)
+JOIN t3 KEY (c5,c6) -> t1 (c1,c2);
 
 SELECT *
 FROM t1
-JOIN t2 KEY (c3,c4) TO t1 (c1,c2)
-LEFT JOIN t3 KEY (c5,c6) TO t1 (c1,c2);
+JOIN t2 KEY (c3,c4) -> t1 (c1,c2)
+LEFT JOIN t3 KEY (c5,c6) -> t1 (c1,c2);
 
 SELECT *
 FROM t1
-JOIN t2 KEY (c3,c4) TO t1 (c1,c2)
-RIGHT JOIN t3 KEY (c5,c6) TO t1 (c1,c2);
+JOIN t2 KEY (c3,c4) -> t1 (c1,c2)
+RIGHT JOIN t3 KEY (c5,c6) -> t1 (c1,c2);
 
 --
 -- Test defining foreign key constraints with MATCH FULL
@@ -148,15 +148,15 @@ INSERT INTO t4 (c7, c8) VALUES (NULL, NULL); -- ok
 
 SELECT *
 FROM t1
-JOIN t2 KEY (c3,c4) TO t1 (c1,c2)
-JOIN t4 KEY (c7,c8) TO t1 (c1,c2);
+JOIN t2 KEY (c3,c4) -> t1 (c1,c2)
+JOIN t4 KEY (c7,c8) -> t1 (c1,c2);
 
 SELECT *
 FROM t1
-JOIN t2 KEY (c3,c4) TO t1 (c1,c2)
-LEFT JOIN t4 KEY (c7,c8) TO t1 (c1,c2);
+JOIN t2 KEY (c3,c4) -> t1 (c1,c2)
+LEFT JOIN t4 KEY (c7,c8) -> t1 (c1,c2);
 
 SELECT *
 FROM t1
-JOIN t2 KEY (c3,c4) TO t1 (c1,c2)
-RIGHT JOIN t4 KEY (c7,c8) TO t1 (c1,c2);
+JOIN t2 KEY (c3,c4) -> t1 (c1,c2)
+RIGHT JOIN t4 KEY (c7,c8) -> t1 (c1,c2);
