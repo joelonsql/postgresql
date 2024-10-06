@@ -335,6 +335,7 @@ less_equals		"<="
 greater_equals	">="
 less_greater	"<>"
 not_equals		"!="
+left_arrow		"<-"
 
 /*
  * "self" is the set of chars that should be returned as single-character
@@ -852,6 +853,10 @@ cppline			{space}*#([^i][A-Za-z]*|{if}|{ifdef}|{ifndef}|{import})((\/\*[^*/]*\*+
 {not_equals}	{
 					/* We accept both "<>" and "!=" as meaning NOT_EQUALS */
 					return NOT_EQUALS;
+				}
+
+{left_arrow}	{
+					return LEFT_ARROW;
 				}
 
 {informix_special} {

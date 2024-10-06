@@ -680,6 +680,7 @@ static Node *makeRecursiveViewSelect(char *relname, List *aliases, Node *query);
 %token <ival>	ICONST PARAM
 %token			TYPECAST DOT_DOT COLON_EQUALS EQUALS_GREATER
 %token			LESS_EQUALS GREATER_EQUALS NOT_EQUALS
+%token			LEFT_ARROW
 
 /*
  * If you want to make any keyword changes, update the keyword table in
@@ -13829,9 +13830,15 @@ join_qual: USING '(' name_list ')' opt_alias_clause_for_join_using
 			;
 
 fk_direction:
-	FROM	{ $$ = FKDIR_FROM; }
-	| TO	{ $$ = FKDIR_TO; }
+	LEFT_ARROW	{ $$ = FKDIR_FROM; }
+	| Op	{
+				if (strcmp($1, "->") == 0)
+					$$ = FKDIR_TO;
+				else
+					parser_yyerror("Expected '->' for FKDIR_TO");
+			}
 	;
+
 
 relation_expr:
 			qualified_name
