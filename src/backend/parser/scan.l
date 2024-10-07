@@ -995,8 +995,6 @@ other			.
 								return NOT_EQUALS;
 							if (yytext[0] == '!' && yytext[1] == '=')
 								return NOT_EQUALS;
-							if (yytext[0] == '<' && yytext[1] == '-')
-								return LEFT_ARROW;
 						}
 					}
 
