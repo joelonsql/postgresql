@@ -513,9 +513,16 @@ ProcessCopyOptions(ParseState *pstate,
 		}
 		else if (strcmp(defel->defname, "delimiter") == 0)
 		{
-			if (opts_out->delim)
+			if (opts_out->delim || opts_out->delim_none)
 				errorConflictingDefElem(defel, pstate);
 			opts_out->delim = defGetString(defel);
+		}
+		else if (strcmp(defel->defname, "delimiter_none") == 0)
+		{
+			if (opts_out->delim || opts_out->delim_none)
+				errorConflictingDefElem(defel, pstate);
+			opts_out->delim_none = true;
+			opts_out->delim = "";
 		}
 		else if (strcmp(defel->defname, "null") == 0)
 		{
@@ -538,19 +545,29 @@ ProcessCopyOptions(ParseState *pstate,
 		}
 		else if (strcmp(defel->defname, "quote") == 0)
 		{
-			if (opts_out->quote)
+			if (opts_out->quote || opts_out->quote_none)
 				errorConflictingDefElem(defel, pstate);
 			opts_out->quote = defGetString(defel);
 		}
+		else if (strcmp(defel->defname, "quote_none") == 0)
+		{
+			if (opts_out->quote || opts_out->quote_none || opts_out->escape ||
+				opts_out->force_quote || opts_out->force_quote_all)
+				errorConflictingDefElem(defel, pstate);
+			opts_out->quote_none = true;
+			opts_out->quote = "";
+			opts_out->escape = "";
+		}
 		else if (strcmp(defel->defname, "escape") == 0)
 		{
-			if (opts_out->escape)
+			if (opts_out->escape || opts_out->quote_none)
 				errorConflictingDefElem(defel, pstate);
 			opts_out->escape = defGetString(defel);
 		}
 		else if (strcmp(defel->defname, "force_quote") == 0)
 		{
-			if (opts_out->force_quote || opts_out->force_quote_all)
+			if (opts_out->force_quote || opts_out->force_quote_all ||
+				opts_out->quote_none)
 				errorConflictingDefElem(defel, pstate);
 			if (defel->arg && IsA(defel->arg, A_Star))
 				opts_out->force_quote_all = true;
@@ -672,14 +689,14 @@ ProcessCopyOptions(ParseState *pstate,
 				 errmsg("only ON_ERROR STOP is allowed in BINARY mode")));
 
 	/* Set defaults for omitted options */
-	if (!opts_out->delim)
+	if (!opts_out->delim && !opts_out->delim_none)
 		opts_out->delim = opts_out->csv_mode ? "," : "\t";
 
 	if (!opts_out->null_print)
 		opts_out->null_print = opts_out->csv_mode ? "" : "\\N";
 	opts_out->null_print_len = strlen(opts_out->null_print);
 
-	if (opts_out->csv_mode)
+	if (opts_out->csv_mode && !opts_out->quote_none)
 	{
 		if (!opts_out->quote)
 			opts_out->quote = "\"";
@@ -688,14 +705,15 @@ ProcessCopyOptions(ParseState *pstate,
 	}
 
 	/* Only single-byte delimiter strings are supported. */
-	if (strlen(opts_out->delim) != 1)
+	if (!opts_out->delim_none && strlen(opts_out->delim) != 1)
 		ereport(ERROR,
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 				 errmsg("COPY delimiter must be a single one-byte character")));
 
 	/* Disallow end-of-line characters */
-	if (strchr(opts_out->delim, '\r') != NULL ||
-		strchr(opts_out->delim, '\n') != NULL)
+	if (!opts_out->delim_none &&
+		(strchr(opts_out->delim, '\r') != NULL ||
+		strchr(opts_out->delim, '\n') != NULL))
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 				 errmsg("COPY delimiter cannot be newline or carriage return")));
@@ -727,7 +745,7 @@ ProcessCopyOptions(ParseState *pstate,
 	 * future-proofing.  Likewise we disallow all digits though only octal
 	 * digits are actually dangerous.
 	 */
-	if (!opts_out->csv_mode &&
+	if (!opts_out->csv_mode && !opts_out->delim_none &&
 		strchr("\\.abcdefghijklmnopqrstuvwxyz0123456789",
 			   opts_out->delim[0]) != NULL)
 		ereport(ERROR,
@@ -742,30 +760,46 @@ ProcessCopyOptions(ParseState *pstate,
 				 errmsg("cannot specify %s in BINARY mode", "HEADER")));
 
 	/* Check quote */
-	if (!opts_out->csv_mode && opts_out->quote != NULL)
+	if (!opts_out->csv_mode && !opts_out->quote_none && opts_out->quote != NULL)
 		ereport(ERROR,
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 		/*- translator: %s is the name of a COPY option, e.g. ON_ERROR */
 				 errmsg("COPY %s requires CSV mode", "QUOTE")));
 
-	if (opts_out->csv_mode && strlen(opts_out->quote) != 1)
+	if (!opts_out->csv_mode && opts_out->quote_none)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+		/*- translator: %s is the name of a COPY option, e.g. ON_ERROR */
+				 errmsg("COPY %s requires CSV mode", "QUOTE_NONE")));
+
+	if (!opts_out->csv_mode && opts_out->delim_none)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+		/*- translator: %s is the name of a COPY option, e.g. ON_ERROR */
+				 errmsg("COPY %s requires CSV mode", "DELIMITER_NONE")));
+
+	if (opts_out->csv_mode && !opts_out->quote_none &&
+		strlen(opts_out->quote) != 1)
 		ereport(ERROR,
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 				 errmsg("COPY quote must be a single one-byte character")));
 
-	if (opts_out->csv_mode && opts_out->delim[0] == opts_out->quote[0])
+	if (opts_out->csv_mode && !opts_out->quote_none && !opts_out->delim_none &&
+		opts_out->delim[0] == opts_out->quote[0])
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 				 errmsg("COPY delimiter and quote must be different")));
 
 	/* Check escape */
-	if (!opts_out->csv_mode && opts_out->escape != NULL)
+	if (!opts_out->csv_mode && !opts_out->quote_none &&
+		opts_out->escape != NULL)
 		ereport(ERROR,
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 		/*- translator: %s is the name of a COPY option, e.g. ON_ERROR */
 				 errmsg("COPY %s requires CSV mode", "ESCAPE")));
 
-	if (opts_out->csv_mode && strlen(opts_out->escape) != 1)
+	if (opts_out->csv_mode && !opts_out->quote_none &&
+		strlen(opts_out->escape) != 1)
 		ereport(ERROR,
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 				 errmsg("COPY escape must be a single one-byte character")));
@@ -814,7 +848,7 @@ ProcessCopyOptions(ParseState *pstate,
 						"COPY TO")));
 
 	/* Don't allow the delimiter to appear in the null string. */
-	if (strchr(opts_out->null_print, opts_out->delim[0]) != NULL)
+	if (!opts_out->delim_none && strchr(opts_out->null_print, opts_out->delim[0]) != NULL)
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 		/*- translator: %s is the name of a COPY option, e.g. NULL */
@@ -822,7 +856,7 @@ ProcessCopyOptions(ParseState *pstate,
 						"NULL")));
 
 	/* Don't allow the CSV quote char to appear in the null string. */
-	if (opts_out->csv_mode &&
+	if (opts_out->csv_mode && !opts_out->quote_none &&
 		strchr(opts_out->null_print, opts_out->quote[0]) != NULL)
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
@@ -850,7 +884,8 @@ ProcessCopyOptions(ParseState *pstate,
 							"COPY TO")));
 
 		/* Don't allow the delimiter to appear in the default string. */
-		if (strchr(opts_out->default_print, opts_out->delim[0]) != NULL)
+		if (!opts_out->delim_none &&
+			strchr(opts_out->default_print, opts_out->delim[0]) != NULL)
 			ereport(ERROR,
 					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 			/*- translator: %s is the name of a COPY option, e.g. NULL */
@@ -858,7 +893,7 @@ ProcessCopyOptions(ParseState *pstate,
 							"DEFAULT")));
 
 		/* Don't allow the CSV quote char to appear in the default string. */
-		if (opts_out->csv_mode &&
+		if (opts_out->csv_mode && !opts_out->quote_none &&
 			strchr(opts_out->default_print, opts_out->quote[0]) != NULL)
 			ereport(ERROR,
 					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),

@@ -71,7 +71,9 @@ typedef struct CopyFormatOptions
 	char	   *default_print;	/* DEFAULT marker string */
 	int			default_print_len;	/* length of same */
 	char	   *delim;			/* column delimiter (must be 1 byte) */
+	bool		delim_none;		/* true if DELIMITER NONE specified */
 	char	   *quote;			/* CSV quote char (must be 1 byte) */
+	bool		quote_none;		/* true if QUOTE NONE specified */
 	char	   *escape;			/* CSV escape char (must be 1 byte) */
 	List	   *force_quote;	/* list of column names */
 	bool		force_quote_all;	/* FORCE_QUOTE *? */

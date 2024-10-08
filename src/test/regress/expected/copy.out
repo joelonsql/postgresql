@@ -63,6 +63,18 @@ select test from copytest2;
 ------
 (0 rows)
 
+--- test delimiter none quote none in CSV mode
+truncate copytest2;
+insert into copytest2 (test) values ('quote " comma ,');
+copy copytest2(test) to :'filename' csv quote none delimiter none;
+truncate copytest2;
+copy copytest2(test) from :'filename' csv quote none delimiter none;
+select test from copytest2;
+      test       
+-----------------
+ quote " comma ,
+(1 row)
+
 -- test header line feature
 create temp table copytest3 (
 	c1 int,

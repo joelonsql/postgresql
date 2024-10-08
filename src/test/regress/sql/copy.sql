@@ -66,6 +66,13 @@ line6
 \.
 select test from copytest2;
 
+--- test delimiter none quote none in CSV mode
+truncate copytest2;
+insert into copytest2 (test) values ('quote " comma ,');
+copy copytest2(test) to :'filename' csv quote none delimiter none;
+truncate copytest2;
+copy copytest2(test) from :'filename' csv quote none delimiter none;
+select test from copytest2;
 
 -- test header line feature
 

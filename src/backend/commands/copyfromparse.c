@@ -1175,11 +1175,12 @@ CopyReadLineText(CopyFromState cstate)
 
 	/* CSV variables */
 	bool		in_quote = false,
-				last_was_esc = false;
+				last_was_esc = false,
+				quote_none = cstate->opts.quote_none;
 	char		quotec = '\0';
 	char		escapec = '\0';
 
-	if (cstate->opts.csv_mode)
+	if (cstate->opts.csv_mode && !quote_none)
 	{
 		quotec = cstate->opts.quote[0];
 		escapec = cstate->opts.escape[0];
@@ -1256,7 +1257,7 @@ CopyReadLineText(CopyFromState cstate)
 		prev_raw_ptr = input_buf_ptr;
 		c = copy_input_buf[input_buf_ptr++];
 
-		if (cstate->opts.csv_mode)
+		if (cstate->opts.csv_mode && !quote_none)
 		{
 			/*
 			 * If character is '\r', we may need to look ahead below.  Force
