@@ -71,19 +71,27 @@ COPY x from stdin (log_verbosity default, log_verbosity verbose);
 
 -- incorrect options
 COPY x to stdout (format BINARY, delimiter ',');
+COPY x to stdout (format RAW, delimiter ',');
 COPY x to stdout (format BINARY, null 'x');
+COPY x to stdout (format RAW, null 'x');
 COPY x from stdin (format BINARY, on_error ignore);
 COPY x from stdin (on_error unsupported);
 COPY x to stdout (format TEXT, force_quote(a));
 COPY x to stdout (format TEXT, force_quote *);
+COPY x to stdout (format RAW, force_quote(a));
+COPY x to stdout (format RAW, force_quote *);
 COPY x from stdin (format CSV, force_quote(a));
 COPY x from stdin (format CSV, force_quote *);
 COPY x from stdin (format TEXT, force_not_null(a));
 COPY x from stdin (format TEXT, force_not_null *);
+COPY x from stdin (format RAW, force_not_null(a));
+COPY x from stdin (format RAW, force_not_null *);
 COPY x to stdout (format CSV, force_not_null(a));
 COPY x to stdout (format CSV, force_not_null *);
 COPY x from stdin (format TEXT, force_null(a));
 COPY x from stdin (format TEXT, force_null *);
+COPY x from stdin (format RAW, force_null(a));
+COPY x from stdin (format RAW, force_null *);
 COPY x to stdout (format CSV, force_null(a));
 COPY x to stdout (format CSV, force_null *);
 COPY x to stdout (format BINARY, on_error unsupported);
@@ -636,8 +644,9 @@ select id, text_value, ts_value from copy_default;
 
 truncate copy_default;
 
--- DEFAULT cannot be used in binary mode
+-- DEFAULT cannot be used in binary or raw mode
 copy copy_default from stdin with (format binary, default '\D');
+copy copy_default from stdin with (format raw, default '\D');
 
 -- DEFAULT cannot be new line nor carriage return
 copy copy_default from stdin with (default E'\n');
@@ -707,3 +716,59 @@ truncate copy_default;
 
 -- DEFAULT cannot be used in COPY TO
 copy (select 1 as test) TO stdout with (default '\D');
+
+--
+-- Test COPY FORMAT errors
+--
+
+\getenv abs_builddir PG_ABS_BUILDDIR
+\set filename :abs_builddir '/results/copy_raw_test_errors.data'
+
+-- Test single column requirement
+CREATE TABLE copy_raw_test_errors (col1 text, col2 text);
+COPY copy_raw_test_errors TO :'filename' (FORMAT raw);
+COPY copy_raw_test_errors (col1, col2) TO :'filename' (FORMAT raw);
+COPY copy_raw_test_errors FROM :'filename' (FORMAT raw);
+COPY copy_raw_test_errors (col1, col2) FROM :'filename' (FORMAT raw);
+
+-- Test inconsistent newline style
+\o :filename
+\qecho -n line1
+\qecho -n '\r'
+\qecho -n line2
+\qecho -n '\n'
+\o
+COPY copy_raw_test_errors (col1) FROM :'filename' (FORMAT raw);
+
+\o :filename
+\qecho -n line1
+\qecho -n '\r\n'
+\qecho -n line2
+\qecho -n '\n'
+\o
+COPY copy_raw_test_errors (col1) FROM :'filename' (FORMAT raw);
+
+\o :filename
+\qecho -n line1
+\qecho -n '\r\n'
+\qecho -n line2
+\qecho -n '\r'
+\o
+COPY copy_raw_test_errors (col1) FROM :'filename' (FORMAT raw);
+
+\o :filename
+\qecho -n line1
+\qecho -n '\r\n'
+\qecho -n line2
+\qecho -n '\r'
+\qecho -n line3
+\o
+COPY copy_raw_test_errors (col1) FROM :'filename' (FORMAT raw);
+
+\o :filename
+\qecho -n line1
+\qecho -n '\n'
+\qecho -n line2
+\qecho -n '\r\n'
+\o
+COPY copy_raw_test_errors (col1) FROM :'filename' (FORMAT raw);

@@ -516,6 +516,8 @@ ProcessCopyOptions(ParseState *pstate,
 				opts_out->format = COPY_FORMAT_CSV;
 			else if (strcmp(fmt, "binary") == 0)
 				opts_out->format = COPY_FORMAT_BINARY;
+			else if (strcmp(fmt, "raw") == 0)
+				opts_out->format = COPY_FORMAT_RAW;
 			else
 				ereport(ERROR,
 						(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
@@ -710,6 +712,12 @@ ProcessCopyOptions(ParseState *pstate,
 			/*- translator: %s is the name of a COPY option, e.g. ON_ERROR */
 					errmsg("cannot specify %s in BINARY mode", "DELIMITER")));
 
+		if (opts_out->format == COPY_FORMAT_RAW)
+			ereport(ERROR,
+					(errcode(ERRCODE_SYNTAX_ERROR),
+			/*- translator: %s is the name of a COPY option, e.g. ON_ERROR */
+					errmsg("cannot specify %s in RAW mode", "DELIMITER")));
+
 		/* Only single-byte delimiter strings are supported. */
 		if (strlen(opts_out->delim) != 1)
 			ereport(ERROR,
@@ -740,11 +748,11 @@ ProcessCopyOptions(ParseState *pstate,
 					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 					errmsg("COPY delimiter cannot be \"%s\"", opts_out->delim)));
 	}
-	else if (opts_out->format != COPY_FORMAT_BINARY)
-	{
-		/* Set default delimiter */
-		opts_out->delim = opts_out->format == COPY_FORMAT_CSV ? "," : "\t";
-	}
+	/* Set default delimiter */
+	else if (opts_out->format == COPY_FORMAT_CSV)
+		opts_out->delim = ",";
+	else if (opts_out->format == COPY_FORMAT_TEXT)
+		opts_out->delim = "\t";
 
 	/* --- NULL option --- */
 	if (opts_out->null_print)
@@ -754,6 +762,11 @@ ProcessCopyOptions(ParseState *pstate,
 					(errcode(ERRCODE_SYNTAX_ERROR),
 					errmsg("cannot specify %s in BINARY mode", "NULL")));
 
+		if (opts_out->format == COPY_FORMAT_RAW)
+			ereport(ERROR,
+					(errcode(ERRCODE_SYNTAX_ERROR),
+					errmsg("cannot specify %s in RAW mode", "NULL")));
+
 		/* Disallow end-of-line characters */
 		if (strchr(opts_out->null_print, '\r') != NULL ||
 			strchr(opts_out->null_print, '\n') != NULL)
@@ -761,11 +774,12 @@ ProcessCopyOptions(ParseState *pstate,
 					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 					errmsg("COPY null representation cannot use newline or carriage return")));
 	}
-	else if (opts_out->format != COPY_FORMAT_BINARY)
-	{
-		/* Set default null_print */
-		opts_out->null_print = opts_out->format == COPY_FORMAT_CSV ? "" : "\\N";
-	}
+	/* Set default null_print */
+	else if (opts_out->format == COPY_FORMAT_CSV)
+		opts_out->null_print = "";
+	else if (opts_out->format == COPY_FORMAT_TEXT)
+		opts_out->null_print = "\\N";
+
 	if (opts_out->null_print)
 		opts_out->null_print_len = strlen(opts_out->null_print);
 
@@ -924,6 +938,11 @@ ProcessCopyOptions(ParseState *pstate,
 			ereport(ERROR,
 					(errcode(ERRCODE_SYNTAX_ERROR),
 					 errmsg("cannot specify %s in BINARY mode", "DEFAULT")));
+
+		if (opts_out->format == COPY_FORMAT_RAW)
+			ereport(ERROR,
+					(errcode(ERRCODE_SYNTAX_ERROR),
+					 errmsg("cannot specify %s in RAW mode", "DEFAULT")));
 
 		/* Assert options have been set (defaults applied if not specified) */
 		Assert(opts_out->delim);
