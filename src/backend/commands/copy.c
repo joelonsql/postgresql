@@ -672,6 +672,14 @@ ProcessCopyOptions(ParseState *pstate,
 	}
 
 	/*
+	 * Set default format if not specified.
+	 * This isn't strictly necessary since COPY_FORMAT_TEXT is 0 and
+	 * opts_out is palloc0'd, but do it for clarity.
+	 */
+	if (!format_specified)
+		opts_out->format = COPY_FORMAT_TEXT;
+
+	/*
 	 * Check for incompatible options (must do these three before inserting
 	 * defaults)
 	 */
