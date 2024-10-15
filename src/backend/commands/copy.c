@@ -925,6 +925,15 @@ ProcessCopyOptions(ParseState *pstate,
 							"COPY TO")));
 	}
 
+	/* --- ON_ERROR option --- */
+	if (opts_out->on_error != COPY_ON_ERROR_STOP)
+	{
+		if (opts_out->format == COPY_FORMAT_BINARY)
+			ereport(ERROR,
+					(errcode(ERRCODE_SYNTAX_ERROR),
+					errmsg("only ON_ERROR STOP is allowed in BINARY mode")));
+	}
+
 	/*
 	 * Check for incompatible options (must do these three before inserting
 	 * defaults)
@@ -968,13 +977,6 @@ ProcessCopyOptions(ParseState *pstate,
 					errmsg("CSV quote character must not appear in the %s specification",
 							"NULL")));
 	}
-
-	/* Check on_error */
-	if (opts_out->format == COPY_FORMAT_BINARY &&
-		opts_out->on_error != COPY_ON_ERROR_STOP)
-		ereport(ERROR,
-				(errcode(ERRCODE_SYNTAX_ERROR),
-				 errmsg("only ON_ERROR STOP is allowed in BINARY mode")));
 
 	if (opts_out->reject_limit && !opts_out->on_error)
 		ereport(ERROR,
