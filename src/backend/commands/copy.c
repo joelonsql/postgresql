@@ -679,34 +679,84 @@ ProcessCopyOptions(ParseState *pstate,
 	if (!format_specified)
 		opts_out->format = COPY_FORMAT_TEXT;
 
+	/* --- DELIMITER option --- */
+	if (opts_out->delim)
+	{
+		if (opts_out->format == COPY_FORMAT_BINARY)
+			ereport(ERROR,
+					(errcode(ERRCODE_SYNTAX_ERROR),
+			/*- translator: %s is the name of a COPY option, e.g. ON_ERROR */
+					errmsg("cannot specify %s in BINARY mode", "DELIMITER")));
+
+		/* Only single-byte delimiter strings are supported. */
+		if (strlen(opts_out->delim) != 1)
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					errmsg("COPY delimiter must be a single one-byte character")));
+
+		/* Disallow end-of-line characters */
+		if (strchr(opts_out->delim, '\r') != NULL ||
+			strchr(opts_out->delim, '\n') != NULL)
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+					errmsg("COPY delimiter cannot be newline or carriage return")));
+
+		/*
+		 * Disallow unsafe delimiter characters in non-CSV mode.  We can't allow
+		 * backslash because it would be ambiguous.  We can't allow the other
+		 * cases because data characters matching the delimiter must be
+		 * backslashed, and certain backslash combinations are interpreted
+		 * non-literally by COPY IN.  Disallowing all lower case ASCII letters is
+		 * more than strictly necessary, but seems best for consistency and
+		 * future-proofing.  Likewise we disallow all digits though only octal
+		 * digits are actually dangerous.
+		 */
+		if (opts_out->format != COPY_FORMAT_CSV &&
+			strchr("\\.abcdefghijklmnopqrstuvwxyz0123456789",
+				opts_out->delim[0]) != NULL)
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+					errmsg("COPY delimiter cannot be \"%s\"", opts_out->delim)));
+	}
+	else if (opts_out->format != COPY_FORMAT_BINARY)
+	{
+		/* Set default delimiter */
+		opts_out->delim = opts_out->format == COPY_FORMAT_CSV ? "," : "\t";
+	}
+
+	/* --- NULL option --- */
+	if (opts_out->null_print)
+	{
+		if (opts_out->format == COPY_FORMAT_BINARY)
+			ereport(ERROR,
+					(errcode(ERRCODE_SYNTAX_ERROR),
+					errmsg("cannot specify %s in BINARY mode", "NULL")));
+
+		/* Disallow end-of-line characters */
+		if (strchr(opts_out->null_print, '\r') != NULL ||
+			strchr(opts_out->null_print, '\n') != NULL)
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+					errmsg("COPY null representation cannot use newline or carriage return")));
+	}
+	else if (opts_out->format != COPY_FORMAT_BINARY)
+	{
+		/* Set default null_print */
+		opts_out->null_print = opts_out->format == COPY_FORMAT_CSV ? "" : "\\N";
+	}
+	if (opts_out->null_print)
+		opts_out->null_print_len = strlen(opts_out->null_print);
+
 	/*
 	 * Check for incompatible options (must do these three before inserting
 	 * defaults)
 	 */
-	if (opts_out->format == COPY_FORMAT_BINARY && opts_out->delim)
-		ereport(ERROR,
-				(errcode(ERRCODE_SYNTAX_ERROR),
-		/*- translator: %s is the name of a COPY option, e.g. ON_ERROR */
-				 errmsg("cannot specify %s in BINARY mode", "DELIMITER")));
-
-	if (opts_out->format == COPY_FORMAT_BINARY && opts_out->null_print)
-		ereport(ERROR,
-				(errcode(ERRCODE_SYNTAX_ERROR),
-				 errmsg("cannot specify %s in BINARY mode", "NULL")));
-
 	if (opts_out->format == COPY_FORMAT_BINARY && opts_out->default_print)
 		ereport(ERROR,
 				(errcode(ERRCODE_SYNTAX_ERROR),
 				 errmsg("cannot specify %s in BINARY mode", "DEFAULT")));
 
 	/* Set defaults for omitted options */
-	if (!opts_out->delim)
-		opts_out->delim = opts_out->format == COPY_FORMAT_CSV ? "," : "\t";
-
-	if (!opts_out->null_print)
-		opts_out->null_print = opts_out->format == COPY_FORMAT_CSV ? "" : "\\N";
-	opts_out->null_print_len = strlen(opts_out->null_print);
-
 	if (opts_out->format == COPY_FORMAT_CSV)
 	{
 		if (!opts_out->quote)
@@ -714,25 +764,6 @@ ProcessCopyOptions(ParseState *pstate,
 		if (!opts_out->escape)
 			opts_out->escape = opts_out->quote;
 	}
-
-	/* Only single-byte delimiter strings are supported. */
-	if (strlen(opts_out->delim) != 1)
-		ereport(ERROR,
-				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-				 errmsg("COPY delimiter must be a single one-byte character")));
-
-	/* Disallow end-of-line characters */
-	if (strchr(opts_out->delim, '\r') != NULL ||
-		strchr(opts_out->delim, '\n') != NULL)
-		ereport(ERROR,
-				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-				 errmsg("COPY delimiter cannot be newline or carriage return")));
-
-	if (strchr(opts_out->null_print, '\r') != NULL ||
-		strchr(opts_out->null_print, '\n') != NULL)
-		ereport(ERROR,
-				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-				 errmsg("COPY null representation cannot use newline or carriage return")));
 
 	if (opts_out->default_print)
 	{
@@ -744,23 +775,6 @@ ProcessCopyOptions(ParseState *pstate,
 					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 					 errmsg("COPY default representation cannot use newline or carriage return")));
 	}
-
-	/*
-	 * Disallow unsafe delimiter characters in non-CSV mode.  We can't allow
-	 * backslash because it would be ambiguous.  We can't allow the other
-	 * cases because data characters matching the delimiter must be
-	 * backslashed, and certain backslash combinations are interpreted
-	 * non-literally by COPY IN.  Disallowing all lower case ASCII letters is
-	 * more than strictly necessary, but seems best for consistency and
-	 * future-proofing.  Likewise we disallow all digits though only octal
-	 * digits are actually dangerous.
-	 */
-	if (opts_out->format != COPY_FORMAT_CSV &&
-		strchr("\\.abcdefghijklmnopqrstuvwxyz0123456789",
-			   opts_out->delim[0]) != NULL)
-		ereport(ERROR,
-				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-				 errmsg("COPY delimiter cannot be \"%s\"", opts_out->delim)));
 
 	/* Check header */
 	if (opts_out->format == COPY_FORMAT_BINARY && opts_out->header_line)
@@ -780,11 +794,6 @@ ProcessCopyOptions(ParseState *pstate,
 		ereport(ERROR,
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 				 errmsg("COPY quote must be a single one-byte character")));
-
-	if (opts_out->format == COPY_FORMAT_CSV && opts_out->delim[0] == opts_out->quote[0])
-		ereport(ERROR,
-				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-				 errmsg("COPY delimiter and quote must be different")));
 
 	/* Check escape */
 	if (opts_out->format != COPY_FORMAT_CSV && opts_out->escape != NULL)
@@ -845,22 +854,44 @@ ProcessCopyOptions(ParseState *pstate,
 				 errmsg("COPY %s cannot be used with %s", "FORCE_NULL",
 						"COPY TO")));
 
-	/* Don't allow the delimiter to appear in the null string. */
-	if (strchr(opts_out->null_print, opts_out->delim[0]) != NULL)
-		ereport(ERROR,
-				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-		/*- translator: %s is the name of a COPY option, e.g. NULL */
-				 errmsg("COPY delimiter character must not appear in the %s specification",
-						"NULL")));
+	 /* Checks specific to the CSV and TEXT formats */
+	if (opts_out->format == COPY_FORMAT_TEXT ||
+		opts_out->format == COPY_FORMAT_CSV)
+	{
+		/* Assert options have been set (defaults applied if not specified) */
+		Assert(opts_out->delim);
+		Assert(opts_out->null_print);
 
-	/* Don't allow the CSV quote char to appear in the null string. */
-	if (opts_out->format == COPY_FORMAT_CSV &&
-		strchr(opts_out->null_print, opts_out->quote[0]) != NULL)
-		ereport(ERROR,
-				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-		/*- translator: %s is the name of a COPY option, e.g. NULL */
-				 errmsg("CSV quote character must not appear in the %s specification",
-						"NULL")));
+		/* Don't allow the delimiter to appear in the null string. */
+		if (strchr(opts_out->null_print, opts_out->delim[0]) != NULL)
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+			/*- translator: %s is the name of a COPY option, e.g. NULL */
+					errmsg("COPY delimiter character must not appear in the %s specification",
+							"NULL")));
+	}
+
+	 /* Checks specific to the CSV format */
+	if (opts_out->format == COPY_FORMAT_CSV)
+	{
+		/* Assert options have been set (defaults applied if not specified) */
+		Assert(opts_out->delim);
+		Assert(opts_out->quote);
+		Assert(opts_out->null_print);
+
+		if (opts_out->delim[0] == opts_out->quote[0])
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+					errmsg("COPY delimiter and quote must be different")));
+
+		/* Don't allow the CSV quote char to appear in the null string. */
+		if (strchr(opts_out->null_print, opts_out->quote[0]) != NULL)
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+			/*- translator: %s is the name of a COPY option, e.g. NULL */
+					errmsg("CSV quote character must not appear in the %s specification",
+							"NULL")));
+	}
 
 	/* Check freeze */
 	if (opts_out->freeze && !is_from)
