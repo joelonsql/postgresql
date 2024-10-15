@@ -767,6 +767,26 @@ ProcessCopyOptions(ParseState *pstate,
 		opts_out->quote = "\"";
 	}
 
+	/* --- ESCAPE option --- */
+	if (opts_out->escape)
+	{
+		if (opts_out->format != COPY_FORMAT_CSV)
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+			/*- translator: %s is the name of a COPY option, e.g. ON_ERROR */
+					errmsg("COPY %s requires CSV mode", "ESCAPE")));
+
+		if (strlen(opts_out->escape) != 1)
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					errmsg("COPY escape must be a single one-byte character")));
+	}
+	else if (opts_out->format == COPY_FORMAT_CSV)
+	{
+		/* Set default escape to quote character */
+		opts_out->escape = opts_out->quote;
+	}
+
 	/*
 	 * Check for incompatible options (must do these three before inserting
 	 * defaults)
@@ -775,13 +795,6 @@ ProcessCopyOptions(ParseState *pstate,
 		ereport(ERROR,
 				(errcode(ERRCODE_SYNTAX_ERROR),
 				 errmsg("cannot specify %s in BINARY mode", "DEFAULT")));
-
-	/* Set defaults for omitted options */
-	if (opts_out->format == COPY_FORMAT_CSV)
-	{
-		if (!opts_out->escape)
-			opts_out->escape = opts_out->quote;
-	}
 
 	if (opts_out->default_print)
 	{
@@ -800,18 +813,6 @@ ProcessCopyOptions(ParseState *pstate,
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 		/*- translator: %s is the name of a COPY option, e.g. ON_ERROR */
 				 errmsg("cannot specify %s in BINARY mode", "HEADER")));
-
-	/* Check escape */
-	if (opts_out->format != COPY_FORMAT_CSV && opts_out->escape != NULL)
-		ereport(ERROR,
-				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-		/*- translator: %s is the name of a COPY option, e.g. ON_ERROR */
-				 errmsg("COPY %s requires CSV mode", "ESCAPE")));
-
-	if (opts_out->format == COPY_FORMAT_CSV && strlen(opts_out->escape) != 1)
-		ereport(ERROR,
-				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-				 errmsg("COPY escape must be a single one-byte character")));
 
 	/* Check force_quote */
 	if (opts_out->format != COPY_FORMAT_CSV && (opts_out->force_quote ||
