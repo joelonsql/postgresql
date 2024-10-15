@@ -59,6 +59,7 @@ typedef enum CopyFormat
 	COPY_FORMAT_TEXT,
 	COPY_FORMAT_BINARY,
 	COPY_FORMAT_CSV,
+	COPY_FORMAT_RAW,
 } CopyFormat;
 
 /*

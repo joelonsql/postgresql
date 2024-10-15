@@ -113,6 +113,7 @@ static void CopyOneRowTo(CopyToState cstate, TupleTableSlot *slot);
 static void CopyAttributeOutText(CopyToState cstate, const char *string);
 static void CopyAttributeOutCSV(CopyToState cstate, const char *string,
 								bool use_quote);
+static void CopyAttributeOutRaw(CopyToState cstate, const char *string);
 
 /* Low-level communications functions */
 static void SendCopyBegin(CopyToState cstate);
@@ -570,6 +571,13 @@ BeginCopyTo(ParseState *pstate,
 	/* Generate or convert list of attributes to process */
 	cstate->attnumlist = CopyGetAttnums(tupDesc, cstate->rel, attnamelist);
 
+	/* Enforce single column requirement for RAW format */
+	if (cstate->opts.format == COPY_FORMAT_RAW &&
+		list_length(cstate->attnumlist) != 1)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+					errmsg("COPY with format 'raw' must specify exactly one column")));
+
 	num_phys_attrs = tupDesc->natts;
 
 	/* Convert FORCE_QUOTE name list to per-column flags, check validity */
@@ -835,8 +843,10 @@ DoCopyTo(CopyToState cstate)
 
 				if (cstate->opts.format == COPY_FORMAT_CSV)
 					CopyAttributeOutCSV(cstate, colname, false);
-				else
+				else if (cstate->opts.format == COPY_FORMAT_TEXT)
 					CopyAttributeOutText(cstate, colname);
+				else if (cstate->opts.format == COPY_FORMAT_RAW)
+					CopyAttributeOutRaw(cstate, colname);
 			}
 
 			CopySendEndOfRow(cstate);
@@ -917,7 +927,8 @@ CopyOneRowTo(CopyToState cstate, TupleTableSlot *slot)
 	/* Make sure the tuple is fully deconstructed */
 	slot_getallattrs(slot);
 
-	if (cstate->opts.format != COPY_FORMAT_BINARY)
+	if (cstate->opts.format == COPY_FORMAT_TEXT ||
+		cstate->opts.format == COPY_FORMAT_CSV)
 	{
 		bool		need_delim = false;
 
@@ -945,7 +956,7 @@ CopyOneRowTo(CopyToState cstate, TupleTableSlot *slot)
 			}
 		}
 	}
-	else
+	else if (cstate->opts.format == COPY_FORMAT_BINARY)
 	{
 		foreach_int(attnum, cstate->attnumlist)
 		{
@@ -965,6 +976,37 @@ CopyOneRowTo(CopyToState cstate, TupleTableSlot *slot)
 			}
 		}
 	}
+	else if (cstate->opts.format == COPY_FORMAT_RAW)
+	{
+		int			attnum;
+		Datum		value;
+		bool		isnull;
+
+		/* Ensure only one column is being copied */
+		if (list_length(cstate->attnumlist) != 1)
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("COPY with format 'raw' must specify exactly one column")));
+
+		attnum = linitial_int(cstate->attnumlist);
+		value = slot->tts_values[attnum - 1];
+		isnull = slot->tts_isnull[attnum - 1];
+
+		if (!isnull)
+		{
+			char	   *string = OutputFunctionCall(&out_functions[attnum - 1],
+													value);
+			CopyAttributeOutRaw(cstate, string);
+		}
+		/* For RAW format, we don't send anything for NULL values */
+	}
+	else
+	{
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("Unsupported COPY format")));
+	}
+
 
 	CopySendEndOfRow(cstate);
 
@@ -1217,6 +1259,28 @@ CopyAttributeOutCSV(CopyToState cstate, const char *string,
 		/* If it doesn't need quoting, we can just dump it as-is */
 		CopySendString(cstate, ptr);
 	}
+}
+
+/*
+ * Send text representation of one attribute for RAW format.
+ */
+static void
+CopyAttributeOutRaw(CopyToState cstate, const char *string)
+{
+	const char *ptr;
+
+	/* Ensure the format is RAW */
+	Assert(cstate->opts.format == COPY_FORMAT_RAW);
+
+	/* Ensure exactly one column is being processed */
+	Assert(list_length(cstate->attnumlist) == 1);
+
+	if (cstate->need_transcoding)
+		ptr = pg_server_to_any(string, strlen(string), cstate->file_encoding);
+	else
+		ptr = string;
+
+	CopySendString(cstate, ptr);
 }
 
 /*
