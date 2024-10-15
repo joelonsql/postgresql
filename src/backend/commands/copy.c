@@ -934,9 +934,20 @@ ProcessCopyOptions(ParseState *pstate,
 					errmsg("only ON_ERROR STOP is allowed in BINARY mode")));
 	}
 
+	/* --- REJECT_LIMIT option --- */
+	if (opts_out->reject_limit)
+	{
+		if (opts_out->on_error != COPY_ON_ERROR_IGNORE)
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+			/*- translator: first and second %s are the names of COPY option, e.g.
+			* ON_ERROR, third is the value of the COPY option, e.g. IGNORE */
+					errmsg("COPY %s requires %s to be set to %s",
+							"REJECT_LIMIT", "ON_ERROR", "IGNORE")));
+	}
+
 	/*
-	 * Check for incompatible options (must do these three before inserting
-	 * defaults)
+	 * Additional checks for interdependent options
 	 */
 
 	 /* Checks specific to the CSV and TEXT formats */
@@ -977,14 +988,6 @@ ProcessCopyOptions(ParseState *pstate,
 					errmsg("CSV quote character must not appear in the %s specification",
 							"NULL")));
 	}
-
-	if (opts_out->reject_limit && !opts_out->on_error)
-		ereport(ERROR,
-				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-		/*- translator: first and second %s are the names of COPY option, e.g.
-		 * ON_ERROR, third is the value of the COPY option, e.g. IGNORE */
-				 errmsg("COPY %s requires %s to be set to %s",
-						"REJECT_LIMIT", "ON_ERROR", "IGNORE")));
 }
 
 /*
