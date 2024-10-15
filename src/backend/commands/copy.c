@@ -859,25 +859,28 @@ ProcessCopyOptions(ParseState *pstate,
 		/* Default is no header; no action needed */
 	}
 
+	/* --- FORCE_QUOTE option --- */
+	if (opts_out->force_quote || opts_out->force_quote_all)
+	{
+		if (opts_out->format != COPY_FORMAT_CSV)
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+			/*- translator: %s is the name of a COPY option, e.g. ON_ERROR */
+					errmsg("COPY %s requires CSV mode", "FORCE_QUOTE")));
+
+		if (is_from)
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+			/*- translator: first %s is the name of a COPY option, e.g. ON_ERROR,
+			second %s is a COPY with direction, e.g. COPY TO */
+					errmsg("COPY %s cannot be used with %s", "FORCE_QUOTE",
+							"COPY FROM")));
+	}
+
 	/*
 	 * Check for incompatible options (must do these three before inserting
 	 * defaults)
 	 */
-
-	/* Check force_quote */
-	if (opts_out->format != COPY_FORMAT_CSV && (opts_out->force_quote ||
-	opts_out->force_quote_all))
-		ereport(ERROR,
-				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-		/*- translator: %s is the name of a COPY option, e.g. ON_ERROR */
-				 errmsg("COPY %s requires CSV mode", "FORCE_QUOTE")));
-	if ((opts_out->force_quote || opts_out->force_quote_all) && is_from)
-		ereport(ERROR,
-				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-		/*- translator: first %s is the name of a COPY option, e.g. ON_ERROR,
-		 second %s is a COPY with direction, e.g. COPY TO */
-				 errmsg("COPY %s cannot be used with %s", "FORCE_QUOTE",
-						"COPY FROM")));
 
 	/* Check force_notnull */
 	if (opts_out->format != COPY_FORMAT_CSV &&
