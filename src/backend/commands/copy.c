@@ -946,7 +946,6 @@ ProcessCopyOptions(ParseState *pstate,
 
 		/* Assert options have been set (defaults applied if not specified) */
 		Assert(opts_out->delim);
-		Assert(opts_out->quote);
 		Assert(opts_out->null_print);
 
 		opts_out->default_print_len = strlen(opts_out->default_print);
