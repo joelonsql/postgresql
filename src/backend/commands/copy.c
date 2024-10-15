@@ -787,17 +787,18 @@ ProcessCopyOptions(ParseState *pstate,
 		opts_out->escape = opts_out->quote;
 	}
 
-	/*
-	 * Check for incompatible options (must do these three before inserting
-	 * defaults)
-	 */
-	if (opts_out->format == COPY_FORMAT_BINARY && opts_out->default_print)
-		ereport(ERROR,
-				(errcode(ERRCODE_SYNTAX_ERROR),
-				 errmsg("cannot specify %s in BINARY mode", "DEFAULT")));
-
+	/* --- DEFAULT option --- */
 	if (opts_out->default_print)
 	{
+		if (opts_out->format == COPY_FORMAT_BINARY)
+			ereport(ERROR,
+					(errcode(ERRCODE_SYNTAX_ERROR),
+					errmsg("cannot specify %s in BINARY mode", "DEFAULT")));
+
+		/* Assert options have been set (defaults applied if not specified) */
+		Assert(opts_out->delim);
+		Assert(opts_out->null_print);
+
 		opts_out->default_print_len = strlen(opts_out->default_print);
 
 		if (strchr(opts_out->default_print, '\r') != NULL ||
@@ -805,7 +806,49 @@ ProcessCopyOptions(ParseState *pstate,
 			ereport(ERROR,
 					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 					 errmsg("COPY default representation cannot use newline or carriage return")));
+
+		if (!is_from)
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+			/*- translator: first %s is the name of a COPY option, e.g. ON_ERROR,
+			 second %s is a COPY with direction, e.g. COPY TO */
+					 errmsg("COPY %s cannot be used with %s", "DEFAULT",
+							"COPY TO")));
+
+		/* Don't allow the delimiter to appear in the default string. */
+		if (strchr(opts_out->default_print, opts_out->delim[0]) != NULL)
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+			/*- translator: %s is the name of a COPY option, e.g. NULL */
+					 errmsg("COPY delimiter character must not appear in the %s specification",
+							"DEFAULT")));
+
+		/* Don't allow the CSV quote char to appear in the default string. */
+		if (opts_out->format == COPY_FORMAT_CSV &&
+			strchr(opts_out->default_print, opts_out->quote[0]) != NULL)
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+			/*- translator: %s is the name of a COPY option, e.g. NULL */
+					 errmsg("CSV quote character must not appear in the %s specification",
+							"DEFAULT")));
+
+		/* Don't allow the NULL and DEFAULT string to be the same */
+		if (opts_out->null_print_len == opts_out->default_print_len &&
+			strncmp(opts_out->null_print, opts_out->default_print,
+					opts_out->null_print_len) == 0)
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("NULL specification and DEFAULT specification cannot be the same")));
 	}
+	else
+	{
+		/* No default for default_print; remains NULL */
+	}
+
+	/*
+	 * Check for incompatible options (must do these three before inserting
+	 * defaults)
+	 */
 
 	/* Check header */
 	if (opts_out->format == COPY_FORMAT_BINARY && opts_out->header_line)
@@ -909,41 +952,6 @@ ProcessCopyOptions(ParseState *pstate,
 				 errmsg("COPY %s cannot be used with %s", "FREEZE",
 						"COPY TO")));
 
-	if (opts_out->default_print)
-	{
-		if (!is_from)
-			ereport(ERROR,
-					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-			/*- translator: first %s is the name of a COPY option, e.g. ON_ERROR,
-			 second %s is a COPY with direction, e.g. COPY TO */
-					 errmsg("COPY %s cannot be used with %s", "DEFAULT",
-							"COPY TO")));
-
-		/* Don't allow the delimiter to appear in the default string. */
-		if (strchr(opts_out->default_print, opts_out->delim[0]) != NULL)
-			ereport(ERROR,
-					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-			/*- translator: %s is the name of a COPY option, e.g. NULL */
-					 errmsg("COPY delimiter character must not appear in the %s specification",
-							"DEFAULT")));
-
-		/* Don't allow the CSV quote char to appear in the default string. */
-		if (opts_out->format == COPY_FORMAT_CSV &&
-			strchr(opts_out->default_print, opts_out->quote[0]) != NULL)
-			ereport(ERROR,
-					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-			/*- translator: %s is the name of a COPY option, e.g. NULL */
-					 errmsg("CSV quote character must not appear in the %s specification",
-							"DEFAULT")));
-
-		/* Don't allow the NULL and DEFAULT string to be the same */
-		if (opts_out->null_print_len == opts_out->default_print_len &&
-			strncmp(opts_out->null_print, opts_out->default_print,
-					opts_out->null_print_len) == 0)
-			ereport(ERROR,
-					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-					 errmsg("NULL specification and DEFAULT specification cannot be the same")));
-	}
 	/* Check on_error */
 	if (opts_out->format == COPY_FORMAT_BINARY &&
 		opts_out->on_error != COPY_ON_ERROR_STOP)
