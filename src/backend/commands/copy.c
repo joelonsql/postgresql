@@ -845,17 +845,24 @@ ProcessCopyOptions(ParseState *pstate,
 		/* No default for default_print; remains NULL */
 	}
 
+	/* --- HEADER option --- */
+	if (header_specified)
+	{
+		if (opts_out->format == COPY_FORMAT_BINARY)
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+			/*- translator: %s is the name of a COPY option, e.g. ON_ERROR */
+					errmsg("cannot specify %s in BINARY mode", "HEADER")));
+	}
+	else
+	{
+		/* Default is no header; no action needed */
+	}
+
 	/*
 	 * Check for incompatible options (must do these three before inserting
 	 * defaults)
 	 */
-
-	/* Check header */
-	if (opts_out->format == COPY_FORMAT_BINARY && opts_out->header_line)
-		ereport(ERROR,
-				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-		/*- translator: %s is the name of a COPY option, e.g. ON_ERROR */
-				 errmsg("cannot specify %s in BINARY mode", "HEADER")));
 
 	/* Check force_quote */
 	if (opts_out->format != COPY_FORMAT_CSV && (opts_out->force_quote ||
