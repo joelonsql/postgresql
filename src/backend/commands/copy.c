@@ -913,6 +913,18 @@ ProcessCopyOptions(ParseState *pstate,
 							"COPY TO")));
 	}
 
+	/* --- FREEZE option --- */
+	if (opts_out->freeze)
+	{
+		if (!is_from)
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+			/*- translator: first %s is the name of a COPY option, e.g. ON_ERROR,
+			second %s is a COPY with direction, e.g. COPY TO */
+					errmsg("COPY %s cannot be used with %s", "FREEZE",
+							"COPY TO")));
+	}
+
 	/*
 	 * Check for incompatible options (must do these three before inserting
 	 * defaults)
@@ -956,15 +968,6 @@ ProcessCopyOptions(ParseState *pstate,
 					errmsg("CSV quote character must not appear in the %s specification",
 							"NULL")));
 	}
-
-	/* Check freeze */
-	if (opts_out->freeze && !is_from)
-		ereport(ERROR,
-				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-		/*- translator: first %s is the name of a COPY option, e.g. ON_ERROR,
-		 second %s is a COPY with direction, e.g. COPY TO */
-				 errmsg("COPY %s cannot be used with %s", "FREEZE",
-						"COPY TO")));
 
 	/* Check on_error */
 	if (opts_out->format == COPY_FORMAT_BINARY &&
