@@ -1274,6 +1274,51 @@ CopyReadLineText(CopyFromState cstate)
 			need_data = false;
 		}
 
+#ifdef HAVE_XSAVE_INTRINSICS
+		/*
+		 * Use SIMD instructions to scan for newline characters, special character 1,
+		 * and special character 2 across multiple bytes at once in CSV mode.
+		 * In text mode, check for backslash and dot. Leave at least one byte
+		 * unprocessed to ensure the subsequent logic, which depends on this
+		 * unprocessed byte, functions correctly.
+		 */
+		while (input_buf_ptr + 16 < copy_buf_len)
+		{
+			__m128i chunk = _mm_loadu_si128((__m128i *)(copy_input_buf + input_buf_ptr));
+			__m128i cr = _mm_set1_epi8('\r');
+			__m128i nl = _mm_set1_epi8('\n');
+
+			__m128i special_char1, special_char2;
+			if (cstate->opts.format == COPY_FORMAT_CSV)
+			{
+				special_char1 = _mm_set1_epi8(cstate->quote);
+				special_char2 = _mm_set1_epi8(cstate->escape);
+			}
+			else
+			{
+				special_char1 = _mm_set1_epi8('\\');
+				special_char2 = _mm_set1_epi8('.');
+			}
+
+			__m128i cr_match = _mm_cmpeq_epi8(chunk, cr);
+			__m128i nl_match = _mm_cmpeq_epi8(chunk, nl);
+			__m128i special_char1_match = _mm_cmpeq_epi8(chunk, special_char1);
+			__m128i special_char2_match = _mm_cmpeq_epi8(chunk, special_char2);
+
+			int cr_mask = _mm_movemask_epi8(cr_match);
+			int nl_mask = _mm_movemask_epi8(nl_match);
+			int special_char1_mask = _mm_movemask_epi8(special_char1_match);
+			int special_char2_mask = _mm_movemask_epi8(special_char2_match);
+
+			if (cr_mask || nl_mask || special_char1_mask || special_char2_mask)
+			{
+				break; /* Found a relevant character, break to process it */
+			}
+
+			input_buf_ptr += 16; /* No relevant characters found, advance by 16 bytes */
+		}
+#endif
+
 		/* OK to fetch a character */
 		prev_raw_ptr = input_buf_ptr;
 		c = copy_input_buf[input_buf_ptr++];
