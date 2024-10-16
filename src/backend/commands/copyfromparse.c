@@ -75,6 +75,9 @@
 #include "port/pg_bswap.h"
 #include "utils/builtins.h"
 #include "utils/rel.h"
+#ifdef HAVE_XSAVE_INTRINSICS
+#include <immintrin.h>
+#endif
 
 #define ISOCTAL(c) (((c) >= '0') && ((c) <= '7'))
 #define OCTVALUE(c) ((c) - '0')
@@ -1542,7 +1545,29 @@ CopyReadLineRawText(CopyFromState cstate)
 			need_data = false;
 		}
 
-		/* OK to fetch a character */
+#ifdef HAVE_XSAVE_INTRINSICS
+		/* Use SIMD to check multiple bytes at once */
+		while (input_buf_ptr + 16 <= copy_buf_len)
+		{
+			__m128i chunk = _mm_loadu_si128((__m128i *)(copy_input_buf + input_buf_ptr));
+			__m128i cr = _mm_set1_epi8('\r');
+			__m128i nl = _mm_set1_epi8('\n');
+
+			__m128i cr_match = _mm_cmpeq_epi8(chunk, cr);
+			__m128i nl_match = _mm_cmpeq_epi8(chunk, nl);
+
+			int cr_mask = _mm_movemask_epi8(cr_match);
+			int nl_mask = _mm_movemask_epi8(nl_match);
+
+			if (cr_mask || nl_mask)
+			{
+				break; /* Found a newline character, break to process it */
+			}
+
+			input_buf_ptr += 16; /* No newline characters found, advance by 16 bytes */
+		}
+#endif
+
 		prev_raw_ptr = input_buf_ptr;
 		c = copy_input_buf[input_buf_ptr++];
 
