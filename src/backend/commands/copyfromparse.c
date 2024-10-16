@@ -1287,19 +1287,8 @@ CopyReadLineText(CopyFromState cstate)
 			__m128i chunk = _mm_loadu_si128((__m128i *)(copy_input_buf + input_buf_ptr));
 			__m128i cr = _mm_set1_epi8('\r');
 			__m128i nl = _mm_set1_epi8('\n');
-
-			__m128i special_char1, special_char2;
-			if (cstate->opts.format == COPY_FORMAT_CSV)
-			{
-				special_char1 = _mm_set1_epi8(quotec);
-				special_char2 = _mm_set1_epi8(escapec);
-			}
-			else
-			{
-				special_char1 = _mm_set1_epi8('\\');
-				special_char2 = _mm_set1_epi8('.');
-			}
-
+			__m128i special_char1 = _mm_set1_epi8(cstate->opts.format == COPY_FORMAT_CSV ? quotec : '\\');
+			__m128i special_char2 = _mm_set1_epi8(cstate->opts.format == COPY_FORMAT_CSV ? escapec : '.');
 			__m128i cr_match = _mm_cmpeq_epi8(chunk, cr);
 			__m128i nl_match = _mm_cmpeq_epi8(chunk, nl);
 			__m128i special_char1_match = _mm_cmpeq_epi8(chunk, special_char1);
