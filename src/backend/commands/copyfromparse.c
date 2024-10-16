@@ -76,6 +76,10 @@
 #include "utils/builtins.h"
 #include "utils/rel.h"
 
+#ifdef HAVE_XSAVE_INTRINSICS
+#include <immintrin.h>
+#endif
+
 #define ISOCTAL(c) (((c) >= '0') && ((c) <= '7'))
 #define OCTVALUE(c) ((c) - '0')
 
@@ -1172,6 +1176,7 @@ CopyReadLineText(CopyFromState cstate)
 	bool		need_data = false;
 	bool		hit_eof = false;
 	bool		result = false;
+	const bool	csv_mode = cstate->opts.csv_mode;
 
 	/* CSV variables */
 	bool		in_quote = false,
@@ -1179,7 +1184,7 @@ CopyReadLineText(CopyFromState cstate)
 	char		quotec = '\0';
 	char		escapec = '\0';
 
-	if (cstate->opts.csv_mode)
+	if (csv_mode)
 	{
 		quotec = cstate->opts.quote[0];
 		escapec = cstate->opts.escape[0];
@@ -1252,11 +1257,46 @@ CopyReadLineText(CopyFromState cstate)
 			need_data = false;
 		}
 
+#ifdef HAVE_XSAVE_INTRINSICS
+		/*
+		 * Use SIMD instructions to scan for newline and special characters
+		 * across multiple bytes at once.
+		 * Leave at least one byte unprocessed to ensure the subsequent logic
+		 * functions correctly.
+		 */
+		while (input_buf_ptr + 16 < copy_buf_len)
+		{
+			__m128i chunk = _mm_loadu_si128(
+				(__m128i *)(copy_input_buf + input_buf_ptr));
+			__m128i cr = _mm_set1_epi8('\r');
+			__m128i nl = _mm_set1_epi8('\n');
+			__m128i special_char1 = _mm_set1_epi8(csv_mode ? quotec : '\\');
+			__m128i special_char2 = _mm_set1_epi8(csv_mode ? escapec : '.');
+			__m128i cr_match = _mm_cmpeq_epi8(chunk, cr);
+			__m128i nl_match = _mm_cmpeq_epi8(chunk, nl);
+			__m128i special_char1_match = _mm_cmpeq_epi8(chunk, special_char1);
+			__m128i special_char2_match = _mm_cmpeq_epi8(chunk, special_char2);
+
+			int cr_mask = _mm_movemask_epi8(cr_match);
+			int nl_mask = _mm_movemask_epi8(nl_match);
+			int special_char1_mask = _mm_movemask_epi8(special_char1_match);
+			int special_char2_mask = _mm_movemask_epi8(special_char2_match);
+
+			if (cr_mask || nl_mask || special_char1_mask || special_char2_mask)
+			{
+				break; /* Found a relevant character, break to process it */
+			}
+
+			input_buf_ptr += 16; /* No relevant characters found, 
+									advance by 16 bytes */
+		}
+#endif
+
 		/* OK to fetch a character */
 		prev_raw_ptr = input_buf_ptr;
 		c = copy_input_buf[input_buf_ptr++];
 
-		if (cstate->opts.csv_mode)
+		if (csv_mode)
 		{
 			/*
 			 * If character is '\r', we may need to look ahead below.  Force
@@ -1295,7 +1335,7 @@ CopyReadLineText(CopyFromState cstate)
 		}
 
 		/* Process \r */
-		if (c == '\r' && (!cstate->opts.csv_mode || !in_quote))
+		if (c == '\r' && (!csv_mode || !in_quote))
 		{
 			/* Check for \r\n on first line, _and_ handle \r\n. */
 			if (cstate->eol_type == EOL_UNKNOWN ||
@@ -1323,10 +1363,10 @@ CopyReadLineText(CopyFromState cstate)
 					if (cstate->eol_type == EOL_CRNL)
 						ereport(ERROR,
 								(errcode(ERRCODE_BAD_COPY_FILE_FORMAT),
-								 !cstate->opts.csv_mode ?
+								 !csv_mode ?
 								 errmsg("literal carriage return found in data") :
 								 errmsg("unquoted carriage return found in data"),
-								 !cstate->opts.csv_mode ?
+								 !csv_mode ?
 								 errhint("Use \"\\r\" to represent carriage return.") :
 								 errhint("Use quoted CSV field to represent carriage return.")));
 
@@ -1340,10 +1380,10 @@ CopyReadLineText(CopyFromState cstate)
 			else if (cstate->eol_type == EOL_NL)
 				ereport(ERROR,
 						(errcode(ERRCODE_BAD_COPY_FILE_FORMAT),
-						 !cstate->opts.csv_mode ?
+						 !csv_mode ?
 						 errmsg("literal carriage return found in data") :
 						 errmsg("unquoted carriage return found in data"),
-						 !cstate->opts.csv_mode ?
+						 !csv_mode ?
 						 errhint("Use \"\\r\" to represent carriage return.") :
 						 errhint("Use quoted CSV field to represent carriage return.")));
 			/* If reach here, we have found the line terminator */
@@ -1351,15 +1391,15 @@ CopyReadLineText(CopyFromState cstate)
 		}
 
 		/* Process \n */
-		if (c == '\n' && (!cstate->opts.csv_mode || !in_quote))
+		if (c == '\n' && (!csv_mode || !in_quote))
 		{
 			if (cstate->eol_type == EOL_CR || cstate->eol_type == EOL_CRNL)
 				ereport(ERROR,
 						(errcode(ERRCODE_BAD_COPY_FILE_FORMAT),
-						 !cstate->opts.csv_mode ?
+						 !csv_mode ?
 						 errmsg("literal newline found in data") :
 						 errmsg("unquoted newline found in data"),
-						 !cstate->opts.csv_mode ?
+						 !csv_mode ?
 						 errhint("Use \"\\n\" to represent newline.") :
 						 errhint("Use quoted CSV field to represent newline.")));
 			cstate->eol_type = EOL_NL;	/* in case not set yet */
@@ -1371,7 +1411,7 @@ CopyReadLineText(CopyFromState cstate)
 		 * Process backslash, except in CSV mode where backslash is a normal
 		 * character.
 		 */
-		if (c == '\\' && !cstate->opts.csv_mode)
+		if (c == '\\' && !csv_mode)
 		{
 			char		c2;
 
