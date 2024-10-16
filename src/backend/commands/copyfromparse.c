@@ -1291,8 +1291,8 @@ CopyReadLineText(CopyFromState cstate)
 			__m128i special_char1, special_char2;
 			if (cstate->opts.format == COPY_FORMAT_CSV)
 			{
-				special_char1 = _mm_set1_epi8(cstate->quote);
-				special_char2 = _mm_set1_epi8(cstate->escape);
+				special_char1 = _mm_set1_epi8(quotec);
+				special_char2 = _mm_set1_epi8(escapec);
 			}
 			else
 			{
