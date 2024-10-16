@@ -1546,8 +1546,13 @@ CopyReadLineRawText(CopyFromState cstate)
 		}
 
 #ifdef HAVE_XSAVE_INTRINSICS
-		/* Use SIMD to check multiple bytes at once */
-		while (input_buf_ptr + 16 <= copy_buf_len)
+		/*
+		 * Use SIMD instructions to scan for newline characters across multiple
+		 * bytes at once. Leave at least one byte unprocessed to ensure the
+		 * subsequent logic, which depends on this unprocessed byte, functions
+		 * correctly.
+		 */
+		while (input_buf_ptr + 16 < copy_buf_len)
 		{
 			__m128i chunk = _mm_loadu_si128((__m128i *)(copy_input_buf + input_buf_ptr));
 			__m128i cr = _mm_set1_epi8('\r');
@@ -1567,6 +1572,8 @@ CopyReadLineRawText(CopyFromState cstate)
 			input_buf_ptr += 16; /* No newline characters found, advance by 16 bytes */
 		}
 #endif
+
+		/* Process remaining characters one by one. */
 
 		prev_raw_ptr = input_buf_ptr;
 		c = copy_input_buf[input_buf_ptr++];
