@@ -1510,6 +1510,36 @@ CopyReadLineRawText(CopyFromState cstate)
 	int			delim_len = cstate->opts.delim ? strlen(cstate->opts.delim) : 0;
 
 	/*
+	 * If no delimiter is specified, we can read the entire file at once
+	 * without processing it character by character.
+	 */
+	if (read_entire_file)
+	{
+		/* Keep loading data until EOF */
+		while (!cstate->input_reached_eof)
+		{
+			/* Load input buffer */
+			CopyLoadInputBuf(cstate);
+
+			/* Append all data from input_buf to line_buf */
+			appendBinaryStringInfo(&cstate->line_buf,
+									cstate->input_buf + cstate->input_buf_index,
+									cstate->input_buf_len - cstate->input_buf_index);
+
+			/* Update input buffer index */
+			cstate->input_buf_index = cstate->input_buf_len;
+		}
+
+		/* Set result to true to indicate EOF */
+		result = true;
+
+		/* Set end-of-line type */
+		cstate->eol_type = EOL_UNKNOWN;
+
+		return result;
+	}
+
+	/*
 	 * The objective of this loop is to transfer data into line_buf until we
 	 * find the specified delimiter or reach EOF. In raw format, we treat the
 	 * input data as-is, without any parsing, quoting, or escaping. We are
@@ -1569,25 +1599,16 @@ CopyReadLineRawText(CopyFromState cstate)
 		/* Fetch a character */
 		prev_raw_ptr = input_buf_ptr;
 
-		if (read_entire_file)
+		/* Check for delimiter, possibly multi-byte */
+		IF_NEED_REFILL_AND_NOT_EOF_CONTINUE(delim_len - 1);
+		if (strncmp(&copy_input_buf[input_buf_ptr], cstate->opts.delim,
+					delim_len) == 0)
 		{
-			/* Continue until EOF if reading entire file */
-			input_buf_ptr++;
-			continue;
+			cstate->eol_type = EOL_CUSTOM;
+			input_buf_ptr += delim_len;
+			break;
 		}
-		else
-		{
-			/* Check for delimiter, possibly multi-byte */
-			IF_NEED_REFILL_AND_NOT_EOF_CONTINUE(delim_len - 1);
-			if (strncmp(&copy_input_buf[input_buf_ptr], cstate->opts.delim,
-						delim_len) == 0)
-			{
-				cstate->eol_type = EOL_CUSTOM;
-				input_buf_ptr += delim_len;
-				break;
-			}
-			input_buf_ptr++;
-		}
+		input_buf_ptr++;
 	}
 
 	/* Transfer data to line_buf, including the delimiter if found */
