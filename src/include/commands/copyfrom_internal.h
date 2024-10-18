@@ -155,7 +155,7 @@ typedef struct CopyFromStateData
 	 * database encoding, and raw_buf_len is the total number of bytes stored
 	 * in the buffer.
 	 */
-#define INPUT_BUF_SIZE 65536	/* we palloc INPUT_BUF_SIZE+1 bytes */
+#define INPUT_BUF_SIZE 262144	/* we palloc INPUT_BUF_SIZE+1 bytes */
 	char	   *input_buf;
 	int			input_buf_index;	/* next byte to process */
 	int			input_buf_len;	/* total # of bytes stored */

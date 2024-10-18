@@ -1515,22 +1515,16 @@ CopyReadLineRawText(CopyFromState cstate)
 	 */
 	if (read_entire_file)
 	{
-		elog(LOG, "CopyReadLineRawText: Reading entire file without delimiter");
-
 		/* Keep loading data until EOF */
 		while (!cstate->input_reached_eof)
 		{
 			/* Load input buffer */
 			CopyLoadInputBuf(cstate);
 
-			elog(LOG, "CopyReadLineRawText: Loaded %d bytes into input buffer", cstate->input_buf_len - cstate->input_buf_index);
-
 			/* Append all data from input_buf to line_buf */
 			appendBinaryStringInfo(&cstate->line_buf,
 									cstate->input_buf + cstate->input_buf_index,
 									cstate->input_buf_len - cstate->input_buf_index);
-
-			elog(LOG, "CopyReadLineRawText: Appended %d bytes to line buffer", cstate->input_buf_len - cstate->input_buf_index);
 
 			/* Update input buffer index */
 			cstate->input_buf_index = cstate->input_buf_len;
@@ -1541,8 +1535,6 @@ CopyReadLineRawText(CopyFromState cstate)
 
 		/* Set end-of-line type */
 		cstate->eol_type = EOL_UNKNOWN;
-
-		elog(LOG, "CopyReadLineRawText: Finished reading entire file, total bytes: %d", cstate->line_buf.len);
 
 		return result;
 	}
