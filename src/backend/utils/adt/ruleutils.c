@@ -12437,7 +12437,7 @@ get_from_clause_item(Node *jtnode, Query *query, deparse_context *context)
 				/* Determine the direction string and assign left/right variables */
 				if (fkjn->fkdir == FKDIR_TO)
 				{
-					fkdir_str = " TO ";
+					fkdir_str = " -> ";
 
 					/* Left side: referencing */
 					left_rte = rt_fetch(fkjn->referencingVarno, dpns->rtable);
@@ -12449,7 +12449,7 @@ get_from_clause_item(Node *jtnode, Query *query, deparse_context *context)
 				}
 				else if (fkjn->fkdir == FKDIR_FROM)
 				{
-					fkdir_str = " FROM ";
+					fkdir_str = " <- ";
 
 					/* Left side: referenced */
 					left_rte = rt_fetch(fkjn->referencedVarno, dpns->rtable);
@@ -12495,7 +12495,7 @@ get_from_clause_item(Node *jtnode, Query *query, deparse_context *context)
 
 				appendStringInfoString(buf, " (");
 
-				/* Append the right (after FROM/TO) column names */
+				/* Append the right (after <-/->) column names */
 				first = true;
 				foreach(lc_right, rightAttnums)
 				{
