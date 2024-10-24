@@ -7,7 +7,7 @@
  * formats.  The main entry point is NextCopyFrom(), which parses the
  * next input line and returns it as Datums.
  *
- * In text/CSV mode, the parsing happens in multiple stages:
+ * In text/CSV/raw mode, the parsing happens in multiple stages:
  *
  * [data source] --> raw_buf --> input_buf --> line_buf --> attribute_buf
  *                1.          2.            3.           4.
@@ -25,7 +25,7 @@
  *    is copied into 'line_buf', with quotes and escape characters still
  *    intact.
  *
- * 4. CopyReadAttributesText/CSV() function takes the input line from
+ * 4. CopyReadAttributesText/CSV/Raw() function takes the input line from
  *    'line_buf', and splits it into fields, unescaping the data as required.
  *    The fields are stored in 'attribute_buf', and 'raw_fields' array holds
  *    pointers to each field.
@@ -731,7 +731,7 @@ CopyReadBinaryData(CopyFromState cstate, char *dest, int nbytes)
 }
 
 /*
- * Read raw fields in the next line for COPY FROM in text or csv mode.
+ * Read raw fields in the next line for COPY FROM in text, csv, or raw mode.
  * Return false if no more lines.
  *
  * An internal temporary buffer is returned via 'fields'. It is valid until
@@ -747,7 +747,7 @@ NextCopyFromRawFields(CopyFromState cstate, char ***fields, int *nfields)
 	int			fldct;
 	bool		done;
 
-	/* only available for text or csv input */
+	/* only available for text, csv, or raw input */
 	Assert(cstate->opts.format != COPY_FORMAT_BINARY);
 
 	/* on input check that the header line is correct if needed */
@@ -764,6 +764,9 @@ NextCopyFromRawFields(CopyFromState cstate, char ***fields, int *nfields)
 		if (cstate->opts.header_line == COPY_HEADER_MATCH)
 		{
 			int			fldnum;
+
+			Assert(cstate->opts.format == COPY_FORMAT_CSV ||
+				   cstate->opts.format == COPY_FORMAT_TEXT);
 
 			if (cstate->opts.format == COPY_FORMAT_CSV)
 				fldct = CopyReadAttributesCSV(cstate);
@@ -822,8 +825,16 @@ NextCopyFromRawFields(CopyFromState cstate, char ***fields, int *nfields)
 	/* Parse the line into de-escaped field values */
 	if (cstate->opts.format == COPY_FORMAT_CSV)
 		fldct = CopyReadAttributesCSV(cstate);
-	else
+	else if (cstate->opts.format == COPY_FORMAT_TEXT)
 		fldct = CopyReadAttributesText(cstate);
+	else
+	{
+		Assert(cstate->opts.format == COPY_FORMAT_RAW);
+		Assert(cstate->max_fields == 1);
+		/* Point raw_fields directly to line_buf data */
+		cstate->raw_fields[0] = cstate->line_buf.data;
+		fldct = 1;
+	}
 
 	*fields = cstate->raw_fields;
 	*nfields = fldct;
@@ -1146,6 +1157,22 @@ CopyReadLine(CopyFromState cstate)
 				cstate->line_buf.len -= 2;
 				cstate->line_buf.data[cstate->line_buf.len] = '\0';
 				break;
+			case EOL_CUSTOM:
+				{
+					int			delim_len;
+
+					Assert(cstate->opts.format == COPY_FORMAT_RAW);
+					Assert(cstate->opts.delim);
+					delim_len = strlen(cstate->opts.delim);
+					Assert(delim_len > 0);
+					Assert(cstate->line_buf.len >= delim_len);
+					Assert(memcmp(cstate->line_buf.data + cstate->line_buf.len - delim_len,
+								  cstate->opts.delim,
+								  delim_len) == 0);
+					cstate->line_buf.len -= delim_len;
+					cstate->line_buf.data[cstate->line_buf.len] = '\0';
+				}
+				break;
 			case EOL_UNKNOWN:
 				/* shouldn't get here */
 				Assert(false);
@@ -1178,6 +1205,9 @@ CopyReadLineText(CopyFromState cstate)
 	char		quotec = '\0';
 	char		escapec = '\0';
 
+	/* Raw text variables */
+	int			delim_len = 0;
+
 	if (cstate->opts.format == COPY_FORMAT_CSV)
 	{
 		quotec = cstate->opts.quote[0];
@@ -1185,6 +1215,10 @@ CopyReadLineText(CopyFromState cstate)
 		/* ignore special escape processing if it's the same as quotec */
 		if (quotec == escapec)
 			escapec = '\0';
+	}
+	else if (cstate->opts.format == COPY_FORMAT_RAW)
+	{
+		delim_len = cstate->opts.delim ? strlen(cstate->opts.delim) : 0;
 	}
 
 	/*
@@ -1211,6 +1245,10 @@ CopyReadLineText(CopyFromState cstate)
 	 *
 	 * For a little extra speed within the loop, we copy input_buf and
 	 * input_buf_len into local variables.
+	 *
+	 * In raw text mode, we treat the input data as-is, without any parsing,
+	 * quoting, or escaping. We are only interested in locating the delimiter
+	 * to determine the boundaries of each data value.
 	 */
 	copy_input_buf = cstate->input_buf;
 	input_buf_ptr = cstate->input_buf_index;
@@ -1253,205 +1291,242 @@ CopyReadLineText(CopyFromState cstate)
 
 		/* OK to fetch a character */
 		prev_raw_ptr = input_buf_ptr;
-		c = copy_input_buf[input_buf_ptr++];
 
-		if (cstate->opts.format == COPY_FORMAT_CSV)
+		if (cstate->opts.format == COPY_FORMAT_RAW)
 		{
-			/*
-			 * If character is '\r', we may need to look ahead below.  Force
-			 * fetch of the next character if we don't already have it.  We
-			 * need to do this before changing CSV state, in case '\r' is also
-			 * the quote or escape character.
-			 */
-			if (c == '\r')
+			if (delim_len == 0)
 			{
-				IF_NEED_REFILL_AND_NOT_EOF_CONTINUE(0);
+				/* When reading entire file, consume all remaining bytes at once */
+				input_buf_ptr = copy_buf_len;
+				continue;
 			}
-
-			/*
-			 * Dealing with quotes and escapes here is mildly tricky. If the
-			 * quote char is also the escape char, there's no problem - we
-			 * just use the char as a toggle. If they are different, we need
-			 * to ensure that we only take account of an escape inside a
-			 * quoted field and immediately preceding a quote char, and not
-			 * the second in an escape-escape sequence.
-			 */
-			if (in_quote && c == escapec)
-				last_was_esc = !last_was_esc;
-			if (c == quotec && !last_was_esc)
-				in_quote = !in_quote;
-			if (c != escapec)
-				last_was_esc = false;
-
-			/*
-			 * Updating the line count for embedded CR and/or LF chars is
-			 * necessarily a little fragile - this test is probably about the
-			 * best we can do.  (XXX it's arguable whether we should do this
-			 * at all --- is cur_lineno a physical or logical count?)
-			 */
-			if (in_quote && c == (cstate->eol_type == EOL_NL ? '\n' : '\r'))
-				cstate->cur_lineno++;
-		}
-
-		/* Process \r */
-		if (c == '\r' && (cstate->opts.format != COPY_FORMAT_CSV || !in_quote))
-		{
-			/* Check for \r\n on first line, _and_ handle \r\n. */
-			if (cstate->eol_type == EOL_UNKNOWN ||
-				cstate->eol_type == EOL_CRNL)
+			else
 			{
-				/*
-				 * If need more data, go back to loop top to load it.
-				 *
-				 * Note that if we are at EOF, c will wind up as '\0' because
-				 * of the guaranteed pad of input_buf.
-				 */
-				IF_NEED_REFILL_AND_NOT_EOF_CONTINUE(0);
+				char	   *delim_pos;
 
-				/* get next char */
-				c = copy_input_buf[input_buf_ptr];
+				/* Check for delimiter, possibly multi-byte */
+				IF_NEED_REFILL_AND_NOT_EOF_CONTINUE(delim_len - 1);
 
-				if (c == '\n')
+				/* Look for delimiter in the remaining buffer */
+				delim_pos = strstr(&copy_input_buf[input_buf_ptr], cstate->opts.delim);
+				if (delim_pos != NULL)
 				{
-					input_buf_ptr++;	/* eat newline */
-					cstate->eol_type = EOL_CRNL;	/* in case not set yet */
+					/* Found delimiter - move pointer to its position */
+					input_buf_ptr = delim_pos - copy_input_buf;
+					cstate->eol_type = EOL_CUSTOM;
+					input_buf_ptr += delim_len;
+					break;
 				}
 				else
 				{
-					/* found \r, but no \n */
-					if (cstate->eol_type == EOL_CRNL)
-						ereport(ERROR,
-								(errcode(ERRCODE_BAD_COPY_FILE_FORMAT),
-								 cstate->opts.format != COPY_FORMAT_CSV ?
-								 errmsg("literal carriage return found in data") :
-								 errmsg("unquoted carriage return found in data"),
-								 cstate->opts.format != COPY_FORMAT_CSV ?
-								 errhint("Use \"\\r\" to represent carriage return.") :
-								 errhint("Use quoted CSV field to represent carriage return.")));
-
-					/*
-					 * if we got here, it is the first line and we didn't find
-					 * \n, so don't consume the peeked character
-					 */
-					cstate->eol_type = EOL_CR;
+					/* No delimiter found - move to end of current buffer */
+					input_buf_ptr = copy_buf_len;
+					continue;
 				}
 			}
-			else if (cstate->eol_type == EOL_NL)
-				ereport(ERROR,
-						(errcode(ERRCODE_BAD_COPY_FILE_FORMAT),
-						 cstate->opts.format != COPY_FORMAT_CSV ?
-						 errmsg("literal carriage return found in data") :
-						 errmsg("unquoted carriage return found in data"),
-						 cstate->opts.format != COPY_FORMAT_CSV ?
-						 errhint("Use \"\\r\" to represent carriage return.") :
-						 errhint("Use quoted CSV field to represent carriage return.")));
-			/* If reach here, we have found the line terminator */
-			break;
 		}
-
-		/* Process \n */
-		if (c == '\n' && (cstate->opts.format != COPY_FORMAT_CSV || !in_quote))
+		else
 		{
-			if (cstate->eol_type == EOL_CR || cstate->eol_type == EOL_CRNL)
-				ereport(ERROR,
-						(errcode(ERRCODE_BAD_COPY_FILE_FORMAT),
-						 cstate->opts.format != COPY_FORMAT_CSV ?
-						 errmsg("literal newline found in data") :
-						 errmsg("unquoted newline found in data"),
-						 cstate->opts.format != COPY_FORMAT_CSV ?
-						 errhint("Use \"\\n\" to represent newline.") :
-						 errhint("Use quoted CSV field to represent newline.")));
-			cstate->eol_type = EOL_NL;	/* in case not set yet */
-			/* If reach here, we have found the line terminator */
-			break;
-		}
+			c = copy_input_buf[input_buf_ptr++];
 
-		/*
-		 * Process backslash, except in CSV mode where backslash is a normal
-		 * character.
-		 */
-		if (c == '\\' && cstate->opts.format != COPY_FORMAT_CSV)
-		{
-			char		c2;
-
-			IF_NEED_REFILL_AND_NOT_EOF_CONTINUE(0);
-			IF_NEED_REFILL_AND_EOF_BREAK(0);
-
-			/* -----
-			 * get next character
-			 * Note: we do not change c so if it isn't \., we can fall
-			 * through and continue processing.
-			 * -----
-			 */
-			c2 = copy_input_buf[input_buf_ptr];
-
-			if (c2 == '.')
+			if (cstate->opts.format == COPY_FORMAT_CSV)
 			{
-				input_buf_ptr++;	/* consume the '.' */
-				if (cstate->eol_type == EOL_CRNL)
+				/*
+				 * If character is '\r', we may need to look ahead below.  Force
+				 * fetch of the next character if we don't already have it.  We
+				 * need to do this before changing CSV state, in case '\r' is also
+				 * the quote or escape character.
+				 */
+				if (c == '\r')
 				{
+					IF_NEED_REFILL_AND_NOT_EOF_CONTINUE(0);
+				}
+
+				/*
+				 * Dealing with quotes and escapes here is mildly tricky. If the
+				 * quote char is also the escape char, there's no problem - we
+				 * just use the char as a toggle. If they are different, we need
+				 * to ensure that we only take account of an escape inside a
+				 * quoted field and immediately preceding a quote char, and not
+				 * the second in an escape-escape sequence.
+				 */
+				if (in_quote && c == escapec)
+					last_was_esc = !last_was_esc;
+				if (c == quotec && !last_was_esc)
+					in_quote = !in_quote;
+				if (c != escapec)
+					last_was_esc = false;
+
+				/*
+				 * Updating the line count for embedded CR and/or LF chars is
+				 * necessarily a little fragile - this test is probably about the
+				 * best we can do.  (XXX it's arguable whether we should do this
+				 * at all --- is cur_lineno a physical or logical count?)
+				 */
+				if (in_quote && c == (cstate->eol_type == EOL_NL ? '\n' : '\r'))
+					cstate->cur_lineno++;
+			}
+
+			/* Process \r */
+			if (c == '\r' && (cstate->opts.format != COPY_FORMAT_CSV || !in_quote))
+			{
+				/* Check for \r\n on first line, _and_ handle \r\n. */
+				if (cstate->eol_type == EOL_UNKNOWN ||
+					cstate->eol_type == EOL_CRNL)
+				{
+					/*
+					 * If need more data, go back to loop top to load it.
+					 *
+					 * Note that if we are at EOF, c will wind up as '\0' because
+					 * of the guaranteed pad of input_buf.
+					 */
+					IF_NEED_REFILL_AND_NOT_EOF_CONTINUE(0);
+
+					/* get next char */
+					c = copy_input_buf[input_buf_ptr];
+
+					if (c == '\n')
+					{
+						input_buf_ptr++;	/* eat newline */
+						cstate->eol_type = EOL_CRNL;	/* in case not set yet */
+					}
+					else
+					{
+						/* found \r, but no \n */
+						if (cstate->eol_type == EOL_CRNL)
+							ereport(ERROR,
+									(errcode(ERRCODE_BAD_COPY_FILE_FORMAT),
+									 cstate->opts.format != COPY_FORMAT_CSV ?
+									 errmsg("literal carriage return found in data") :
+									 errmsg("unquoted carriage return found in data"),
+									 cstate->opts.format != COPY_FORMAT_CSV ?
+									 errhint("Use \"\\r\" to represent carriage return.") :
+									 errhint("Use quoted CSV field to represent carriage return.")));
+
+						/*
+						 * if we got here, it is the first line and we didn't find
+						 * \n, so don't consume the peeked character
+						 */
+						cstate->eol_type = EOL_CR;
+					}
+				}
+				else if (cstate->eol_type == EOL_NL)
+					ereport(ERROR,
+							(errcode(ERRCODE_BAD_COPY_FILE_FORMAT),
+							 cstate->opts.format != COPY_FORMAT_CSV ?
+							 errmsg("literal carriage return found in data") :
+							 errmsg("unquoted carriage return found in data"),
+							 cstate->opts.format != COPY_FORMAT_CSV ?
+							 errhint("Use \"\\r\" to represent carriage return.") :
+							 errhint("Use quoted CSV field to represent carriage return.")));
+				/* If reach here, we have found the line terminator */
+				break;
+			}
+
+			/* Process \n */
+			if (c == '\n' && (cstate->opts.format != COPY_FORMAT_CSV || !in_quote))
+			{
+				if (cstate->eol_type == EOL_CR || cstate->eol_type == EOL_CRNL)
+					ereport(ERROR,
+							(errcode(ERRCODE_BAD_COPY_FILE_FORMAT),
+							 cstate->opts.format != COPY_FORMAT_CSV ?
+							 errmsg("literal newline found in data") :
+							 errmsg("unquoted newline found in data"),
+							 cstate->opts.format != COPY_FORMAT_CSV ?
+							 errhint("Use \"\\n\" to represent newline.") :
+							 errhint("Use quoted CSV field to represent newline.")));
+				cstate->eol_type = EOL_NL;	/* in case not set yet */
+				/* If reach here, we have found the line terminator */
+				break;
+			}
+
+			/*
+			 * Process backslash, except in CSV mode where backslash is a normal
+			 * character.
+			 */
+			if (c == '\\' && cstate->opts.format != COPY_FORMAT_CSV)
+			{
+				char		c2;
+
+				IF_NEED_REFILL_AND_NOT_EOF_CONTINUE(0);
+				IF_NEED_REFILL_AND_EOF_BREAK(0);
+
+				/* -----
+				 * get next character
+				 * Note: we do not change c so if it isn't \., we can fall
+				 * through and continue processing.
+				 * -----
+				 */
+				c2 = copy_input_buf[input_buf_ptr];
+
+				if (c2 == '.')
+				{
+					input_buf_ptr++;	/* consume the '.' */
+					if (cstate->eol_type == EOL_CRNL)
+					{
+						/* Get the next character */
+						IF_NEED_REFILL_AND_NOT_EOF_CONTINUE(0);
+						/* if hit_eof, c2 will become '\0' */
+						c2 = copy_input_buf[input_buf_ptr++];
+
+						if (c2 == '\n')
+							ereport(ERROR,
+									(errcode(ERRCODE_BAD_COPY_FILE_FORMAT),
+									 errmsg("end-of-copy marker does not match previous newline style")));
+						else if (c2 != '\r')
+							ereport(ERROR,
+									(errcode(ERRCODE_BAD_COPY_FILE_FORMAT),
+									 errmsg("end-of-copy marker is not alone on its line")));
+					}
+
 					/* Get the next character */
 					IF_NEED_REFILL_AND_NOT_EOF_CONTINUE(0);
 					/* if hit_eof, c2 will become '\0' */
 					c2 = copy_input_buf[input_buf_ptr++];
 
-					if (c2 == '\n')
-						ereport(ERROR,
-								(errcode(ERRCODE_BAD_COPY_FILE_FORMAT),
-								 errmsg("end-of-copy marker does not match previous newline style")));
-					else if (c2 != '\r')
+					if (c2 != '\r' && c2 != '\n')
 						ereport(ERROR,
 								(errcode(ERRCODE_BAD_COPY_FILE_FORMAT),
 								 errmsg("end-of-copy marker is not alone on its line")));
+
+					if ((cstate->eol_type == EOL_NL && c2 != '\n') ||
+						(cstate->eol_type == EOL_CRNL && c2 != '\n') ||
+						(cstate->eol_type == EOL_CR && c2 != '\r'))
+						ereport(ERROR,
+								(errcode(ERRCODE_BAD_COPY_FILE_FORMAT),
+								 errmsg("end-of-copy marker does not match previous newline style")));
+
+					/*
+					 * If there is any data on this line before the \., complain.
+					 */
+					if (cstate->line_buf.len > 0 ||
+						prev_raw_ptr > cstate->input_buf_index)
+						ereport(ERROR,
+								(errcode(ERRCODE_BAD_COPY_FILE_FORMAT),
+								 errmsg("end-of-copy marker is not alone on its line")));
+
+					/*
+					 * Discard the \. and newline, then report EOF.
+					 */
+					cstate->input_buf_index = input_buf_ptr;
+					result = true;	/* report EOF */
+					break;
 				}
-
-				/* Get the next character */
-				IF_NEED_REFILL_AND_NOT_EOF_CONTINUE(0);
-				/* if hit_eof, c2 will become '\0' */
-				c2 = copy_input_buf[input_buf_ptr++];
-
-				if (c2 != '\r' && c2 != '\n')
-					ereport(ERROR,
-							(errcode(ERRCODE_BAD_COPY_FILE_FORMAT),
-							 errmsg("end-of-copy marker is not alone on its line")));
-
-				if ((cstate->eol_type == EOL_NL && c2 != '\n') ||
-					(cstate->eol_type == EOL_CRNL && c2 != '\n') ||
-					(cstate->eol_type == EOL_CR && c2 != '\r'))
-					ereport(ERROR,
-							(errcode(ERRCODE_BAD_COPY_FILE_FORMAT),
-							 errmsg("end-of-copy marker does not match previous newline style")));
-
-				/*
-				 * If there is any data on this line before the \., complain.
-				 */
-				if (cstate->line_buf.len > 0 ||
-					prev_raw_ptr > cstate->input_buf_index)
-					ereport(ERROR,
-							(errcode(ERRCODE_BAD_COPY_FILE_FORMAT),
-							 errmsg("end-of-copy marker is not alone on its line")));
-
-				/*
-				 * Discard the \. and newline, then report EOF.
-				 */
-				cstate->input_buf_index = input_buf_ptr;
-				result = true;	/* report EOF */
-				break;
+				else
+				{
+					/*
+					 * If we are here, it means we found a backslash followed by
+					 * something other than a period.  In non-CSV mode, anything
+					 * after a backslash is special, so we skip over that second
+					 * character too.  If we didn't do that \\. would be
+					 * considered an eof-of copy, while in non-CSV mode it is a
+					 * literal backslash followed by a period.
+					 */
+					input_buf_ptr++;
+				}
 			}
-			else
-			{
-				/*
-				 * If we are here, it means we found a backslash followed by
-				 * something other than a period.  In non-CSV mode, anything
-				 * after a backslash is special, so we skip over that second
-				 * character too.  If we didn't do that \\. would be
-				 * considered an eof-of copy, while in non-CSV mode it is a
-				 * literal backslash followed by a period.
-				 */
-				input_buf_ptr++;
-			}
-		}
-	}							/* end of outer loop */
+		}							/* end of else (non-raw text mode) */
+	}								/* end of outer loop */
 
 	/*
 	 * Transfer any still-uncopied data to line_buf.
@@ -1460,6 +1535,7 @@ CopyReadLineText(CopyFromState cstate)
 
 	return result;
 }
+
 
 /*
  *	Return decimal value for a hexadecimal digit
@@ -1936,7 +2012,6 @@ endfield:
 
 	return fieldno;
 }
-
 
 /*
  * Read a binary attribute
