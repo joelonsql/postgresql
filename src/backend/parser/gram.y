@@ -680,7 +680,7 @@ static Node *makeRecursiveViewSelect(char *relname, List *aliases, Node *query);
 %token <ival>	ICONST PARAM
 %token			TYPECAST DOT_DOT COLON_EQUALS EQUALS_GREATER
 %token			LESS_EQUALS GREATER_EQUALS NOT_EQUALS
-%token			LEFT_ARROW
+%token			LEFT_ARROW RIGHT_ARROW
 
 /*
  * If you want to make any keyword changes, update the keyword table in
@@ -874,7 +874,7 @@ static Node *makeRecursiveViewSelect(char *relname, List *aliases, Node *query);
 %nonassoc	UNBOUNDED NESTED /* ideally would have same precedence as IDENT */
 %nonassoc	IDENT PARTITION RANGE ROWS GROUPS PRECEDING FOLLOWING CUBE ROLLUP
 			SET KEYS OBJECT_P SCALAR VALUE_P WITH WITHOUT PATH
-%left		Op OPERATOR		/* multi-character ops and user-defined operators */
+%left		Op OPERATOR RIGHT_ARROW	/* multi-character ops and user-defined operators */
 %left		'+' '-'
 %left		'*' '/' '%'
 %left		'^'
@@ -13830,14 +13830,9 @@ join_qual: USING '(' name_list ')' opt_alias_clause_for_join_using
 			;
 
 fk_direction:
-	LEFT_ARROW	{ $$ = FKDIR_FROM; }
-	| Op	{
-				if (strcmp($1, "->") == 0)
-					$$ = FKDIR_TO;
-				else
-					parser_yyerror("Expected '->' for FKDIR_TO");
-			}
-	;
+			LEFT_ARROW		{ $$ = FKDIR_FROM; }
+			| RIGHT_ARROW	{ $$ = FKDIR_TO; }
+		;
 
 
 relation_expr:
@@ -14919,6 +14914,8 @@ a_expr:		c_expr									{ $$ = $1; }
 				{ $$ = (Node *) makeSimpleA_Expr(AEXPR_OP, ">=", $1, $3, @2); }
 			| a_expr NOT_EQUALS a_expr
 				{ $$ = (Node *) makeSimpleA_Expr(AEXPR_OP, "<>", $1, $3, @2); }
+			| a_expr RIGHT_ARROW a_expr
+				{ $$ = (Node *) makeSimpleA_Expr(AEXPR_OP, "->", $1, $3, @2); }
 
 			| a_expr qual_Op a_expr				%prec Op
 				{ $$ = (Node *) makeA_Expr(AEXPR_OP, $2, $1, $3, @2); }
@@ -15398,6 +15395,8 @@ b_expr:		c_expr
 				{ $$ = (Node *) makeSimpleA_Expr(AEXPR_OP, ">=", $1, $3, @2); }
 			| b_expr NOT_EQUALS b_expr
 				{ $$ = (Node *) makeSimpleA_Expr(AEXPR_OP, "<>", $1, $3, @2); }
+			| b_expr RIGHT_ARROW b_expr
+				{ $$ = (Node *) makeSimpleA_Expr(AEXPR_OP, "->", $1, $3, @2); }
 			| b_expr qual_Op b_expr				%prec Op
 				{ $$ = (Node *) makeA_Expr(AEXPR_OP, $2, $1, $3, @2); }
 			| qual_Op b_expr					%prec Op
@@ -16566,6 +16565,7 @@ MathOp:		 '+'									{ $$ = "+"; }
 			| LESS_EQUALS							{ $$ = "<="; }
 			| GREATER_EQUALS						{ $$ = ">="; }
 			| NOT_EQUALS							{ $$ = "<>"; }
+			| RIGHT_ARROW							{ $$ = "->"; }
 		;
 
 qual_Op:	Op

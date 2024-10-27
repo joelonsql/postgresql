@@ -367,6 +367,7 @@ greater_equals	">="
 less_greater	"<>"
 not_equals		"!="
 left_arrow		"<-"
+right_arrow		"->"
 
 /*
  * "self" is the set of chars that should be returned as single-character
@@ -898,6 +899,11 @@ other			.
 					return LEFT_ARROW;
 				}
 
+{right_arrow}	{
+					SET_YYLLOC();
+					return RIGHT_ARROW;
+				}
+
 {self}			{
 					SET_YYLLOC();
 					return yytext[0];
@@ -995,6 +1001,8 @@ other			.
 								return NOT_EQUALS;
 							if (yytext[0] == '!' && yytext[1] == '=')
 								return NOT_EQUALS;
+							if (yytext[0] == '-' && yytext[1] == '>')
+								return RIGHT_ARROW;
 						}
 					}
 

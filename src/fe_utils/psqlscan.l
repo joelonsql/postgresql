@@ -303,6 +303,7 @@ greater_equals	">="
 less_greater	"<>"
 not_equals		"!="
 left_arrow		"<-"
+right_arrow     "->"
 
 /*
  * "self" is the set of chars that should be returned as single-character
@@ -663,6 +664,10 @@ other			.
 				}
 
 {left_arrow}	{
+					ECHO;
+				}
+
+{right_arrow}	{
 					ECHO;
 				}
 
