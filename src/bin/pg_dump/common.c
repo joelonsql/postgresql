@@ -1113,3 +1113,36 @@ strInArray(const char *pattern, char **arr, int arr_size)
 	}
 	return -1;
 }
+
+/*
+ * TODO: Update this comment to match its being used for multiple purposes.
+ *
+ * However, if there are other objects in the loop, we must break the loop
+ * by making the ON SELECT rule a separately-dumped object.
+ *
+ * Because findLoop() finds shorter cycles before longer ones, it's likely
+ * that we will have previously fired repairViewRuleLoop() and removed the
+ * rule's dependency on the view.  Put it back to ensure the rule won't be
+ * emitted before the view.
+ *
+ * Note: this approach does *not* work for matviews, at the moment.
+ */
+void
+breakViewDependency(DumpableObject *viewobj,
+					DumpableObject *ruleobj,
+					DumpId postdataboundid)
+{
+	TableInfo  *viewinfo = (TableInfo *) viewobj;
+	RuleInfo   *ruleinfo = (RuleInfo *) ruleobj;
+
+	/* remove view's dependency on rule */
+	removeObjectDependency(viewobj, ruleobj->dumpId);
+	/* mark view to be printed with a dummy definition */
+	viewinfo->dummy_view = true;
+	/* mark rule as needing its own dump */
+	ruleinfo->separate = true;
+	/* put back rule's dependency on view */
+	addObjectDependency(ruleobj, viewobj->dumpId);
+	/* now that rule is separate, it must be post-data */
+	addObjectDependency(ruleobj, postdataboundid);
+}

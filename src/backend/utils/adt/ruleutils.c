@@ -71,6 +71,11 @@
 #include "utils/typcache.h"
 #include "utils/varlena.h"
 #include "utils/xml.h"
+#include "funcapi.h"
+#include "parser/analyze.h"
+#include "parser/parse_node.h"
+#include "catalog/pg_rewrite.h"
+#include "catalog/namespace.h"
 
 /* ----------
  * Pretty formatting constants
@@ -3601,6 +3606,74 @@ pg_get_function_sqlbody(PG_FUNCTION_ARGS)
 	ReleaseSysCache(proctup);
 
 	PG_RETURN_TEXT_P(cstring_to_text_with_len(buf.data, buf.len));
+}
+
+/*
+ * Walker function to check for foreign key joins
+ */
+static bool
+contains_foreign_key_join_walker(Node *node, bool *found)
+{
+	if (node == NULL)
+		return false;
+
+	if (IsA(node, JoinExpr))
+	{
+		JoinExpr   *join = (JoinExpr *) node;
+
+		if (join->fkJoin != NULL)
+		{
+			*found = true;
+			return true;
+		}
+	}
+
+	/* Continue walking the tree */
+	return expression_tree_walker(node, contains_foreign_key_join_walker, (void *) found);
+}
+
+/*
+ * pg_view_contains_foreign_key_join
+ *   Checks whether the view contains a foreign key join.
+ */
+Datum
+pg_view_contains_foreign_key_join(PG_FUNCTION_ARGS)
+{
+	Oid			view_oid = PG_GETARG_OID(0);
+	Relation	view_rel;
+	Query	   *view_query;
+	bool		found = false;
+
+	view_rel = relation_open(view_oid, AccessShareLock);
+
+	if (view_rel->rd_rel->relkind != RELKIND_VIEW)
+	{
+		relation_close(view_rel, AccessShareLock);
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				errmsg("relation \"%s\" is not a view",
+						RelationGetRelationName(view_rel))));
+	}
+
+	view_query = get_view_query(view_rel);
+
+	if (view_query == NULL)
+	{
+		relation_close(view_rel, AccessShareLock);
+		ereport(ERROR,
+				(errcode(ERRCODE_UNDEFINED_OBJECT),
+				errmsg("view \"%s\" has no associated query",
+						RelationGetRelationName(view_rel))));
+	}
+
+	(void) query_tree_walker(view_query,
+							contains_foreign_key_join_walker,
+							(void *) &found,
+							0);
+
+	relation_close(view_rel, AccessShareLock);
+
+	PG_RETURN_BOOL(found);
 }
 
 

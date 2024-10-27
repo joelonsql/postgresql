@@ -362,6 +362,7 @@ typedef struct _tableInfo
 	struct _tableDataInfo *dataObj; /* TableDataInfo, if dumping its data */
 	int			numTriggers;	/* number of triggers for table */
 	struct _triggerInfo *triggers;	/* array of TriggerInfo structs */
+	bool		has_fkjoin;		/* true if view contains a foreign key join */
 } TableInfo;
 
 typedef struct _tableAttachInfo
@@ -729,6 +730,10 @@ extern void parseOidArray(const char *str, Oid *array, int arraysize);
 extern void sortDumpableObjects(DumpableObject **objs, int numObjs,
 								DumpId preBoundaryId, DumpId postBoundaryId);
 extern void sortDumpableObjectsByTypeName(DumpableObject **objs, int numObjs);
+
+extern void breakViewDependency(DumpableObject *viewobj,
+								DumpableObject *ruleobj,
+								DumpId postdataboundid);
 
 /*
  * version specific routines
