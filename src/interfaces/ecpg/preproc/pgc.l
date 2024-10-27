@@ -464,6 +464,8 @@ cppline			{space}*#([^i][A-Za-z]*|{if}|{ifdef}|{ifndef}|{import})((\/\*[^*/]*\*+
 %%
 
 %{
+		static bool inleftarrow = false;
+
 		/* code to execute during start of each call of yylex() */
 		char *newdefsymbol = NULL;
 
@@ -876,6 +878,11 @@ cppline			{space}*#([^i][A-Za-z]*|{if}|{ifdef}|{ifndef}|{import})((\/\*[^*/]*\*+
 					 */
 					if (yytext[0] == ';' && struct_level == 0)
 						BEGIN(C);
+					if (yytext[0] == '-' && inleftarrow)
+					{
+						inleftarrow = false;
+						return LEFT_ARROW_MINUS;
+					}
 					return yytext[0];
 				}
 
@@ -904,10 +911,21 @@ cppline			{space}*#([^i][A-Za-z]*|{if}|{ifdef}|{ifndef}|{import})((\/\*[^*/]*\*+
 					if (nchars == 2 && yytext[0] == '<' && yytext[1] == '-')
 					{
 						/* Strip the unwanted chars from the token */
+						yyless(1);
+
+						inleftarrow = true;
+
+						return LEFT_ARROW_LESS;
+					}
+
+					if (nchars == 1 && yytext[0] == '-' && inleftarrow)
+					{
+						/* Strip the unwanted chars from the token */
 						if (nchars < yyleng)
 							yyless(nchars);
 
-						return LEFT_ARROW;
+						inleftarrow = false;
+						return LEFT_ARROW_MINUS;
 					}
 
 					/*

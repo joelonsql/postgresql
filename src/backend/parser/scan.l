@@ -455,6 +455,10 @@ other			.
 
 %%
 
+%{
+		static bool inleftarrow = false;
+%}
+
 {whitespace}	{
 					/* ignore */
 				}
@@ -900,6 +904,11 @@ other			.
 
 {self}			{
 					SET_YYLLOC();
+					if (yytext[0] == '-' && inleftarrow)
+					{
+						inleftarrow = false;
+						return LEFT_ARROW_MINUS;
+					}
 					return yytext[0];
 				}
 
@@ -928,10 +937,21 @@ other			.
 					if (nchars == 2 && yytext[0] == '<' && yytext[1] == '-')
 					{
 						/* Strip the unwanted chars from the token */
+						yyless(1);
+
+						inleftarrow = true;
+
+						return LEFT_ARROW_LESS;
+					}
+
+					if (nchars == 1 && yytext[0] == '-' && inleftarrow)
+					{
+						/* Strip the unwanted chars from the token */
 						if (nchars < yyleng)
 							yyless(nchars);
 
-						return LEFT_ARROW;
+						inleftarrow = false;
+						return LEFT_ARROW_MINUS;
 					}
 
 					/*
