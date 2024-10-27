@@ -366,7 +366,6 @@ less_equals		"<="
 greater_equals	">="
 less_greater	"<>"
 not_equals		"!="
-left_arrow		"<-"
 right_arrow		"->"
 
 /*
@@ -894,11 +893,6 @@ other			.
 					return NOT_EQUALS;
 				}
 
-{left_arrow}	{
-					SET_YYLLOC();
-					return LEFT_ARROW;
-				}
-
 {right_arrow}	{
 					SET_YYLLOC();
 					return RIGHT_ARROW;
@@ -930,6 +924,15 @@ other			.
 						slashstar = dashdash;
 					if (slashstar)
 						nchars = slashstar - yytext;
+
+					if (nchars == 2 && yytext[0] == '<' && yytext[1] == '-')
+					{
+						/* Strip the unwanted chars from the token */
+						if (nchars < yyleng)
+							yyless(nchars);
+
+						return LEFT_ARROW;
+					}
 
 					/*
 					 * For SQL compatibility, '+' and '-' cannot be the

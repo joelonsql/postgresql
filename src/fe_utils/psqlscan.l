@@ -302,7 +302,6 @@ less_equals		"<="
 greater_equals	">="
 less_greater	"<>"
 not_equals		"!="
-left_arrow		"<-"
 right_arrow     "->"
 
 /*
@@ -660,10 +659,6 @@ other			.
 				}
 
 {not_equals}	{
-					ECHO;
-				}
-
-{left_arrow}	{
 					ECHO;
 				}
 

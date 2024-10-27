@@ -335,7 +335,6 @@ less_equals		"<="
 greater_equals	">="
 less_greater	"<>"
 not_equals		"!="
-left_arrow		"<-"
 right_arrow		"->"
 
 /*
@@ -856,10 +855,6 @@ cppline			{space}*#([^i][A-Za-z]*|{if}|{ifdef}|{ifndef}|{import})((\/\*[^*/]*\*+
 					return NOT_EQUALS;
 				}
 
-{left_arrow}	{
-					return LEFT_ARROW;
-				}
-
 {right_arrow}	{
 					return RIGHT_ARROW;
 				}
@@ -905,6 +900,15 @@ cppline			{space}*#([^i][A-Za-z]*|{if}|{ifdef}|{ifndef}|{import})((\/\*[^*/]*\*+
 						slashstar = dashdash;
 					if (slashstar)
 						nchars = slashstar - yytext;
+
+					if (nchars == 2 && yytext[0] == '<' && yytext[1] == '-')
+					{
+						/* Strip the unwanted chars from the token */
+						if (nchars < yyleng)
+							yyless(nchars);
+
+						return LEFT_ARROW;
+					}
 
 					/*
 					 * For SQL compatibility, '+' and '-' cannot be the
