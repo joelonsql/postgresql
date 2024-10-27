@@ -48,9 +48,16 @@ ALTER TABLE t2 RENAME COLUMN c3_renamed TO c3;
 ALTER TABLE t1 RENAME COLUMN c1_renamed TO c1;
 \d+ v1
 
+-- Test so we didn't break the parser
+SELECT 1<-2; -- ok, false
+
 SELECT * FROM v1; -- ok
 
 SELECT * FROM t1 JOIN t2 KEY (c3) -> t1 (c1); -- ok
+SELECT * FROM t1 JOIN t2 KEY (c3) ->/*comment*/ t1 (c1); -- ok
+SELECT * FROM t1 JOIN t2 KEY (c3) /*comment*/-> t1 (c1); -- ok
+SELECT * FROM t1 JOIN t2 KEY (c3) /*comment*/->/*comment*/ t1 (c1); -- ok
+SELECT * FROM t1 JOIN t2 KEY (c3) - > t1 (c2); -- error
 SELECT * FROM t1 JOIN t2 KEY (c3) -> t1 (c2); -- error
 SELECT * FROM t1 JOIN t2 KEY (c4) -> t1 (c1); -- error
 SELECT * FROM t1 JOIN t2 KEY (c3,c4) -> t1 (c1,c2); -- error
@@ -61,6 +68,10 @@ SELECT * FROM t1 JOIN t2 KEY (c4) <- t1 (c1); -- error
 SELECT * FROM t1 JOIN t2 KEY (c3,c4) <- t1 (c1,c2); -- error
 
 SELECT * FROM t2 JOIN t1 KEY (c1) <- t2 (c3); -- ok
+SELECT * FROM t2 JOIN t1 KEY (c1) <-/*comment*/ t2 (c3); -- ok
+SELECT * FROM t2 JOIN t1 KEY (c1) /*comment*/<- t2 (c3); -- ok
+SELECT * FROM t2 JOIN t1 KEY (c1) /*comment*/<-/*comment*/ t2 (c3); -- ok
+SELECT * FROM t2 JOIN t1 KEY (c1) < - t2 (c3); -- error
 SELECT * FROM t2 JOIN t1 KEY (c1) <- t2 (c4); -- error
 SELECT * FROM t2 JOIN t1 KEY (c2) <- t2 (c3); -- error
 SELECT * FROM t2 JOIN t1 KEY (c1,c2) <- t2 (c3,c4); -- error

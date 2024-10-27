@@ -97,6 +97,13 @@ View definition:
    FROM t1
      JOIN t2 KEY (c3) -> t1 (c1);
 
+-- Test so we didn't break the parser
+SELECT 1<-2; -- ok, false
+ ?column? 
+----------
+ f
+(1 row)
+
 SELECT * FROM v1; -- ok
  c1 | c2 | c3 | c4 
 ----+----+----+----
@@ -111,6 +118,31 @@ SELECT * FROM t1 JOIN t2 KEY (c3) -> t1 (c1); -- ok
   3 | 30 |  3 | 30
 (2 rows)
 
+SELECT * FROM t1 JOIN t2 KEY (c3) ->/*comment*/ t1 (c1); -- ok
+ c1 | c2 | c3 | c4 
+----+----+----+----
+  1 | 10 |  1 | 10
+  3 | 30 |  3 | 30
+(2 rows)
+
+SELECT * FROM t1 JOIN t2 KEY (c3) /*comment*/-> t1 (c1); -- ok
+ c1 | c2 | c3 | c4 
+----+----+----+----
+  1 | 10 |  1 | 10
+  3 | 30 |  3 | 30
+(2 rows)
+
+SELECT * FROM t1 JOIN t2 KEY (c3) /*comment*/->/*comment*/ t1 (c1); -- ok
+ c1 | c2 | c3 | c4 
+----+----+----+----
+  1 | 10 |  1 | 10
+  3 | 30 |  3 | 30
+(2 rows)
+
+SELECT * FROM t1 JOIN t2 KEY (c3) - > t1 (c2); -- error
+ERROR:  syntax error at or near "-"
+LINE 1: SELECT * FROM t1 JOIN t2 KEY (c3) - > t1 (c2);
+                                          ^
 SELECT * FROM t1 JOIN t2 KEY (c3) -> t1 (c2); -- error
 ERROR:  there is no foreign key constraint on table "t2" (c3) referencing table "t1" (c2)
 LINE 1: SELECT * FROM t1 JOIN t2 KEY (c3) -> t1 (c2);
@@ -150,6 +182,31 @@ SELECT * FROM t2 JOIN t1 KEY (c1) <- t2 (c3); -- ok
   3 | 30 |  3 | 30
 (2 rows)
 
+SELECT * FROM t2 JOIN t1 KEY (c1) <-/*comment*/ t2 (c3); -- ok
+ c3 | c4 | c1 | c2 
+----+----+----+----
+  1 | 10 |  1 | 10
+  3 | 30 |  3 | 30
+(2 rows)
+
+SELECT * FROM t2 JOIN t1 KEY (c1) /*comment*/<- t2 (c3); -- ok
+ c3 | c4 | c1 | c2 
+----+----+----+----
+  1 | 10 |  1 | 10
+  3 | 30 |  3 | 30
+(2 rows)
+
+SELECT * FROM t2 JOIN t1 KEY (c1) /*comment*/<-/*comment*/ t2 (c3); -- ok
+ c3 | c4 | c1 | c2 
+----+----+----+----
+  1 | 10 |  1 | 10
+  3 | 30 |  3 | 30
+(2 rows)
+
+SELECT * FROM t2 JOIN t1 KEY (c1) < - t2 (c3); -- error
+ERROR:  syntax error at or near "<"
+LINE 1: SELECT * FROM t2 JOIN t1 KEY (c1) < - t2 (c3);
+                                          ^
 SELECT * FROM t2 JOIN t1 KEY (c1) <- t2 (c4); -- error
 ERROR:  there is no foreign key constraint on table "t2" (c4) referencing table "t1" (c1)
 LINE 1: SELECT * FROM t2 JOIN t1 KEY (c1) <- t2 (c4);
