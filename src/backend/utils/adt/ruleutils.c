@@ -12505,7 +12505,6 @@ get_from_clause_item(Node *jtnode, Query *query, deparse_context *context)
 				List			   *leftAttnums,
 								   *rightAttnums;
 				char			   *right_relname;
-				deparse_namespace  *dpns = (deparse_namespace *) linitial(context->namespaces);
 
 				/* Determine the direction string and assign left/right variables */
 				if (fkjn->fkdir == FKDIR_TO)

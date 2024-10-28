@@ -1406,7 +1406,7 @@ transformFromClauseItem(ParseState *pstate, Node *n,
 		}
 		else if (j->fkJoin)
 		{
-			ForeignKeyClause *fkjn = (ForeignKeyClause *) j->fkJoin;
+			ForeignKeyClause *fkjn = castNode(ForeignKeyClause, j->fkJoin);
 			List	   *referencingVars = NIL;
 			List	   *referencedVars = NIL;
 			ListCell   *lc,
