@@ -12504,7 +12504,7 @@ get_from_clause_item(Node *jtnode, Query *query, deparse_context *context)
 								   *right_rte;
 				List			   *leftAttnums,
 								   *rightAttnums;
-				char			   *right_relname;
+				int					right_rti;
 
 				/* Determine the direction string and assign left/right variables */
 				if (fkjn->fkdir == FKDIR_TO)
@@ -12518,6 +12518,7 @@ get_from_clause_item(Node *jtnode, Query *query, deparse_context *context)
 					/* Right side: referenced */
 					right_rte = rt_fetch(fkjn->referencedVarno, dpns->rtable);
 					rightAttnums = fkjn->referencedAttnums;
+					right_rti = fkjn->referencedVarno;
 				}
 				else if (fkjn->fkdir == FKDIR_FROM)
 				{
@@ -12530,6 +12531,7 @@ get_from_clause_item(Node *jtnode, Query *query, deparse_context *context)
 					/* Right side: referencing */
 					right_rte = rt_fetch(fkjn->referencingVarno, dpns->rtable);
 					rightAttnums = fkjn->referencingAttnums;
+					right_rti = fkjn->referencingVarno;
 				}
 				else
 				{
@@ -12558,12 +12560,7 @@ get_from_clause_item(Node *jtnode, Query *query, deparse_context *context)
 				/* Append the direction and right table name or alias */
 				appendStringInfoString(buf, fkdir_str);
 
-				/* Use the current table name or alias */
-				if (right_rte->alias)
-					right_relname = right_rte->alias->aliasname;
-				else
-					right_relname = generate_relation_name(right_rte->relid, NIL);
-				appendStringInfoString(buf, quote_identifier(right_relname));
+				appendStringInfoString(buf, quote_identifier(get_rtable_name(right_rti, context)));
 
 				appendStringInfoString(buf, " (");
 
