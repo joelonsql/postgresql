@@ -171,3 +171,6 @@ SELECT *
 FROM t1
 JOIN t2 KEY (c3,c4) -> t1 (c1,c2)
 RIGHT JOIN t4 KEY (c7,c8) -> t1 (c1,c2);
+
+ALTER TABLE t2
+    ADD CONSTRAINT t2_c3_fkey FOREIGN KEY (c3) REFERENCES t1 (c1);

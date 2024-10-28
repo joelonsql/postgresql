@@ -432,3 +432,5 @@ RIGHT JOIN t4 KEY (c7,c8) -> t1 (c1,c2);
     |    |    |    |    |   
 (3 rows)
 
+ALTER TABLE t2
+    ADD CONSTRAINT t2_c3_fkey FOREIGN KEY (c3) REFERENCES t1 (c1);
