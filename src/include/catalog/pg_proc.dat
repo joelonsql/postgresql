@@ -12399,9 +12399,5 @@
   proname => 'gist_stratnum_identity', prorettype => 'int2',
   proargtypes => 'int2',
   prosrc => 'gist_stratnum_identity' },
-{ oid => '9000', descr => 'check if a view contains a foreign key join',
-  proname => 'pg_view_contains_foreign_key_join', provolatile => 'v',
-  prorettype => 'bool', proargtypes => 'oid',
-  prosrc => 'pg_view_contains_foreign_key_join' },
 
 ]

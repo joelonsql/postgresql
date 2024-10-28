@@ -395,7 +395,7 @@ static void setupDumpWorker(Archive *AH);
 static TableInfo *getRootTableInfo(const TableInfo *tbinfo);
 static bool forcePartitionRootLoad(const TableInfo *tbinfo);
 static void read_dump_filters(const char *filename, DumpOptions *dopt);
-static void fixFkJoinsDependencies(DumpableObject **dobjs, int numObjs);
+
 
 int
 main(int argc, char **argv)
@@ -1043,8 +1043,6 @@ main(int argc, char **argv)
 	 * Add dummy dependencies to enforce the dump section ordering.
 	 */
 	addBoundaryDependencies(dobjs, numObjs, boundaryObjs);
-
-	fixFkJoinsDependencies(dobjs, numObjs);
 
 	/*
 	 * Sort the objects into a safe dump order (no forward references).
@@ -6818,7 +6816,6 @@ getTables(Archive *fout, int *numTables)
 	int			i_relacl;
 	int			i_acldefault;
 	int			i_ispartition;
-	int			i_has_fkjoin;
 
 	/*
 	 * Find all the tables and table-like objects.
@@ -6921,19 +6918,10 @@ getTables(Archive *fout, int *numTables)
 
 	if (fout->remoteVersion >= 100000)
 		appendPQExpBufferStr(query,
-							 "c.relispartition AS ispartition, ");
+							 "c.relispartition AS ispartition ");
 	else
 		appendPQExpBufferStr(query,
-							 "false AS ispartition, ");
-
-	if (fout->remoteVersion >= 180000)
-		appendPQExpBufferStr(query,
-							 "CASE WHEN c.relkind = 'v'::\"char\" "
-							 "THEN pg_catalog.pg_view_contains_foreign_key_join(c.oid) "
-							 "ELSE false END AS has_fkjoin ");
-	else
-		appendPQExpBufferStr(query,
-							 "false AS has_fkjoin ");
+							 "false AS ispartition ");
 
 	/*
 	 * Left join to pg_depend to pick up dependency info linking sequences to
@@ -7042,7 +7030,6 @@ getTables(Archive *fout, int *numTables)
 	i_relacl = PQfnumber(res, "relacl");
 	i_acldefault = PQfnumber(res, "acldefault");
 	i_ispartition = PQfnumber(res, "ispartition");
-	i_has_fkjoin = PQfnumber(res, "has_fkjoin");
 
 	if (dopt->lockWaitTimeout)
 	{
@@ -7122,7 +7109,6 @@ getTables(Archive *fout, int *numTables)
 			tblinfo[i].amname = pg_strdup(PQgetvalue(res, i, i_amname));
 		tblinfo[i].is_identity_sequence = (strcmp(PQgetvalue(res, i, i_is_identity_sequence), "t") == 0);
 		tblinfo[i].ispartition = (strcmp(PQgetvalue(res, i, i_ispartition), "t") == 0);
-		tblinfo[i].has_fkjoin = (strcmp(PQgetvalue(res, i, i_has_fkjoin), "t") == 0);
 
 		/* other fields were zeroed above */
 
@@ -19066,42 +19052,4 @@ read_dump_filters(const char *filename, DumpOptions *dopt)
 	}
 
 	filter_free(&fstate);
-}
-
-static void
-fixFkJoinsDependencies(DumpableObject **dobjs, int numObjs)
-{
-	for (int i = 0; i < numObjs; i++)
-	{
-		DumpableObject *dobj = dobjs[i];
-		TableInfo  *tbinfo;
-
-		if (dobj->objType != DO_TABLE)
-			continue;
-
-		tbinfo = (TableInfo *) dobj;
-
-		if (tbinfo->relkind != RELKIND_VIEW || !tbinfo->has_fkjoin)
-			continue;
-
-		for (int j = 0; j < dobj->nDeps; j++)
-		{
-			DumpableObject *depobj = findObjectByDumpId(dobj->dependencies[j]);
-			RuleInfo   *ruleinfo;
-
-			if (!depobj || depobj->objType != DO_RULE)
-				continue;
-
-			ruleinfo = (RuleInfo *) depobj;
-
-			if (ruleinfo->ruletable == tbinfo &&
-				strcmp(ruleinfo->dobj.name, "_RETURN") == 0)
-			{
-				breakViewDependency((DumpableObject *) tbinfo,
-									(DumpableObject *) ruleinfo,
-									numObjs);
-				break;
-			}
-		}
-	}
 }
