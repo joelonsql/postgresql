@@ -4259,12 +4259,12 @@ typedef struct DropSubscriptionStmt
 
 typedef struct ForeignKeyClause
 {
-	NodeTag             type;
-	List               *localCols;
+	NodeTag		type;
+	List	   *localCols;
 	ForeignKeyDirection fkdir;
-	char               *refAlias;
-	List               *refCols;
-	ParseLoc            location;   /* token location, or -1 if unknown */
+	char	   *refAlias;
+	List	   *refCols;
+	ParseLoc	location;		/* token location, or -1 if unknown */
 } ForeignKeyClause;
 
 #endif							/* PARSENODES_H */

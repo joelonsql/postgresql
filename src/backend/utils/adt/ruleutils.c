@@ -3651,7 +3651,7 @@ pg_view_contains_foreign_key_join(PG_FUNCTION_ARGS)
 		relation_close(view_rel, AccessShareLock);
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-				errmsg("relation \"%s\" is not a view",
+				 errmsg("relation \"%s\" is not a view",
 						RelationGetRelationName(view_rel))));
 	}
 
@@ -3662,14 +3662,14 @@ pg_view_contains_foreign_key_join(PG_FUNCTION_ARGS)
 		relation_close(view_rel, AccessShareLock);
 		ereport(ERROR,
 				(errcode(ERRCODE_UNDEFINED_OBJECT),
-				errmsg("view \"%s\" has no associated query",
+				 errmsg("view \"%s\" has no associated query",
 						RelationGetRelationName(view_rel))));
 	}
 
 	(void) query_tree_walker(view_query,
-							contains_foreign_key_join_walker,
-							(void *) &found,
-							0);
+							 contains_foreign_key_join_walker,
+							 (void *) &found,
+							 0);
 
 	relation_close(view_rel, AccessShareLock);
 
@@ -12495,18 +12495,21 @@ get_from_clause_item(Node *jtnode, Query *query, deparse_context *context)
 		{
 			if (IsA(j->fkJoin, ForeignKeyJoinNode))
 			{
-				ListCell		   *lc_left,
-								   *lc_right;
-				bool				first = true;
+				ListCell   *lc_left,
+						   *lc_right;
+				bool		first = true;
 				ForeignKeyJoinNode *fkjn = (ForeignKeyJoinNode *) j->fkJoin;
-				const char		   *fkdir_str;
-				RangeTblEntry	   *left_rte,
-								   *right_rte;
-				List			   *leftAttnums,
-								   *rightAttnums;
-				int					right_rti;
+				const char *fkdir_str;
+				RangeTblEntry *left_rte,
+						   *right_rte;
+				List	   *leftAttnums,
+						   *rightAttnums;
+				int			right_rti;
 
-				/* Determine the direction string and assign left/right variables */
+				/*
+				 * Determine the direction string and assign left/right
+				 * variables
+				 */
 				if (fkjn->fkdir == FKDIR_TO)
 				{
 					fkdir_str = " -> ";
@@ -12544,8 +12547,8 @@ get_from_clause_item(Node *jtnode, Query *query, deparse_context *context)
 				first = true;
 				foreach(lc_left, leftAttnums)
 				{
-					AttrNumber  attnum = lfirst_int(lc_left);
-					char       *colname = get_rte_attribute_name(left_rte, attnum);
+					AttrNumber	attnum = lfirst_int(lc_left);
+					char	   *colname = get_rte_attribute_name(left_rte, attnum);
 
 					if (!first)
 						appendStringInfoString(buf, ", ");
@@ -12568,8 +12571,8 @@ get_from_clause_item(Node *jtnode, Query *query, deparse_context *context)
 				first = true;
 				foreach(lc_right, rightAttnums)
 				{
-					AttrNumber  attnum = lfirst_int(lc_right);
-					char       *colname = get_rte_attribute_name(right_rte, attnum);
+					AttrNumber	attnum = lfirst_int(lc_right);
+					char	   *colname = get_rte_attribute_name(right_rte, attnum);
 
 					if (!first)
 						appendStringInfoString(buf, ", ");
@@ -12584,7 +12587,7 @@ get_from_clause_item(Node *jtnode, Query *query, deparse_context *context)
 			else
 			{
 				elog(ERROR, "unexpected node type for fkJoin: %d",
-					(int) nodeTag(j->fkJoin));
+					 (int) nodeTag(j->fkJoin));
 			}
 		}
 		else if (j->quals)

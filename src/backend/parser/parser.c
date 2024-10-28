@@ -210,7 +210,7 @@ base_yylex(YYSTYPE *lvalp, YYLTYPE *llocp, core_yyscan_t yyscanner)
 		case KEY:
 			{
 				if (next_token == '(')
-				cur_token = KEY_LA;
+					cur_token = KEY_LA;
 				break;
 			}
 

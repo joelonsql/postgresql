@@ -1412,10 +1412,10 @@ transformFromClauseItem(ParseState *pstate, Node *n,
 			ListCell   *lc,
 					   *rc;
 			RangeTblEntry *referencing_rte,
-						  *referenced_rte;
+					   *referenced_rte;
 			ParseNamespaceItem *referencing_rel,
-							   *referenced_rel,
-							   *other_rel;
+					   *referenced_rel,
+					   *other_rel;
 			List	   *referencing_cols,
 					   *referenced_cols;
 			ForeignKeyJoinNode *fkjn_node;
@@ -1438,9 +1438,9 @@ transformFromClauseItem(ParseState *pstate, Node *n,
 					if (other_rel)
 						ereport(ERROR,
 								(errcode(ERRCODE_AMBIGUOUS_ALIAS),
-								errmsg("table reference \"%s\" is ambiguous",
+								 errmsg("table reference \"%s\" is ambiguous",
 										fkjn->refAlias),
-								parser_errposition(pstate, fkjn->location)));
+								 parser_errposition(pstate, fkjn->location)));
 					other_rel = nsi;
 				}
 			}
@@ -1448,14 +1448,14 @@ transformFromClauseItem(ParseState *pstate, Node *n,
 			if (other_rel == NULL)
 				ereport(ERROR,
 						(errcode(ERRCODE_UNDEFINED_TABLE),
-						errmsg("table reference \"%s\" not found", fkjn->refAlias),
-						parser_errposition(pstate, fkjn->location)));
+						 errmsg("table reference \"%s\" not found", fkjn->refAlias),
+						 parser_errposition(pstate, fkjn->location)));
 
 			if (list_length(fkjn->refCols) != list_length(fkjn->localCols))
 				ereport(ERROR,
 						(errcode(ERRCODE_SYNTAX_ERROR),
-						errmsg("number of referencing and referenced columns must be the same"),
-						parser_errposition(pstate, fkjn->location)));
+						 errmsg("number of referencing and referenced columns must be the same"),
+						 parser_errposition(pstate, fkjn->location)));
 
 			if (fkjn->fkdir == FKDIR_FROM)
 			{
@@ -1489,10 +1489,10 @@ transformFromClauseItem(ParseState *pstate, Node *n,
 									referencing_cols, referenced_cols))
 				ereport(ERROR,
 						(errcode(ERRCODE_UNDEFINED_OBJECT),
-						errmsg("there is no foreign key constraint on table \"%s\" (%s) referencing table \"%s\" (%s)",
+						 errmsg("there is no foreign key constraint on table \"%s\" (%s) referencing table \"%s\" (%s)",
 								referencing_rte->eref->aliasname, ColumnListToString(referencing_cols),
 								referenced_rte->eref->aliasname, ColumnListToString(referenced_cols)),
-						parser_errposition(pstate, fkjn->location)));
+						 parser_errposition(pstate, fkjn->location)));
 
 			forboth(lc, referencing_cols, rc, referenced_cols)
 			{
@@ -1519,24 +1519,24 @@ transformFromClauseItem(ParseState *pstate, Node *n,
 				if (referencing_attnum == InvalidAttrNumber)
 					ereport(ERROR,
 							(errcode(ERRCODE_UNDEFINED_COLUMN),
-							errmsg("column \"%s\" not found in table \"%s\"",
+							 errmsg("column \"%s\" not found in table \"%s\"",
 									referencing_col, referencing_rte->eref->aliasname),
-							parser_errposition(pstate, fkjn->location)));
+							 parser_errposition(pstate, fkjn->location)));
 
 				if (referenced_attnum == InvalidAttrNumber)
 					ereport(ERROR,
 							(errcode(ERRCODE_UNDEFINED_COLUMN),
-							errmsg("column \"%s\" not found in table \"%s\"",
+							 errmsg("column \"%s\" not found in table \"%s\"",
 									referenced_col, referenced_rte->eref->aliasname),
-							parser_errposition(pstate, fkjn->location)));
+							 parser_errposition(pstate, fkjn->location)));
 
 				/* Get type information for referencing column */
 				get_atttypetypmodcoll(referencing_rte->relid, referencing_attnum,
-									&referencing_vartype, &referencing_vartypmod, &referencing_varcollid);
+									  &referencing_vartype, &referencing_vartypmod, &referencing_varcollid);
 
 				/* Get type information for referenced column */
 				get_atttypetypmodcoll(referenced_rte->relid, referenced_attnum,
-									&referenced_vartype, &referenced_vartypmod, &referenced_varcollid);
+									  &referenced_vartype, &referenced_vartypmod, &referenced_varcollid);
 
 				/* Build Vars */
 				referencing_var = makeVar(referencing_rel->p_rtindex,

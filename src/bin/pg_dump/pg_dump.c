@@ -19073,8 +19073,8 @@ fixFkJoinsDependencies(DumpableObject **dobjs, int numObjs)
 {
 	for (int i = 0; i < numObjs; i++)
 	{
-		DumpableObject  *dobj = dobjs[i];
-		TableInfo       *tbinfo;
+		DumpableObject *dobj = dobjs[i];
+		TableInfo  *tbinfo;
 
 		if (dobj->objType != DO_TABLE)
 			continue;
@@ -19087,7 +19087,7 @@ fixFkJoinsDependencies(DumpableObject **dobjs, int numObjs)
 		for (int j = 0; j < dobj->nDeps; j++)
 		{
 			DumpableObject *depobj = findObjectByDumpId(dobj->dependencies[j]);
-			RuleInfo       *ruleinfo;
+			RuleInfo   *ruleinfo;
 
 			if (!depobj || depobj->objType != DO_RULE)
 				continue;

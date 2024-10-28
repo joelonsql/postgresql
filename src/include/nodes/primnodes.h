@@ -2254,12 +2254,12 @@ typedef enum ForeignKeyDirection
 
 typedef struct ForeignKeyJoinNode
 {
-	NodeTag             type;
+	NodeTag		type;
 	ForeignKeyDirection fkdir;
-	Index               referencingVarno;    /* varno of the referencing relation */
-	List               *referencingAttnums;  /* List of attribute numbers (int) */
-	Index               referencedVarno;     /* varno of the referenced relation */
-	List               *referencedAttnums;   /* List of attribute numbers (int) */
+	Index		referencingVarno;	/* varno of the referencing relation */
+	List	   *referencingAttnums; /* List of attribute numbers (int) */
+	Index		referencedVarno;	/* varno of the referenced relation */
+	List	   *referencedAttnums;	/* List of attribute numbers (int) */
 } ForeignKeyJoinNode;
 
 /*----------
