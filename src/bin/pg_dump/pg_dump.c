@@ -19079,7 +19079,7 @@ fixFkJoinsDependencies(DumpableObject **dobjs, int numObjs)
 		if (dobj->objType != DO_TABLE)
 			continue;
 
-		tbinfo = castNode(TableInfo, dobj);
+		tbinfo = (TableInfo *) dobj;
 
 		if (tbinfo->relkind != RELKIND_VIEW || !tbinfo->has_fkjoin)
 			continue;
@@ -19092,7 +19092,7 @@ fixFkJoinsDependencies(DumpableObject **dobjs, int numObjs)
 			if (!depobj || depobj->objType != DO_RULE)
 				continue;
 
-			ruleinfo = castNode(RuleInfo, depobj);
+			ruleinfo = (RuleInfo *) depobj;
 
 			if (ruleinfo->ruletable == tbinfo &&
 				strcmp(ruleinfo->dobj.name, "_RETURN") == 0)
