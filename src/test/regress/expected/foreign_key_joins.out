@@ -235,6 +235,11 @@ SELECT * FROM t2 JOIN t1 KEY (c1,c2) -> t2 (c3,c4); -- error
 ERROR:  there is no foreign key constraint on table "t1" (c1, c2) referencing table "t2" (c3, c4)
 LINE 1: SELECT * FROM t2 JOIN t1 KEY (c1,c2) -> t2 (c3,c4);
                                  ^
+ALTER TABLE t2 DROP CONSTRAINT t2_c3_fkey; -- error
+ERROR:  cannot drop constraint t2_c3_fkey on table t2 because other objects depend on it
+DETAIL:  view v1 depends on constraint t2_c3_fkey on table t2
+HINT:  Use DROP ... CASCADE to drop the dependent objects too.
+DROP VIEW v1;
 ALTER TABLE t2 DROP CONSTRAINT t2_c3_fkey;
 SELECT * FROM t1 JOIN t2 KEY (c3) -> t1 (c1); -- error
 ERROR:  there is no foreign key constraint on table "t2" (c3) referencing table "t1" (c1)
@@ -432,5 +437,10 @@ RIGHT JOIN t4 KEY (c7,c8) -> t1 (c1,c2);
     |    |    |    |    |   
 (3 rows)
 
+-- Recrate stuff for pg_dump tests
 ALTER TABLE t2
     ADD CONSTRAINT t2_c3_fkey FOREIGN KEY (c3) REFERENCES t1 (c1);
+CREATE VIEW v1 AS
+SELECT *
+FROM t1
+JOIN t2 KEY (c3) -> t1 (c1);

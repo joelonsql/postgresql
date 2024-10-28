@@ -99,7 +99,7 @@ static Node *transformFrameOffset(ParseState *pstate, int frameOptions,
 								  Oid rangeopfamily, Oid rangeopcintype, Oid *inRangeFunc,
 								  Node *clause);
 static Node *transformForeignKeyJoin(ParseState *pstate, List *referencedVars, List *referencingVars);
-static bool foreign_key_exists(Oid referencing_relid, Oid referenced_relid, List *referencing_cols, List *referenced_cols);
+static Oid find_foreign_key(Oid referencing_relid, Oid referenced_relid, List *referencing_cols, List *referenced_cols);
 static char *ColumnListToString(const List *columns);
 
 
@@ -1418,6 +1418,7 @@ transformFromClauseItem(ParseState *pstate, Node *n,
 					   *other_rel;
 			List	   *referencing_cols,
 					   *referenced_cols;
+			Oid			fkoid;
 			ForeignKeyJoinNode *fkjn_node;
 			List	   *referencing_attnums = NIL;
 			List	   *referenced_attnums = NIL;
@@ -1484,9 +1485,11 @@ transformFromClauseItem(ParseState *pstate, Node *n,
 			referencing_rte = rt_fetch(referencing_rel->p_rtindex, pstate->p_rtable);
 			referenced_rte = rt_fetch(referenced_rel->p_rtindex, pstate->p_rtable);
 
+			fkoid = find_foreign_key(referencing_rte->relid, referenced_rte->relid,
+									 referencing_cols, referenced_cols);
+
 			/* Check if foreign key constraint exists */
-			if (!foreign_key_exists(referencing_rte->relid, referenced_rte->relid,
-									referencing_cols, referenced_cols))
+			if (fkoid == InvalidOid)
 				ereport(ERROR,
 						(errcode(ERRCODE_UNDEFINED_OBJECT),
 						 errmsg("there is no foreign key constraint on table \"%s\" (%s) referencing table \"%s\" (%s)",
@@ -1576,6 +1579,7 @@ transformFromClauseItem(ParseState *pstate, Node *n,
 			fkjn_node->referencingAttnums = referencing_attnums;
 			fkjn_node->referencedVarno = referenced_rel->p_rtindex;
 			fkjn_node->referencedAttnums = referenced_attnums;
+			fkjn_node->constraint = fkoid;
 
 			/* Overwrite j->fkJoin with the new ForeignKeyJoinNode */
 			j->fkJoin = (Node *) fkjn_node;
@@ -4045,14 +4049,14 @@ transformFrameOffset(ParseState *pstate, int frameOptions,
 	return node;
 }
 
-static bool
-foreign_key_exists(Oid referencing_relid, Oid referenced_relid, List *referencing_cols, List *referenced_cols)
+static Oid
+find_foreign_key(Oid referencing_relid, Oid referenced_relid, List *referencing_cols, List *referenced_cols)
 {
 	HeapTuple	tuple;
 	ScanKeyData skey[1];
 	SysScanDesc scan;
 	Relation	relation;
-	bool		found = false;
+	Oid			fkoid = InvalidOid;
 
 	relation = table_open(ConstraintRelationId, AccessShareLock);
 
@@ -4077,7 +4081,7 @@ foreign_key_exists(Oid referencing_relid, Oid referenced_relid, List *referencin
 		int16	   *conkey;
 		int16	   *confkey;
 		int			nkeys;
-		int			i;
+		bool		found = true;
 
 		if (con->contype != CONSTRAINT_FOREIGN || con->confrelid != referenced_relid)
 			continue;
@@ -4105,8 +4109,7 @@ foreign_key_exists(Oid referencing_relid, Oid referenced_relid, List *referencin
 		conkey = (int16 *) ARR_DATA_PTR(conkey_array);
 		confkey = (int16 *) ARR_DATA_PTR(confkey_array);
 
-		found = true;
-		for (i = 0; i < nkeys; i++)
+		for (int i = 0; i < nkeys; i++)
 		{
 			char	   *ref_col = strVal(list_nth(referencing_cols, i));
 			char	   *refd_col = strVal(list_nth(referenced_cols, i));
@@ -4121,13 +4124,16 @@ foreign_key_exists(Oid referencing_relid, Oid referenced_relid, List *referencin
 		}
 
 		if (found)
+		{
+			fkoid = con->oid;
 			break;
+		}
 	}
 
 	systable_endscan(scan);
 	table_close(relation, AccessShareLock);
 
-	return found;
+	return fkoid;
 }
 
 /*

@@ -80,6 +80,9 @@ SELECT * FROM t2 JOIN t1 KEY (c1) -> t2 (c4); -- error
 SELECT * FROM t2 JOIN t1 KEY (c2) -> t2 (c3); -- error
 SELECT * FROM t2 JOIN t1 KEY (c1,c2) -> t2 (c3,c4); -- error
 
+ALTER TABLE t2 DROP CONSTRAINT t2_c3_fkey; -- error
+
+DROP VIEW v1;
 ALTER TABLE t2 DROP CONSTRAINT t2_c3_fkey;
 
 SELECT * FROM t1 JOIN t2 KEY (c3) -> t1 (c1); -- error
@@ -172,5 +175,10 @@ FROM t1
 JOIN t2 KEY (c3,c4) -> t1 (c1,c2)
 RIGHT JOIN t4 KEY (c7,c8) -> t1 (c1,c2);
 
+-- Recrate stuff for pg_dump tests
 ALTER TABLE t2
     ADD CONSTRAINT t2_c3_fkey FOREIGN KEY (c3) REFERENCES t1 (c1);
+CREATE VIEW v1 AS
+SELECT *
+FROM t1
+JOIN t2 KEY (c3) -> t1 (c1);
