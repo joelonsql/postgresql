@@ -99,7 +99,7 @@ static Node *transformFrameOffset(ParseState *pstate, int frameOptions,
 								  Oid rangeopfamily, Oid rangeopcintype, Oid *inRangeFunc,
 								  Node *clause);
 static Node *transformForeignKeyJoin(ParseState *pstate, List *referencedVars, List *referencingVars);
-static Oid find_foreign_key(Oid referencing_relid, Oid referenced_relid, List *referencing_cols, List *referenced_cols);
+static Oid	find_foreign_key(Oid referencing_relid, Oid referenced_relid, List *referencing_cols, List *referenced_cols);
 static char *ColumnListToString(const List *columns);
 
 

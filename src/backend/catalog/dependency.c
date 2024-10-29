@@ -2135,7 +2135,7 @@ find_expr_references_walker(Node *node,
 	}
 	else if (IsA(node, JoinExpr))
 	{
-		JoinExpr	   *join = (JoinExpr *) node;
+		JoinExpr   *join = (JoinExpr *) node;
 
 		if (join->fkJoin)
 		{
