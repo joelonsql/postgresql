@@ -444,6 +444,25 @@ CREATE VIEW v1 AS
 SELECT *
 FROM t1
 JOIN t2 KEY (c3) -> t1 (c1);
+CREATE TABLE t5
+(
+    c9 int not null,
+    c10 int not null,
+    c11 int not null,
+    c12 int not null,
+    CONSTRAINT t5_pkey PRIMARY KEY (c9, c10),
+    CONSTRAINT t5_c11_c12_fkey FOREIGN KEY (c11, c12) REFERENCES t1 (c1, c2)
+);
+INSERT INTO t5 (c9, c10, c11, c12) VALUES (1, 2, 1, 10);
+INSERT INTO t5 (c9, c10, c11, c12) VALUES (3, 4, 3, 30);
+CREATE TABLE t6
+(
+    c13 int not null,
+    c14 int not null,
+    CONSTRAINT t6_c13_c14_fkey FOREIGN KEY (c13, c14) REFERENCES t5 (c9, c10)
+);
+INSERT INTO t6 (c13, c14) VALUES (1, 2);
+INSERT INTO t6 (c13, c14) VALUES (3, 4);
 --
 -- Test subqueries
 --
@@ -561,9 +580,7 @@ FROM q2 JOIN q4 KEY (q4_c3, q4_c4) -> q2 (q2_c1, q2_c2);
 --
 -- Test VIEWs
 --
-DROP VIEW v1;
-DROP VIEW v2;
-DROP VIEW v3;
+DROP VIEW v1, v2, v3;
 CREATE VIEW v1 AS
 SELECT c1 AS v1_c1, c2 AS v1_c2 FROM t1;
 CREATE VIEW v2 AS
@@ -584,3 +601,133 @@ FROM v2 JOIN v4 KEY (v4_c3, v4_c4) -> v2 (v2_c1, v2_c2);
      3 |    30 |     3 |    30
 (2 rows)
 
+DROP VIEW v1, v2, v3, v4;
+--
+-- Test subqueries, CTEs, and views
+--
+WITH
+q2 AS
+(
+    SELECT
+        q1_c1 AS q2_c1,
+        q1_c2 AS q2_c2
+    FROM
+    (
+        SELECT c1 AS q1_c1, c2 AS q1_c2 FROM t1
+    ) AS q1
+)
+SELECT
+    q2_c1,
+    q2_c2,
+    v4_c3,
+    v4_c4
+FROM q2 JOIN v4 KEY (v4_c3, v4_c4) -> q2 (q2_c1, q2_c2);
+ERROR:  relation "v4" does not exist
+LINE 17: FROM q2 JOIN v4 KEY (v4_c3, v4_c4) -> q2 (q2_c1, q2_c2);
+                      ^
+--
+-- Test subqueries, CTEs and VIEWs containing joins
+--
+SELECT
+    q1.c11,
+    q1.c12,
+    t6.c13,
+    t6.c14
+FROM
+(
+    SELECT
+        t5.c9,
+        t5.c10,
+        t5.c11,
+        t5.c12
+    FROM t5
+    JOIN t1 KEY (c1, c2) <- t5 (c11, c12)
+    JOIN t1 AS t1_2 KEY (c1, c2) <- t5 (c11, c12)
+    JOIN t1 AS t1_3 KEY (c1, c2) <- t5 (c11, c12)
+) AS q1
+JOIN t6 KEY (c13, c14) -> q1 (c9, c10);
+ c11 | c12 | c13 | c14 
+-----+-----+-----+-----
+   1 |  10 |   1 |   2
+   3 |  30 |   3 |   4
+(2 rows)
+
+WITH
+q1 AS
+(
+    SELECT
+        t5.c9,
+        t5.c10,
+        t5.c11,
+        t5.c12
+    FROM t5
+    JOIN t1 KEY (c1, c2) <- t5 (c11, c12)
+    JOIN t1 AS t1_2 KEY (c1, c2) <- t5 (c11, c12)
+    JOIN t1 AS t1_3 KEY (c1, c2) <- t5 (c11, c12)
+)
+SELECT
+    q1.c11,
+    q1.c12,
+    t6.c13,
+    t6.c14
+FROM q1
+JOIN t6 KEY (c13, c14) -> q1 (c9, c10);
+ c11 | c12 | c13 | c14 
+-----+-----+-----+-----
+   1 |  10 |   1 |   2
+   3 |  30 |   3 |   4
+(2 rows)
+
+CREATE VIEW v1 AS
+SELECT
+    t5.c9,
+    t5.c10,
+    t5.c11,
+    t5.c12
+FROM t5
+JOIN t1 KEY (c1, c2) <- t5 (c11, c12)
+JOIN t1 AS t1_2 KEY (c1, c2) <- t5 (c11, c12)
+JOIN t1 AS t1_3 KEY (c1, c2) <- t5 (c11, c12);
+SELECT
+    v1.c11,
+    v1.c12,
+    t6.c13,
+    t6.c14
+FROM v1
+JOIN t6 KEY (c13, c14) -> v1 (c9, c10);
+ c11 | c12 | c13 | c14 
+-----+-----+-----+-----
+   1 |  10 |   1 |   2
+   3 |  30 |   3 |   4
+(2 rows)
+
+DROP VIEW v1;
+--
+-- Test disallowed filtering of referenced table
+--
+CREATE VIEW v1 AS
+SELECT * FROM t1 WHERE c1 > 0;
+CREATE VIEW v2 AS
+SELECT * FROM t2 WHERE c3 > 0;
+-- invalid since v1 is filtered and is the referenced table
+SELECT *
+FROM v1
+JOIN t2 KEY (c3) -> v1 (c1);
+ERROR:  cannot use filtered view "v1" as referenced table in foreign key join
+DETAIL:  Using a filtered view as the referenced table would violate referential integrity.
+-- OK, filtering allowed since v2 is the referencing table
+SELECT *
+FROM t1
+JOIN v2 KEY (c3) -> t1 (c1);
+ c1 | c2 | c3 | c4 
+----+----+----+----
+  1 | 10 |  1 | 10
+  3 | 30 |  3 | 30
+(2 rows)
+
+-- invalid, since v1 is filtered and is the referenced table
+SELECT *
+FROM v1
+JOIN v2 KEY (c3) -> v1 (c1);
+ERROR:  cannot use filtered view "v1" as referenced table in foreign key join
+DETAIL:  Using a filtered view as the referenced table would violate referential integrity.
