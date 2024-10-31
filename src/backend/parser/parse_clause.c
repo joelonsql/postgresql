@@ -101,7 +101,7 @@ static Node *transformFrameOffset(ParseState *pstate, int frameOptions,
 static Node *transformForeignKeyJoin(ParseState *pstate, List *referencedVars, List *referencingVars);
 static Oid	find_foreign_key(Oid referencing_relid, Oid referenced_relid, List *referencing_cols, List *referenced_cols);
 static char *ColumnListToString(const List *columns);
-static Oid	get_base_relid_from_rte(RangeTblEntry *rte, List **colnames_out, List *colaliases);
+static Oid	get_base_relid_from_rte(ParseState *pstate, RangeTblEntry *rte, List **colnames_out, List *colaliases);
 static Var *get_var_for_column(ParseState *pstate, RangeTblEntry *rte, int varno, char *colname, int location);
 
 /*
@@ -1491,8 +1491,8 @@ transformFromClauseItem(ParseState *pstate, Node *n,
 			referenced_rte = rt_fetch(referenced_rel->p_rtindex, pstate->p_rtable);
 
 			/* Adjust for subqueries */
-			referencing_relid = get_base_relid_from_rte(referencing_rte, &referencing_base_cols, referencing_cols);
-			referenced_relid = get_base_relid_from_rte(referenced_rte, &referenced_base_cols, referenced_cols);
+			referencing_relid = get_base_relid_from_rte(pstate, referencing_rte, &referencing_base_cols, referencing_cols);
+			referenced_relid = get_base_relid_from_rte(pstate, referenced_rte, &referenced_base_cols, referenced_cols);
 
 			if (referencing_relid == InvalidOid || referenced_relid == InvalidOid)
 			{
@@ -4149,66 +4149,208 @@ ColumnListToString(const List *columns)
 }
 
 static Oid
-get_base_relid_from_rte(RangeTblEntry *rte, List **colnames_out, List *colaliases)
+get_base_relid_from_rte(ParseState *pstate, RangeTblEntry *rte, List **colnames_out, List *colaliases)
 {
-	if (rte->relid != InvalidOid)
+	if (rte->rtekind == RTE_RELATION)
 	{
-		/* It's a base relation */
+		/* Base relation */
 		*colnames_out = colaliases; /* Column names are as given */
 		return rte->relid;
 	}
 	else if (rte->rtekind == RTE_SUBQUERY)
 	{
 		Query	   *subquery = rte->subquery;
-		RangeTblEntry *sub_rte;
-		Index		sub_varno;
-		ListCell   *lc_col;
-		ListCell   *lc_alias;
 		List	   *colnames = NIL;
-		Var		   *var;
+		List	   *sub_colaliases = NIL;
+		ListCell   *lc_alias;
+		ListCell   *lc_tle;
+		RangeTblEntry *sub_rte;
+		Oid			base_relid;
 
-		/* Check if subquery is a simple SELECT from one base table */
+		/* Check if subquery is simple enough */
 		if (list_length(subquery->rtable) != 1 || subquery->setOperations != NULL)
 			return InvalidOid;
 
 		sub_rte = (RangeTblEntry *) linitial(subquery->rtable);
-		sub_varno = (Index) 1;	/* subquery rtable indexing starts from 1 */
 
-		if (sub_rte->relid == InvalidOid || sub_rte->rtekind != RTE_RELATION)
-			return InvalidOid;
-
-		/*
-		 * Verify that the subquery targetlist columns map to base table
-		 * columns
-		 */
-		forboth(lc_alias, colaliases, lc_col, subquery->targetList)
+		/* Map columns from current subquery to inner subquery/base table */
+		forboth(lc_alias, colaliases, lc_tle, subquery->targetList)
 		{
 			char	   *alias_name = strVal(lfirst(lc_alias));
-			TargetEntry *tle = (TargetEntry *) lfirst(lc_col);
-			char	   *base_colname;
+			TargetEntry *tle = (TargetEntry *) lfirst(lc_tle);
+
+			if (tle->resjunk)
+				continue;
 
 			if (strcmp(tle->resname, alias_name) != 0)
 				return InvalidOid;	/* Alias names do not match target list */
 
-			if (!IsA(tle->expr, Var))
-				return InvalidOid;	/* Column is an expression, not a direct
-									 * reference */
+			if (IsA(tle->expr, Var))
+			{
+				/* Direct reference, collect var information */
+				Var		   *var = (Var *) tle->expr;
+				char	   *base_colname = get_rte_attribute_name(sub_rte, var->varattno);
 
-			var = (Var *) tle->expr;
-
-			if (var->varno != sub_varno)
-				return InvalidOid;	/* Var does not reference the expected RTE */
-
-			/* Retrieve the base column name */
-			base_colname = get_rte_attribute_name(sub_rte, var->varattno);
-
-			/* Collect base column names */
-			colnames = lappend(colnames, makeString(base_colname));
+				/* Collect the corresponding alias for recursive call */
+				sub_colaliases = lappend(sub_colaliases, makeString(base_colname));
+			}
+			else
+			{
+				/* Expression, cannot process */
+				return InvalidOid;
+			}
 		}
 
-		/* All columns are directly mapped to the base table */
+		/* Recursively get base relid and column names */
+		base_relid = get_base_relid_from_rte(pstate, sub_rte, &colnames, sub_colaliases);
+
+		if (base_relid == InvalidOid)
+			return InvalidOid;
+
 		*colnames_out = colnames;
-		return sub_rte->relid;
+		return base_relid;
+	}
+	else if (rte->rtekind == RTE_CTE)
+	{
+		CommonTableExpr *cte = NULL;
+		Query	   *ctequery;
+		List	   *colnames = NIL;
+		List	   *sub_colaliases = NIL;
+		ListCell   *lc_alias;
+		ListCell   *lc_tle;
+		RangeTblEntry *sub_rte;
+		Oid			base_relid;
+
+		/* Find the CTE definition */
+		ListCell   *lc;
+
+		foreach(lc, pstate->p_ctenamespace)
+		{
+			cte = (CommonTableExpr *) lfirst(lc);
+			if (strcmp(cte->ctename, rte->ctename) == 0)
+				break;
+			cte = NULL;
+		}
+
+		if (!cte)
+			return InvalidOid;	/* CTE not found */
+
+		/* Get the CTE's query */
+		ctequery = castNode(Query, cte->ctequery);
+
+		/* Check if CTE query is simple enough */
+		if (list_length(ctequery->rtable) != 1 || ctequery->setOperations != NULL)
+			return InvalidOid;
+
+		sub_rte = (RangeTblEntry *) linitial(ctequery->rtable);
+
+		/* Map columns from CTE to inner subquery/base table */
+		forboth(lc_alias, colaliases, lc_tle, ctequery->targetList)
+		{
+			char	   *alias_name = strVal(lfirst(lc_alias));
+			TargetEntry *tle = (TargetEntry *) lfirst(lc_tle);
+
+			if (tle->resjunk)
+				continue;
+
+			if (strcmp(tle->resname, alias_name) != 0)
+				return InvalidOid;	/* Alias names do not match target list */
+
+			if (IsA(tle->expr, Var))
+			{
+				/* Direct reference, collect var information */
+				Var		   *var = (Var *) tle->expr;
+				char	   *base_colname = get_rte_attribute_name(sub_rte, var->varattno);
+
+				/* Collect the corresponding alias for recursive call */
+				sub_colaliases = lappend(sub_colaliases, makeString(base_colname));
+			}
+			else
+			{
+				/* Expression, cannot process */
+				return InvalidOid;
+			}
+		}
+
+		/* Recursively get base relid and column names */
+		base_relid = get_base_relid_from_rte(pstate, sub_rte, &colnames, sub_colaliases);
+
+		if (base_relid == InvalidOid)
+			return InvalidOid;
+
+		*colnames_out = colnames;
+		return base_relid;
+	}
+	else if (rte->rtekind == RTE_CTE)
+	{
+		CommonTableExpr *cte = NULL;
+		Query	   *ctequery;
+		List	   *colnames = NIL;
+		List	   *sub_colaliases = NIL;
+		ListCell   *lc_alias;
+		ListCell   *lc_tle;
+		RangeTblEntry *sub_rte;
+		Oid			base_relid;
+
+		/* Find the CTE definition */
+		ListCell   *lc;
+
+		foreach(lc, pstate->p_ctenamespace)
+		{
+			cte = (CommonTableExpr *) lfirst(lc);
+			if (strcmp(cte->ctename, rte->ctename) == 0)
+				break;
+			cte = NULL;
+		}
+
+		if (!cte)
+			return InvalidOid;	/* CTE not found */
+
+		/* Get the CTE's query */
+		ctequery = castNode(Query, cte->ctequery);
+
+		/* Check if CTE query is simple enough */
+		if (list_length(ctequery->rtable) != 1 || ctequery->setOperations != NULL)
+			return InvalidOid;
+
+		sub_rte = (RangeTblEntry *) linitial(ctequery->rtable);
+
+		/* Map columns from CTE to inner subquery/base table */
+		forboth(lc_alias, colaliases, lc_tle, ctequery->targetList)
+		{
+			char	   *alias_name = strVal(lfirst(lc_alias));
+			TargetEntry *tle = (TargetEntry *) lfirst(lc_tle);
+
+			if (tle->resjunk)
+				continue;
+
+			if (strcmp(tle->resname, alias_name) != 0)
+				return InvalidOid;	/* Alias names do not match target list */
+
+			if (IsA(tle->expr, Var))
+			{
+				/* Direct reference, collect var information */
+				Var		   *var = (Var *) tle->expr;
+				char	   *base_colname = get_rte_attribute_name(sub_rte, var->varattno);
+
+				/* Collect the corresponding alias for recursive call */
+				sub_colaliases = lappend(sub_colaliases, makeString(base_colname));
+			}
+			else
+			{
+				/* Expression, cannot process */
+				return InvalidOid;
+			}
+		}
+
+		/* Recursively get base relid and column names */
+		base_relid = get_base_relid_from_rte(pstate, sub_rte, &colnames, sub_colaliases);
+
+		if (base_relid == InvalidOid)
+			return InvalidOid;
+
+		*colnames_out = colnames;
+		return base_relid;
 	}
 	else
 	{
@@ -4266,6 +4408,112 @@ get_var_for_column(ParseState *pstate, RangeTblEntry *rte, int varno, char *coln
 					 errmsg("column \"%s\" does not exist in subquery", colname),
 					 parser_errposition(pstate, location)));
 		/* Build a Var node referencing the subquery's output column */
+		var = makeVar(varno,
+					  tle->resno,
+					  exprType((Node *) tle->expr),
+					  exprTypmod((Node *) tle->expr),
+					  exprCollation((Node *) tle->expr),
+					  0);
+	}
+	else if (rte->rtekind == RTE_CTE)
+	{
+		/* CTE */
+		TargetEntry *tle = NULL;
+		ListCell   *lc;
+		CommonTableExpr *cte = NULL;
+		ListCell   *lc_cte;
+
+		/* Find the referenced CTE */
+		foreach(lc_cte, pstate->p_ctenamespace)
+		{
+			cte = (CommonTableExpr *) lfirst(lc_cte);
+			if (strcmp(cte->ctename, rte->ctename) == 0)
+				break;
+		}
+
+		if (!cte)
+			ereport(ERROR,
+					(errcode(ERRCODE_UNDEFINED_TABLE),
+					 errmsg("CTE \"%s\" does not exist", rte->ctename),
+					 parser_errposition(pstate, location)));
+
+		/* Find the matching column in the CTE's target list */
+		foreach(lc, GetCTETargetList(cte))
+		{
+			TargetEntry *sub_tle = (TargetEntry *) lfirst(lc);
+
+			if (strcmp(sub_tle->resname, colname) == 0)
+			{
+				if (!IsA(sub_tle->expr, Var))
+					ereport(ERROR,
+							(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+							 errmsg("foreign key joins involving expressions in CTEs are not supported"),
+							 parser_errposition(pstate, location)));
+				tle = sub_tle;
+				break;
+			}
+		}
+
+		if (!tle)
+			ereport(ERROR,
+					(errcode(ERRCODE_UNDEFINED_COLUMN),
+					 errmsg("column \"%s\" does not exist in CTE \"%s\"", colname, rte->ctename),
+					 parser_errposition(pstate, location)));
+
+		/* Build a Var node referencing the CTE's output column */
+		var = makeVar(varno,
+					  tle->resno,
+					  exprType((Node *) tle->expr),
+					  exprTypmod((Node *) tle->expr),
+					  exprCollation((Node *) tle->expr),
+					  0);
+	}
+	else if (rte->rtekind == RTE_CTE)
+	{
+		/* CTE */
+		TargetEntry *tle = NULL;
+		ListCell   *lc;
+		CommonTableExpr *cte = NULL;
+		ListCell   *lc_cte;
+
+		/* Find the referenced CTE */
+		foreach(lc_cte, pstate->p_ctenamespace)
+		{
+			cte = (CommonTableExpr *) lfirst(lc_cte);
+			if (strcmp(cte->ctename, rte->ctename) == 0)
+				break;
+		}
+
+		if (!cte)
+			ereport(ERROR,
+					(errcode(ERRCODE_UNDEFINED_TABLE),
+					 errmsg("CTE \"%s\" does not exist", rte->ctename),
+					 parser_errposition(pstate, location)));
+
+		/* Find the matching column in the CTE's target list */
+		foreach(lc, GetCTETargetList(cte))
+		{
+			TargetEntry *sub_tle = (TargetEntry *) lfirst(lc);
+
+			if (strcmp(sub_tle->resname, colname) == 0)
+			{
+				if (!IsA(sub_tle->expr, Var))
+					ereport(ERROR,
+							(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+							 errmsg("foreign key joins involving expressions in CTEs are not supported"),
+							 parser_errposition(pstate, location)));
+				tle = sub_tle;
+				break;
+			}
+		}
+
+		if (!tle)
+			ereport(ERROR,
+					(errcode(ERRCODE_UNDEFINED_COLUMN),
+					 errmsg("column \"%s\" does not exist in CTE \"%s\"", colname, rte->ctename),
+					 parser_errposition(pstate, location)));
+
+		/* Build a Var node referencing the CTE's output column */
 		var = makeVar(varno,
 					  tle->resno,
 					  exprType((Node *) tle->expr),
