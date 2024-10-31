@@ -444,3 +444,72 @@ CREATE VIEW v1 AS
 SELECT *
 FROM t1
 JOIN t2 KEY (c3) -> t1 (c1);
+--
+-- Test subqueries
+--
+SELECT
+    a.c1,
+    a.c2,
+    b.c3,
+    b.c4
+FROM t1 AS a
+JOIN (
+    SELECT * FROM t2
+) AS b KEY (c3) -> a (c1);
+ c1 | c2 | c3 | c4 
+----+----+----+----
+  1 | 10 |  1 | 10
+  3 | 30 |  3 | 30
+(2 rows)
+
+SELECT
+    a.c1,
+    a.c2,
+    b.c3,
+    b.c4
+FROM (
+    SELECT * FROM t1
+) AS a
+JOIN (
+    SELECT * FROM t2
+) AS b KEY (c3) -> a (c1);
+ c1 | c2 | c3 | c4 
+----+----+----+----
+  1 | 10 |  1 | 10
+  3 | 30 |  3 | 30
+(2 rows)
+
+SELECT
+    a.t1_c1,
+    a.t1_c2,
+    b.t2_c3,
+    b.t2_c4
+FROM (
+    SELECT c1 AS t1_c1, c2 AS t1_c2 FROM t1
+) AS a
+JOIN (
+    SELECT c3 AS t2_c3, c4 AS t2_c4 FROM t2
+) AS b KEY (t2_c3) -> a (t1_c1);
+ t1_c1 | t1_c2 | t2_c3 | t2_c4 
+-------+-------+-------+-------
+     1 |    10 |     1 |    10
+     3 |    30 |     3 |    30
+(2 rows)
+
+/*
+SELECT
+    a.outer_c1,
+    a.outer_c2,
+    b.outer_c3,
+    b.outer_c4
+FROM (
+    SELECT mid_c1 AS outer_c1, mid_c2 AS outer_c2 FROM (
+        SELECT c1 AS mid_c1, c2 AS mid_c2 FROM t1
+    ) sub1
+) AS a
+JOIN (
+    SELECT mid_c3 AS outer_c3, mid_c4 AS outer_c4 FROM (
+        SELECT c3 AS mid_c3, c4 AS mid_c4 FROM t2
+    ) sub2
+) AS b KEY (outer_c3) -> a (outer_c1);
+*/

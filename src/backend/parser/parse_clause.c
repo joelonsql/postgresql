@@ -101,7 +101,8 @@ static Node *transformFrameOffset(ParseState *pstate, int frameOptions,
 static Node *transformForeignKeyJoin(ParseState *pstate, List *referencedVars, List *referencingVars);
 static Oid	find_foreign_key(Oid referencing_relid, Oid referenced_relid, List *referencing_cols, List *referenced_cols);
 static char *ColumnListToString(const List *columns);
-
+static Oid	get_base_relid_from_rte(RangeTblEntry *rte, List **colnames_out, List *colaliases);
+static Var *get_var_for_column(ParseState *pstate, RangeTblEntry *rte, int varno, char *colname, int location);
 
 /*
  * transformFromClause -
@@ -1418,10 +1419,14 @@ transformFromClauseItem(ParseState *pstate, Node *n,
 					   *other_rel;
 			List	   *referencing_cols,
 					   *referenced_cols;
+			List	   *referencing_base_cols = NIL;
+			List	   *referenced_base_cols = NIL;
 			Oid			fkoid;
 			ForeignKeyJoinNode *fkjn_node;
 			List	   *referencing_attnums = NIL;
 			List	   *referenced_attnums = NIL;
+			Oid			referencing_relid;
+			Oid			referenced_relid;
 
 			other_rel = NULL;
 
@@ -1485,8 +1490,24 @@ transformFromClauseItem(ParseState *pstate, Node *n,
 			referencing_rte = rt_fetch(referencing_rel->p_rtindex, pstate->p_rtable);
 			referenced_rte = rt_fetch(referenced_rel->p_rtindex, pstate->p_rtable);
 
-			fkoid = find_foreign_key(referencing_rte->relid, referenced_rte->relid,
-									 referencing_cols, referenced_cols);
+			/* Adjust for subqueries */
+			referencing_relid = get_base_relid_from_rte(referencing_rte, &referencing_base_cols, referencing_cols);
+			referenced_relid = get_base_relid_from_rte(referenced_rte, &referenced_base_cols, referenced_cols);
+
+			if (referencing_relid == InvalidOid || referenced_relid == InvalidOid)
+			{
+				ereport(ERROR,
+						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+						 errmsg("foreign key joins involving complex subqueries are not supported"),
+						 parser_errposition(pstate, fkjn->location)));
+			}
+
+			/*
+			 * Proceed with finding the foreign key constraint using base
+			 * column names
+			 */
+			fkoid = find_foreign_key(referencing_relid, referenced_relid,
+									 referencing_base_cols, referenced_base_cols);
 
 			/* Check if foreign key constraint exists */
 			if (fkoid == InvalidOid)
@@ -1499,61 +1520,13 @@ transformFromClauseItem(ParseState *pstate, Node *n,
 
 			forboth(lc, referencing_cols, rc, referenced_cols)
 			{
-				char	   *referencing_col,
-						   *referenced_col;
-				AttrNumber	referencing_attnum,
-							referenced_attnum;
-				Oid			referencing_vartype,
-							referenced_vartype;
-				int32		referencing_vartypmod,
-							referenced_vartypmod;
-				Oid			referencing_varcollid,
-							referenced_varcollid;
-				Var		   *referencing_var,
-						   *referenced_var;
+				char	   *referencing_col = strVal(lfirst(lc));
+				char	   *referenced_col = strVal(lfirst(rc));
+				Var		   *referencing_var;
+				Var		   *referenced_var;
 
-				referencing_col = strVal(lfirst(lc));
-				referenced_col = strVal(lfirst(rc));
-
-				/* Get attribute numbers for the columns */
-				referencing_attnum = get_attnum(referencing_rte->relid, referencing_col);
-				referenced_attnum = get_attnum(referenced_rte->relid, referenced_col);
-
-				if (referencing_attnum == InvalidAttrNumber)
-					ereport(ERROR,
-							(errcode(ERRCODE_UNDEFINED_COLUMN),
-							 errmsg("column \"%s\" not found in table \"%s\"",
-									referencing_col, referencing_rte->eref->aliasname),
-							 parser_errposition(pstate, fkjn->location)));
-
-				if (referenced_attnum == InvalidAttrNumber)
-					ereport(ERROR,
-							(errcode(ERRCODE_UNDEFINED_COLUMN),
-							 errmsg("column \"%s\" not found in table \"%s\"",
-									referenced_col, referenced_rte->eref->aliasname),
-							 parser_errposition(pstate, fkjn->location)));
-
-				/* Get type information for referencing column */
-				get_atttypetypmodcoll(referencing_rte->relid, referencing_attnum,
-									  &referencing_vartype, &referencing_vartypmod, &referencing_varcollid);
-
-				/* Get type information for referenced column */
-				get_atttypetypmodcoll(referenced_rte->relid, referenced_attnum,
-									  &referenced_vartype, &referenced_vartypmod, &referenced_varcollid);
-
-				/* Build Vars */
-				referencing_var = makeVar(referencing_rel->p_rtindex,
-										  referencing_attnum,
-										  referencing_vartype,
-										  referencing_vartypmod,
-										  referencing_varcollid,
-										  0);
-				referenced_var = makeVar(referenced_rel->p_rtindex,
-										 referenced_attnum,
-										 referenced_vartype,
-										 referenced_vartypmod,
-										 referenced_varcollid,
-										 0);
+				referencing_var = get_var_for_column(pstate, referencing_rte, referencing_rel->p_rtindex, referencing_col, fkjn->location);
+				referenced_var = get_var_for_column(pstate, referenced_rte, referenced_rel->p_rtindex, referenced_col, fkjn->location);
 
 				/* Mark vars for SELECT privilege */
 				markVarForSelectPriv(pstate, referencing_var);
@@ -1564,8 +1537,8 @@ transformFromClauseItem(ParseState *pstate, Node *n,
 				referencedVars = lappend(referencedVars, referenced_var);
 
 				/* Collect attribute numbers */
-				referencing_attnums = lappend_int(referencing_attnums, referencing_attnum);
-				referenced_attnums = lappend_int(referenced_attnums, referenced_attnum);
+				referencing_attnums = lappend_int(referencing_attnums, referencing_var->varattno);
+				referenced_attnums = lappend_int(referenced_attnums, referenced_var->varattno);
 			}
 
 			/* Generate the join qualifications */
@@ -4173,4 +4146,140 @@ ColumnListToString(const List *columns)
 	}
 
 	return string.data;
+}
+
+static Oid
+get_base_relid_from_rte(RangeTblEntry *rte, List **colnames_out, List *colaliases)
+{
+	if (rte->relid != InvalidOid)
+	{
+		/* It's a base relation */
+		*colnames_out = colaliases; /* Column names are as given */
+		return rte->relid;
+	}
+	else if (rte->rtekind == RTE_SUBQUERY)
+	{
+		Query	   *subquery = rte->subquery;
+		RangeTblEntry *sub_rte;
+		Index		sub_varno;
+		ListCell   *lc_col;
+		ListCell   *lc_alias;
+		List	   *colnames = NIL;
+		Var		   *var;
+
+		/* Check if subquery is a simple SELECT from one base table */
+		if (list_length(subquery->rtable) != 1 || subquery->setOperations != NULL)
+			return InvalidOid;
+
+		sub_rte = (RangeTblEntry *) linitial(subquery->rtable);
+		sub_varno = (Index) 1;	/* subquery rtable indexing starts from 1 */
+
+		if (sub_rte->relid == InvalidOid || sub_rte->rtekind != RTE_RELATION)
+			return InvalidOid;
+
+		/*
+		 * Verify that the subquery targetlist columns map to base table
+		 * columns
+		 */
+		forboth(lc_alias, colaliases, lc_col, subquery->targetList)
+		{
+			char	   *alias_name = strVal(lfirst(lc_alias));
+			TargetEntry *tle = (TargetEntry *) lfirst(lc_col);
+			char	   *base_colname;
+
+			if (strcmp(tle->resname, alias_name) != 0)
+				return InvalidOid;	/* Alias names do not match target list */
+
+			if (!IsA(tle->expr, Var))
+				return InvalidOid;	/* Column is an expression, not a direct
+									 * reference */
+
+			var = (Var *) tle->expr;
+
+			if (var->varno != sub_varno)
+				return InvalidOid;	/* Var does not reference the expected RTE */
+
+			/* Retrieve the base column name */
+			base_colname = get_rte_attribute_name(sub_rte, var->varattno);
+
+			/* Collect base column names */
+			colnames = lappend(colnames, makeString(base_colname));
+		}
+
+		/* All columns are directly mapped to the base table */
+		*colnames_out = colnames;
+		return sub_rte->relid;
+	}
+	else
+	{
+		/* Unsupported RTE kind for FK join */
+		return InvalidOid;
+	}
+}
+
+static Var *
+get_var_for_column(ParseState *pstate, RangeTblEntry *rte, int varno, char *colname, int location)
+{
+	Var		   *var = NULL;
+	int			attnum;
+	int32		vartypmod;
+	Oid			vartype;
+	Oid			varcollation;
+
+	if (rte->rtekind == RTE_RELATION)
+	{
+		/* Base relation */
+		attnum = get_attnum(rte->relid, colname);
+		if (attnum == InvalidAttrNumber)
+			ereport(ERROR,
+					(errcode(ERRCODE_UNDEFINED_COLUMN),
+					 errmsg("column \"%s\" does not exist", colname),
+					 parser_errposition(pstate, location)));
+		/* Get type information */
+		get_atttypetypmodcoll(rte->relid, attnum, &vartype, &vartypmod, &varcollation);
+		var = makeVar(varno, attnum, vartype, vartypmod, varcollation, 0);
+	}
+	else if (rte->rtekind == RTE_SUBQUERY)
+	{
+		/* Subquery */
+		TargetEntry *tle = NULL;
+		ListCell   *lc;
+
+		foreach(lc, rte->subquery->targetList)
+		{
+			TargetEntry *sub_tle = (TargetEntry *) lfirst(lc);
+
+			if (strcmp(sub_tle->resname, colname) == 0)
+			{
+				if (!IsA(sub_tle->expr, Var))
+					ereport(ERROR,
+							(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+							 errmsg("foreign key joins involving expressions in subqueries are not supported"),
+							 parser_errposition(pstate, location)));
+				tle = sub_tle;
+				break;
+			}
+		}
+		if (!tle)
+			ereport(ERROR,
+					(errcode(ERRCODE_UNDEFINED_COLUMN),
+					 errmsg("column \"%s\" does not exist in subquery", colname),
+					 parser_errposition(pstate, location)));
+		/* Build a Var node referencing the subquery's output column */
+		var = makeVar(varno,
+					  tle->resno,
+					  exprType((Node *) tle->expr),
+					  exprTypmod((Node *) tle->expr),
+					  exprCollation((Node *) tle->expr),
+					  0);
+	}
+	else
+	{
+		/* Other RTE kinds are not supported for FK joins */
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("foreign key joins involving this type of relation are not supported"),
+				 parser_errposition(pstate, location)));
+	}
+	return var;
 }
