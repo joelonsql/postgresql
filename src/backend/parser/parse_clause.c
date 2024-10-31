@@ -48,6 +48,7 @@
 #include "utils/rel.h"
 #include "utils/syscache.h"
 #include "utils/fmgroids.h"
+#include "rewrite/rewriteHandler.h"
 
 
 static int	extractRemainingColumns(ParseState *pstate,
@@ -4153,9 +4154,71 @@ get_base_relid_from_rte(ParseState *pstate, RangeTblEntry *rte, List **colnames_
 {
 	if (rte->rtekind == RTE_RELATION)
 	{
-		/* Base relation */
-		*colnames_out = colaliases; /* Column names are as given */
-		return rte->relid;
+		/* Base relation or view */
+		Relation	rel = table_open(rte->relid, AccessShareLock);
+		bool		is_view = rel->rd_rel->relkind == RELKIND_VIEW;
+
+		table_close(rel, AccessShareLock);
+
+		if (!is_view)
+		{
+			/* Base relation */
+			*colnames_out = colaliases; /* Column names are as given */
+			return rte->relid;
+		}
+		else
+		{
+			/* View - get base relation from view definition */
+			Relation	viewrel = table_open(rte->relid, AccessShareLock);
+			Query	   *viewQuery = get_view_query(viewrel);
+			List	   *sub_colaliases = NIL;
+			ListCell   *lc_alias;
+			ListCell   *lc_tle;
+			RangeTblEntry *sub_rte;
+			Oid			base_relid;
+
+			table_close(viewrel, AccessShareLock);
+
+			/* Check if view query is simple enough */
+			if (list_length(viewQuery->rtable) != 1 || viewQuery->setOperations != NULL)
+				return InvalidOid;
+
+			sub_rte = (RangeTblEntry *) linitial(viewQuery->rtable);
+
+			/* Map columns from view to base table */
+			forboth(lc_alias, colaliases, lc_tle, viewQuery->targetList)
+			{
+				char	   *alias_name = strVal(lfirst(lc_alias));
+				TargetEntry *tle = (TargetEntry *) lfirst(lc_tle);
+
+				if (tle->resjunk)
+					continue;
+
+				if (strcmp(tle->resname, alias_name) != 0)
+					return InvalidOid;	/* Alias names do not match target
+										 * list */
+
+				if (IsA(tle->expr, Var))
+				{
+					/* Direct reference, collect var information */
+					Var		   *var = (Var *) tle->expr;
+					char	   *base_colname = get_rte_attribute_name(sub_rte, var->varattno);
+
+					/* Collect the corresponding alias for recursive call */
+					sub_colaliases = lappend(sub_colaliases, makeString(base_colname));
+				}
+				else
+				{
+					/* Expression, cannot process */
+					return InvalidOid;
+				}
+			}
+
+			/* Recursively get base relid and column names */
+			base_relid = get_base_relid_from_rte(pstate, sub_rte, colnames_out, sub_colaliases);
+
+			return base_relid;
+		}
 	}
 	else if (rte->rtekind == RTE_SUBQUERY)
 	{
@@ -4370,16 +4433,64 @@ get_var_for_column(ParseState *pstate, RangeTblEntry *rte, int varno, char *coln
 
 	if (rte->rtekind == RTE_RELATION)
 	{
-		/* Base relation */
-		attnum = get_attnum(rte->relid, colname);
-		if (attnum == InvalidAttrNumber)
-			ereport(ERROR,
-					(errcode(ERRCODE_UNDEFINED_COLUMN),
-					 errmsg("column \"%s\" does not exist", colname),
-					 parser_errposition(pstate, location)));
-		/* Get type information */
-		get_atttypetypmodcoll(rte->relid, attnum, &vartype, &vartypmod, &varcollation);
-		var = makeVar(varno, attnum, vartype, vartypmod, varcollation, 0);
+		/* Base relation or view */
+		Relation	rel = table_open(rte->relid, AccessShareLock);
+		bool		is_view = rel->rd_rel->relkind == RELKIND_VIEW;
+
+		table_close(rel, AccessShareLock);
+
+		if (!is_view)
+		{
+			/* Base relation */
+			attnum = get_attnum(rte->relid, colname);
+			if (attnum == InvalidAttrNumber)
+				ereport(ERROR,
+						(errcode(ERRCODE_UNDEFINED_COLUMN),
+						 errmsg("column \"%s\" does not exist", colname),
+						 parser_errposition(pstate, location)));
+			/* Get type information */
+			get_atttypetypmodcoll(rte->relid, attnum, &vartype, &vartypmod, &varcollation);
+			var = makeVar(varno, attnum, vartype, vartypmod, varcollation, 0);
+		}
+		else
+		{
+			/* View - get base relation from view definition */
+			Relation	viewrel = table_open(rte->relid, AccessShareLock);
+			Query	   *viewQuery = get_view_query(viewrel);
+			ListCell   *lc;
+
+			table_close(viewrel, AccessShareLock);
+
+			/* Find matching column in view's target list */
+			foreach(lc, viewQuery->targetList)
+			{
+				TargetEntry *tle = (TargetEntry *) lfirst(lc);
+
+				if (strcmp(tle->resname, colname) == 0)
+				{
+					if (!IsA(tle->expr, Var))
+						ereport(ERROR,
+								(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+								 errmsg("foreign key joins involving expressions in views are not supported"),
+								 parser_errposition(pstate, location)));
+
+					/* Build a Var node referencing the view's output column */
+					var = makeVar(varno,
+								  tle->resno,
+								  exprType((Node *) tle->expr),
+								  exprTypmod((Node *) tle->expr),
+								  exprCollation((Node *) tle->expr),
+								  0);
+					break;
+				}
+			}
+
+			if (var == NULL)
+				ereport(ERROR,
+						(errcode(ERRCODE_UNDEFINED_COLUMN),
+						 errmsg("column \"%s\" does not exist in view", colname),
+						 parser_errposition(pstate, location)));
+		}
 	}
 	else if (rte->rtekind == RTE_SUBQUERY)
 	{

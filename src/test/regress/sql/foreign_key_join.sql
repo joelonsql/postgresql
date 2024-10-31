@@ -274,3 +274,30 @@ SELECT
     q4_c3,
     q4_c4
 FROM q2 JOIN q4 KEY (q4_c3, q4_c4) -> q2 (q2_c1, q2_c2);
+
+--
+-- Test VIEWs
+--
+
+DROP VIEW v1;
+DROP VIEW v2;
+DROP VIEW v3;
+
+CREATE VIEW v1 AS
+SELECT c1 AS v1_c1, c2 AS v1_c2 FROM t1;
+
+CREATE VIEW v2 AS
+SELECT v1_c1 AS v2_c1, v1_c2 AS v2_c2 FROM v1;
+
+CREATE VIEW v3 AS
+SELECT c3 AS v3_c3, c4 AS v3_c4 FROM t2;
+
+CREATE VIEW v4 AS
+SELECT v3_c3 AS v4_c3, v3_c4 AS v4_c4 FROM v3;
+
+SELECT
+    v2_c1,
+    v2_c2,
+    v4_c3,
+    v4_c4
+FROM v2 JOIN v4 KEY (v4_c3, v4_c4) -> v2 (v2_c1, v2_c2);
