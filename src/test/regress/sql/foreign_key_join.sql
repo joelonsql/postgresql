@@ -434,3 +434,24 @@ JOIN v2 KEY (c3) -> t1 (c1);
 SELECT *
 FROM v1
 JOIN v2 KEY (c3) -> v1 (c1);
+
+--
+-- Test disallowed non-unique referenced table
+--
+
+/*
+SELECT
+    q1.c11,
+    q1.c12,
+    t1.c1,
+    t1.c2
+FROM
+(
+    SELECT
+        t5.c11,
+        t5.c12
+    FROM t5
+    JOIN t6 KEY (c13, c14) -> t5 (c9, c10)
+) AS q1
+JOIN t1 KEY (c1, c2) <- q1 (c11, c12);
+*/
