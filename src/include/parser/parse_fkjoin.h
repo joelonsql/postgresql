@@ -16,6 +16,6 @@
 #include "parser/parse_node.h"
 
 
-extern Node *transformForeignKeyJoinNode(ParseState *pstate, JoinExpr *j, ParseNamespaceItem *r_nsitem, List *l_namespace);
+extern void transformForeignKeyJoinNode(ParseState *pstate, JoinExpr *j, ParseNamespaceItem *r_nsitem, List *l_namespace);
 
 #endif							/* PARSE_FKJOIN_H */

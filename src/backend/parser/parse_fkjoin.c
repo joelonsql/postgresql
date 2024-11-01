@@ -44,6 +44,7 @@ static RangeTblEntry *find_rte_with_target_columns(ParseState *pstate, Query *qu
 												   List *colaliases, List **out_colnames);
 static List *map_columns_to_base(List *colaliases, List *targetList, RangeTblEntry *sub_rte);
 static Oid	process_query_rte(ParseState *pstate, Query *query, List *colaliases, List **colnames_out, bool is_referenced);
+static void	inspect_fk_joins(ParseState *pstate, Query *query, Node *jtnode, RangeTblEntry *sub_rte);
 
 /*
  * transformForeignKeyJoinNode
@@ -58,7 +59,7 @@ static Oid	process_query_rte(ParseState *pstate, Query *query, List *colaliases,
  * and j->fkJoin with a new ForeignKeyJoinNode containing the validated foreign key
  * information.
  */
-extern Node *
+extern void
 transformForeignKeyJoinNode(ParseState *pstate, JoinExpr *j, ParseNamespaceItem *r_nsitem, List *l_namespace)
 {
 	ForeignKeyClause *fkjn = castNode(ForeignKeyClause, j->fkJoin);
@@ -727,40 +728,41 @@ find_rte_with_target_columns(ParseState *pstate, Query *query, List *target_coln
 	{
 		RangeTblEntry *candidate_rte = (RangeTblEntry *) lfirst(lc_rte);
 		List	   *candidate_cols = NIL;
-		bool		has_target_cols = false;
+		bool		has_all_target_cols = true;
 
-		/* Check if this RTE contains our target columns */
-		ListCell   *lc_tle;
+		/* Check if this RTE contains all our target columns */
+		ListCell   *lc_target;
 
-		foreach(lc_tle, query->targetList)
+		foreach(lc_target, target_colnames)
 		{
-			TargetEntry *tle = (TargetEntry *) lfirst(lc_tle);
-			ListCell   *lc_target;
+			char *target_colname = strVal(lfirst(lc_target));
+			bool found_col = false;
 
-			if (tle->resjunk)
-				continue;
-
-			foreach(lc_target, target_colnames)
+			ListCell   *lc_tle;
+			foreach(lc_tle, query->targetList)
 			{
-				if (strcmp(tle->resname, strVal(lfirst(lc_target))) == 0)
-				{
-					if (IsA(tle->expr, Var))
-					{
-						Var		   *var = (Var *) tle->expr;
+				TargetEntry *tle = (TargetEntry *) lfirst(lc_tle);
 
-						if (var->varno == rtindex)
-						{
-							has_target_cols = true;
-							break;
-						}
-					}
+				if (tle->resjunk)
+					continue;
+
+				if (strcmp(tle->resname, target_colname) == 0 &&
+					IsA(tle->expr, Var) &&
+					((Var *) tle->expr)->varno == rtindex)
+				{
+					found_col = true;
+					break;
 				}
 			}
-			if (has_target_cols)
+
+			if (!found_col)
+			{
+				has_all_target_cols = false;
 				break;
+			}
 		}
 
-		if (has_target_cols)
+		if (has_all_target_cols)
 		{
 			Oid			candidate_relid = get_base_relid_from_rte(pstate, candidate_rte,
 																  &candidate_cols, colaliases, false);
@@ -869,10 +871,26 @@ process_query_rte(ParseState *pstate, Query *query, List *colaliases, List **col
 		sub_rte = (RangeTblEntry *) linitial(query->rtable);
 	else						/* Must be one or more JOINs */
 	{
+		FromExpr   *jointree = query->jointree;
+
 		sub_rte = find_rte_with_target_columns(pstate, query, target_colnames,
 											   colaliases, colnames_out);
 		if (!sub_rte)
 			return InvalidOid;
+
+		if (is_referenced && IsA(jointree->fromlist, List))
+		{
+			ListCell   *lc;
+
+			foreach(lc, jointree->fromlist)
+			{
+				Node   *jtnode = (Node *) lfirst(lc);
+
+				inspect_fk_joins(pstate, query, jtnode, sub_rte);
+			}
+		}
+
+
 	}
 
 	/* Map columns from outer query to inner query/base table */
@@ -885,4 +903,107 @@ process_query_rte(ParseState *pstate, Query *query, List *colaliases, List **col
 										 sub_colaliases, is_referenced);
 
 	return base_relid;
+}
+
+
+static void
+inspect_fk_joins(ParseState *pstate, Query *query, Node *jtnode, RangeTblEntry *sub_rte)
+{
+	JoinExpr   *j;
+	ForeignKeyJoinNode *fkjn;
+	RangeTblEntry *referencing_rte;
+	List       *referencing_attnums;
+	ListCell   *lc;
+
+	if (jtnode == NULL)
+		return;
+
+	if (!IsA(jtnode, JoinExpr))
+		return;  /* No join to check, so return true */
+
+	j = (JoinExpr *) jtnode;
+
+	/* Recursively check left side */
+	if (j->larg)
+	{
+		inspect_fk_joins(pstate, query, j->larg, sub_rte);
+	}
+
+	/* Recursively check right side */
+	if (j->rarg)
+	{
+		inspect_fk_joins(pstate, query, j->rarg, sub_rte);
+	}
+
+	/* Now check the current join */
+
+	if (j->fkJoin == NULL)
+	{
+		ereport(ERROR,
+				(errcode(ERRCODE_INTEGRITY_CONSTRAINT_VIOLATION),
+				 errmsg("virtual foreign key constraint violation"),
+				 errdetail("The derived table contains a join that is not a foreign key join")));
+	}
+
+	/* Assert that fkJoin is a ForeignKeyJoinNode */
+	Assert(IsA(j->fkJoin, ForeignKeyJoinNode));
+	fkjn = (ForeignKeyJoinNode *) j->fkJoin;
+
+	/* Safety check for rtable */
+	Assert(query->rtable != NIL);
+
+	/* Safety check for varno values */
+	Assert(fkjn->referencingVarno > 0 &&
+		   fkjn->referencedVarno > 0 &&
+		   fkjn->referencingVarno <= list_length(query->rtable) &&
+		   fkjn->referencedVarno <= list_length(query->rtable));
+
+	/* Get the RTEs using rt_fetch */
+	referencing_rte = rt_fetch(fkjn->referencingVarno, query->rtable);
+	/* We already asserted that the varno values are valid, so this RTE must exist */
+	Assert(referencing_rte != NULL);
+
+	/* Check if sub_rte is the referencing relation for this join */
+	if (sub_rte != referencing_rte)
+	{
+		ereport(ERROR,
+				(errcode(ERRCODE_INTEGRITY_CONSTRAINT_VIOLATION),
+				 errmsg("virtual foreign key constraint violation"),
+				 errdetail("Referenced columns target a non-referencing table in derived table, violating uniqueness")));
+	}
+
+	/* Now check if all referencing columns are non-nullable */
+	referencing_attnums = fkjn->referencingAttnums;
+
+	foreach(lc, referencing_attnums)
+	{
+		int            attnum = lfirst_int(lc);
+		HeapTuple      tuple;
+		Form_pg_attribute attr;
+
+		/* Get the attribute tuple */
+		tuple = SearchSysCache2(ATTNUM,
+								ObjectIdGetDatum(referencing_rte->relid),
+								Int16GetDatum(attnum));
+
+		Assert(HeapTupleIsValid(tuple));
+
+		attr = (Form_pg_attribute) GETSTRUCT(tuple);
+
+		/* Check if the attribute is non-nullable */
+		if (!attr->attnotnull)
+		{
+			ReleaseSysCache(tuple);
+			ereport(ERROR,
+					(errcode(ERRCODE_INTEGRITY_CONSTRAINT_VIOLATION),
+					 errmsg("virtual foreign key constraint violation"),
+					 errdetail("Nullable columns in derived table's referencing relation violate referential integrity")));
+		}
+
+		/* Release the syscache tuple */
+		ReleaseSysCache(tuple);
+	}
+
+	/* All conditions passed for this join */
+	return;
 }

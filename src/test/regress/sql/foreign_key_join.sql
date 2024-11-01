@@ -205,6 +205,42 @@ CREATE TABLE t6
 
 INSERT INTO t6 (c13, c14) VALUES (1, 2);
 INSERT INTO t6 (c13, c14) VALUES (3, 4);
+INSERT INTO t6 (c13, c14) VALUES (3, 4);
+
+CREATE TABLE t7
+(
+    c15 int not null,
+    c16 int not null,
+    CONSTRAINT t7_c15_c16_fkey FOREIGN KEY (c15, c16) REFERENCES t5 (c9, c10)
+);
+
+INSERT INTO t7 (c15, c16) VALUES (1, 2);
+INSERT INTO t7 (c15, c16) VALUES (1, 2);
+INSERT INTO t7 (c15, c16) VALUES (3, 4);
+
+CREATE TABLE t8
+(
+    c17 int not null,
+    c18 int not null,
+    c19 int,
+    c20 int,
+    CONSTRAINT t8_pkey PRIMARY KEY (c17, c18),
+    CONSTRAINT t8_c19_c20_fkey FOREIGN KEY (c19, c20) REFERENCES t1 (c1, c2)
+);
+
+INSERT INTO t8 (c17, c18, c19, c20) VALUES (1, 2, 1, 10);
+INSERT INTO t8 (c17, c18, c19, c20) VALUES (3, 4, 3, 30);
+
+CREATE TABLE t9
+(
+    c21 int not null,
+    c22 int not null,
+    CONSTRAINT t9_c21_c22_fkey FOREIGN KEY (c21, c22) REFERENCES t8 (c17, c18)
+);
+
+INSERT INTO t9 (c21, c22) VALUES (1, 2);
+INSERT INTO t9 (c21, c22) VALUES (3, 4);
+INSERT INTO t9 (c21, c22) VALUES (3, 4);
 
 --
 -- Test subqueries
@@ -436,22 +472,61 @@ FROM v1
 JOIN v2 KEY (c3) -> v1 (c1);
 
 --
--- Test disallowed non-unique referenced table
+-- Test allowed joins not affecting uniqueness
 --
 
-/*
 SELECT
     q1.c11,
     q1.c12,
-    t1.c1,
-    t1.c2
+    t6.c13,
+    t6.c14
 FROM
 (
     SELECT
+        t5.c9,
+        t5.c10,
         t5.c11,
         t5.c12
     FROM t5
+    JOIN t1 KEY (c1, c2) <- t5 (c11, c12)
+) AS q1
+JOIN t6 KEY (c13, c14) -> q1 (c9, c10);
+
+--
+-- Test disallowed non-unique referenced table
+--
+
+SELECT
+    q1.c11,
+    q1.c12,
+    t7.c15,
+    t7.c16
+FROM
+(
+    SELECT
+        t5.c9,
+        t5.c10,
+        t5.c11,
+        t5.c12
+    FROM t5
+    JOIN t1 KEY (c1, c2) <- t5 (c11, c12)
     JOIN t6 KEY (c13, c14) -> t5 (c9, c10)
 ) AS q1
-JOIN t1 KEY (c1, c2) <- q1 (c11, c12);
-*/
+JOIN t7 KEY (c15, c16) -> q1 (c9, c10);
+
+SELECT
+    q1.c19,
+    q1.c20,
+    t9.c21,
+    t9.c22
+FROM
+(
+    SELECT
+        t8.c17,
+        t8.c18,
+        t8.c19,
+        t8.c20
+    FROM t8
+    JOIN t1 KEY (c1, c2) <- t8 (c19, c20)
+) AS q1
+JOIN t9 KEY (c21, c22) -> q1 (c17, c18);
