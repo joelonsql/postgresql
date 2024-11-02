@@ -29,6 +29,7 @@
 #include "utils/builtins.h"
 #include "utils/lsyscache.h"
 #include "utils/rel.h"
+#include "parser/parse_fkjoin.h"
 
 static void checkViewColumns(TupleDesc newdesc, TupleDesc olddesc);
 
@@ -514,4 +515,10 @@ StoreViewQuery(Oid viewOid, Query *viewParse, bool replace)
 	 * Now create the rules associated with the view.
 	 */
 	DefineViewRules(viewOid, viewParse, replace);
+
+	/*
+	 * If replacing an existing view, revalidate dependent views.
+	 */
+	if (replace)
+		revalidate_dependent_views(viewOid);
 }

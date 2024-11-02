@@ -15,7 +15,7 @@
 
 #include "parser/parse_node.h"
 
-
 extern void transformForeignKeyJoinNode(ParseState *pstate, JoinExpr *j, ParseNamespaceItem *r_nsitem, List *l_namespace);
+extern void revalidate_dependent_views(Oid viewOid);
 
 #endif							/* PARSE_FKJOIN_H */

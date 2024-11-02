@@ -33,6 +33,12 @@
 #include "utils/syscache.h"
 #include "parser/parse_fkjoin.h"
 #include "rewrite/rewriteHandler.h"
+#include "parser/parser.h"
+#include "access/xact.h"
+#include "catalog/pg_depend.h"
+#include "catalog/pg_rewrite.h"
+#include "catalog/pg_rewrite_d.h"
+#include "access/relation.h"
 
 static Node *transformForeignKeyJoin(ParseState *pstate, List *referencedVars, List *referencingVars);
 static Oid	get_base_relid_from_rte(ParseState *pstate, RangeTblEntry *rte, List **colnames_out, List *colaliases, bool is_referenced);
@@ -44,7 +50,8 @@ static RangeTblEntry *find_rte_with_target_columns(ParseState *pstate, Query *qu
 												   List *colaliases, List **out_colnames);
 static List *map_columns_to_base(List *colaliases, List *targetList, RangeTblEntry *sub_rte);
 static Oid	process_query_rte(ParseState *pstate, Query *query, List *colaliases, List **colnames_out, bool is_referenced);
-static void	inspect_fk_joins(ParseState *pstate, Query *query, Node *jtnode, RangeTblEntry *sub_rte);
+static void inspect_fk_joins(ParseState *pstate, Query *query, Node *jtnode, RangeTblEntry *sub_rte);
+static void revalidate_view(Oid viewOid);
 
 /*
  * transformForeignKeyJoinNode
@@ -735,10 +742,11 @@ find_rte_with_target_columns(ParseState *pstate, Query *query, List *target_coln
 
 		foreach(lc_target, target_colnames)
 		{
-			char *target_colname = strVal(lfirst(lc_target));
-			bool found_col = false;
+			char	   *target_colname = strVal(lfirst(lc_target));
+			bool		found_col = false;
 
 			ListCell   *lc_tle;
+
 			foreach(lc_tle, query->targetList)
 			{
 				TargetEntry *tle = (TargetEntry *) lfirst(lc_tle);
@@ -884,7 +892,7 @@ process_query_rte(ParseState *pstate, Query *query, List *colaliases, List **col
 
 			foreach(lc, jointree->fromlist)
 			{
-				Node   *jtnode = (Node *) lfirst(lc);
+				Node	   *jtnode = (Node *) lfirst(lc);
 
 				inspect_fk_joins(pstate, query, jtnode, sub_rte);
 			}
@@ -905,21 +913,29 @@ process_query_rte(ParseState *pstate, Query *query, List *colaliases, List **col
 	return base_relid;
 }
 
-
+/*
+ * inspect_fk_joins
+ *	  Recursively inspect a join tree to ensure that all joins are foreign key joins.
+ *
+ * This function traverses the join tree and checks that each join node has a valid
+ * foreign key join specification. It errors out if any non-foreign key joins are found.
+ * This is used to enforce that referenced tables in foreign key joins cannot contain
+ * arbitrary joins that could violate referential integrity.
+ */
 static void
 inspect_fk_joins(ParseState *pstate, Query *query, Node *jtnode, RangeTblEntry *sub_rte)
 {
 	JoinExpr   *j;
 	ForeignKeyJoinNode *fkjn;
 	RangeTblEntry *referencing_rte;
-	List       *referencing_attnums;
+	List	   *referencing_attnums;
 	ListCell   *lc;
 
 	if (jtnode == NULL)
 		return;
 
 	if (!IsA(jtnode, JoinExpr))
-		return;  /* No join to check, so return true */
+		return;					/* No join to check, so return true */
 
 	j = (JoinExpr *) jtnode;
 
@@ -960,7 +976,11 @@ inspect_fk_joins(ParseState *pstate, Query *query, Node *jtnode, RangeTblEntry *
 
 	/* Get the RTEs using rt_fetch */
 	referencing_rte = rt_fetch(fkjn->referencingVarno, query->rtable);
-	/* We already asserted that the varno values are valid, so this RTE must exist */
+
+	/*
+	 * We already asserted that the varno values are valid, so this RTE must
+	 * exist
+	 */
 	Assert(referencing_rte != NULL);
 
 	/* Check if sub_rte is the referencing relation for this join */
@@ -977,8 +997,8 @@ inspect_fk_joins(ParseState *pstate, Query *query, Node *jtnode, RangeTblEntry *
 
 	foreach(lc, referencing_attnums)
 	{
-		int            attnum = lfirst_int(lc);
-		HeapTuple      tuple;
+		int			attnum = lfirst_int(lc);
+		HeapTuple	tuple;
 		Form_pg_attribute attr;
 
 		/* Get the attribute tuple */
@@ -1006,4 +1026,155 @@ inspect_fk_joins(ParseState *pstate, Query *query, Node *jtnode, RangeTblEntry *
 
 	/* All conditions passed for this join */
 	return;
+}
+
+/*
+ * revalidate_view
+ *	  Revalidate a view by reparsing and reanalyzing its definition.
+ *
+ * This function takes a view's OID, retrieves its definition, parses it,
+ * and analyzes it to ensure the view is still valid. If the view has become
+ * invalid (e.g., due to changes in referenced relations), this will error out.
+ */
+static void
+revalidate_view(Oid viewOid)
+{
+	Datum		viewdef;
+	List	   *parsetree_list;
+	RawStmt    *parsetree;
+	ParseState *pstate;
+
+	/* Make sure we can see any just-made changes */
+	CommandCounterIncrement();
+
+	/* Get view definition using the public interface */
+	viewdef = DirectFunctionCall1(pg_get_viewdef, ObjectIdGetDatum(viewOid));
+	if (DatumGetPointer(viewdef) == NULL)	/* should not happen */
+		elog(ERROR, "could not get definition for view with OID %u", viewOid);
+
+	/* Parse it */
+	parsetree_list = raw_parser(text_to_cstring(DatumGetTextPP(viewdef)),
+								RAW_PARSE_DEFAULT);
+	if (list_length(parsetree_list) != 1)
+		elog(ERROR, "view definition should contain exactly one SELECT statement");
+
+	/* Get the raw parse tree */
+	parsetree = linitial_node(RawStmt, parsetree_list);
+
+	/* Set up a ParseState for analyzing the query */
+	pstate = make_parsestate(NULL);
+	pstate->p_sourcetext = text_to_cstring(DatumGetTextPP(viewdef));
+
+	/* Analyze it - this will error out if the view is invalid */
+	(void) parse_sub_analyze((Node *) parsetree->stmt, pstate, NULL, false, 0);
+
+	free_parsestate(pstate);
+}
+
+/*
+ * revalidate_dependent_views
+ *	  Revalidate all views that depend on a given view.
+ *
+ * This function takes a view's OID and recursively revalidates all views that
+ * depend on it. It uses the pg_depend catalog to find dependent views and
+ * revalidates each one by reparsing and reanalyzing its definition. This ensures
+ * that changes to a base view don't leave dependent views in an invalid state.
+ */
+extern void
+revalidate_dependent_views(Oid viewOid)
+{
+	Relation	depRel;
+	ScanKeyData key[2];
+	SysScanDesc scan;
+	HeapTuple	tup;
+	Form_pg_depend depform;
+	Relation	rewriteRel;
+	ScanKeyData rewritescankey;
+	SysScanDesc rewritescan;
+	HeapTuple	rewriteTuple;
+	Form_pg_rewrite ruleform;
+	Relation	dep_rel;
+	HTAB	   *seen_views;
+	HASHCTL		hash_ctl;
+
+	/* Create hash table to track seen views */
+	hash_ctl.keysize = sizeof(Oid);
+	hash_ctl.entrysize = sizeof(Oid);
+	hash_ctl.hcxt = CurrentMemoryContext;
+	seen_views = hash_create("Dependent view tracking",
+							 100,	/* start small */
+							 &hash_ctl,
+							 HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
+
+	depRel = table_open(DependRelationId, AccessShareLock);
+
+	/* Look for rules that depend on our view */
+	ScanKeyInit(&key[0],
+				Anum_pg_depend_refclassid,
+				BTEqualStrategyNumber, F_OIDEQ,
+				ObjectIdGetDatum(RelationRelationId));
+	ScanKeyInit(&key[1],
+				Anum_pg_depend_refobjid,
+				BTEqualStrategyNumber, F_OIDEQ,
+				ObjectIdGetDatum(viewOid));
+
+	scan = systable_beginscan(depRel, DependReferenceIndexId, true,
+							  NULL, 2, key);
+
+	while (HeapTupleIsValid(tup = systable_getnext(scan)))
+	{
+		bool		found = false;
+
+		depform = (Form_pg_depend) GETSTRUCT(tup);
+
+		/* Skip non-normal dependencies */
+		if (depform->deptype != DEPENDENCY_NORMAL)
+			continue;
+
+		/* Check if the dependent object is a rule */
+		if (depform->classid != RewriteRelationId)
+			continue;
+
+		/* Open pg_rewrite catalog */
+		rewriteRel = table_open(RewriteRelationId, AccessShareLock);
+
+		/* Fetch the rule tuple by OID */
+		ScanKeyInit(&rewritescankey,
+					Anum_pg_rewrite_oid,
+					BTEqualStrategyNumber, F_OIDEQ,
+					ObjectIdGetDatum(depform->objid));
+
+		rewritescan = systable_beginscan(rewriteRel, RewriteOidIndexId, true,
+										 NULL, 1, &rewritescankey);
+
+		rewriteTuple = systable_getnext(rewritescan);
+		if (!HeapTupleIsValid(rewriteTuple))
+		{
+			systable_endscan(rewritescan);
+			table_close(rewriteRel, AccessShareLock);
+			continue;
+		}
+
+		ruleform = (Form_pg_rewrite) GETSTRUCT(rewriteTuple);
+
+		/* Skip if we've already seen this view */
+		(void) hash_search(seen_views, &ruleform->ev_class, HASH_ENTER, &found);
+		if (!found)
+		{
+			/* Get the rule's view */
+			dep_rel = relation_open(ruleform->ev_class, AccessShareLock);
+
+			if (dep_rel->rd_rel->relkind == RELKIND_VIEW)
+				revalidate_view(ruleform->ev_class);
+
+			relation_close(dep_rel, AccessShareLock);
+		}
+
+		systable_endscan(rewritescan);
+		table_close(rewriteRel, AccessShareLock);
+	}
+
+	systable_endscan(scan);
+	table_close(depRel, AccessShareLock);
+	hash_destroy(seen_views);
 }

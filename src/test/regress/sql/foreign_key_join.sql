@@ -530,3 +530,80 @@ FROM
     JOIN t1 KEY (c1, c2) <- t8 (c19, c20)
 ) AS q1
 JOIN t9 KEY (c21, c22) -> q1 (c17, c18);
+
+--
+-- Test revalidation of views
+--
+
+CREATE TABLE addresses
+(
+    id           INTEGER      NOT NULL,
+    street       VARCHAR(255) NOT NULL,
+    city         VARCHAR(100) NOT NULL,
+    state        VARCHAR(100) NOT NULL,
+    country_code CHAR(2)      NOT NULL,
+    zip_code     VARCHAR(20)  NOT NULL,
+    CONSTRAINT addresses_pkey PRIMARY KEY (id)
+);
+
+CREATE TABLE customers
+(
+    id         INTEGER      NOT NULL,
+    name       VARCHAR(255) NOT NULL,
+    address_id INTEGER      NOT NULL,
+    CONSTRAINT customers_pkey            PRIMARY KEY (id),
+    CONSTRAINT customers_address_id_fkey FOREIGN KEY (address_id) REFERENCES addresses (id)
+);
+
+CREATE TABLE orders
+(
+    id           BIGINT         NOT NULL,
+    order_date   DATE           NOT NULL,
+    amount       DECIMAL(10, 2) NOT NULL,
+    customer_id  INTEGER        NOT NULL,
+    CONSTRAINT orders_pkey             PRIMARY KEY (id),
+    CONSTRAINT orders_customer_id_fkey FOREIGN KEY (customer_id) REFERENCES customers (id)
+);
+
+CREATE VIEW customer_details AS
+SELECT
+    c.id AS customer_id,
+    c.name AS customer_name,
+    a.street,
+    a.city,
+    a.state,
+    a.country_code,
+    a.zip_code
+FROM customers AS c
+JOIN addresses AS a KEY (id) <- c (address_id);
+
+CREATE VIEW orders_by_country AS
+SELECT
+    cd.country_code,
+    COUNT(*) AS order_count,
+    SUM(o.amount) AS total_amount
+FROM orders AS o
+JOIN customer_details AS cd KEY (customer_id) <- o (customer_id)
+GROUP BY ROLLUP (cd.country_code);
+
+CREATE TABLE customer_addresses
+(
+    customer_id INTEGER NOT NULL,
+    address_id INTEGER NOT NULL,
+    CONSTRAINT customer_addresses_pkey             PRIMARY KEY (customer_id, address_id),
+    CONSTRAINT customer_addresses_customer_id_fkey FOREIGN KEY (customer_id) REFERENCES customers (id),
+    CONSTRAINT customer_addresses_address_id_fkey  FOREIGN KEY (address_id) REFERENCES addresses (id)
+);
+
+CREATE OR REPLACE VIEW customer_details AS
+SELECT
+    c.id AS customer_id,
+    c.name AS customer_name,
+    a.street,
+    a.city,
+    a.state,
+    a.country_code,
+    a.zip_code
+FROM customers AS c
+JOIN customer_addresses AS ca KEY (customer_id) -> c (id)
+JOIN addresses AS a KEY (id) <- ca (address_id);
