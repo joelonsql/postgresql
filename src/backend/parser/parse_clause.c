@@ -1412,7 +1412,7 @@ transformFromClauseItem(ParseState *pstate, Node *n,
 			 * conditions and j->fkJoin with a new ForeignKeyJoinNode
 			 * containing the validated foreign key information.
 			 */
-			transformForeignKeyJoinNode(pstate, j, r_nsitem, l_namespace);
+			transformAndValidateForeignKeyJoin(pstate, j, r_nsitem, l_namespace);
 		}
 		else if (j->quals)
 		{
