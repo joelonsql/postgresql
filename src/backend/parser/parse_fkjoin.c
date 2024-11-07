@@ -560,7 +560,6 @@ validate_and_resolve_derived_rel(ParseState *pstate, Query *query, RangeTblEntry
 				validate_derived_rel_joins(pstate, query, join, trunk_rte);
 			}
 		}
-
 	}
 
 	/*
@@ -615,6 +614,7 @@ validate_derived_rel_joins(ParseState *pstate, Query *query, JoinExpr *join,
 				 errdetail("Referenced columns target a non-referencing table in derived table, violating uniqueness")));
 
 	referencing_attnums = fkjn->referencingAttnums;
+
 	foreach(lc, referencing_attnums)
 	{
 		int			attnum = lfirst_int(lc);
@@ -622,6 +622,7 @@ validate_derived_rel_joins(ParseState *pstate, Query *query, JoinExpr *join,
 
 		colaliases = lappend(colaliases, makeString(colname));
 	}
+
 	base_relid = drill_down_to_base_rel(pstate, referencing_rte,
 										&base_colnames, colaliases, false,
 										-1);
@@ -629,9 +630,9 @@ validate_derived_rel_joins(ParseState *pstate, Query *query, JoinExpr *join,
 	foreach(lc, base_colnames)
 	{
 		char	   *colname = strVal(lfirst(lc));
+		AttrNumber	attnum;
 		HeapTuple	tuple;
 		Form_pg_attribute attr;
-		AttrNumber	attnum;
 
 		attnum = get_attnum(base_relid, colname);
 		if (attnum == InvalidAttrNumber)
@@ -656,6 +657,4 @@ validate_derived_rel_joins(ParseState *pstate, Query *query, JoinExpr *join,
 
 		ReleaseSysCache(tuple);
 	}
-
-	return;
 }
