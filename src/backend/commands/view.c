@@ -633,7 +633,17 @@ revalidateDependentViews(Oid viewOid)
 			pstate = make_parsestate(NULL);
 			pstate->p_sourcetext = viewdef_str;
 
-			(void) parse_sub_analyze((Node *) parsetree->stmt, pstate, NULL, false, 0);
+			PG_TRY();
+			{
+				(void) parse_sub_analyze((Node *) parsetree->stmt, pstate, NULL, false, 0);
+			}
+			PG_CATCH();
+			{
+				elog(ERROR, "virtual foreign key constraint violation while re-validating view \"%s.%s\"",
+					 get_namespace_name(get_rel_namespace(dependentViewOid)),
+					 get_rel_name(dependentViewOid));
+			}
+			PG_END_TRY();
 
 			free_parsestate(pstate);
 			pfree(viewdef_str);
