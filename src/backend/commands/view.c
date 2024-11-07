@@ -546,10 +546,8 @@ revalidateDependentViews(Oid viewOid)
 	hash_ctl.keysize = sizeof(Oid);
 	hash_ctl.entrysize = sizeof(Oid);
 	hash_ctl.hcxt = CurrentMemoryContext;
-	seen_views = hash_create("Dependent view tracking",
-							 100,
-							 &hash_ctl,
-							 HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
+	seen_views = hash_create("Dependent view tracking", 32,
+							 &hash_ctl, HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
 
 	depRel = table_open(DependRelationId, AccessShareLock);
 
