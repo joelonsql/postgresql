@@ -781,3 +781,14 @@ JOIN
     FROM t10
     JOIN t10 AS t10_2 KEY (c23, c24) <- t10 (c25, c26)
 ) AS q1 KEY (c23, c24) -> t1 (c1, c2);
+
+--
+-- Test materialized views (not supported)
+--
+
+CREATE MATERIALIZED VIEW mv1 AS
+SELECT c1, c2 FROM t1;
+
+SELECT * FROM mv1 JOIN t2 KEY (c3, c4) -> mv1 (c1, c2);
+
+DROP MATERIALIZED VIEW mv1;

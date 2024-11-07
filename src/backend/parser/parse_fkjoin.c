@@ -365,21 +365,31 @@ drill_down_to_base_rel(ParseState *pstate, RangeTblEntry *rte,
 		case RTE_RELATION:
 			{
 				Relation	rel = table_open(rte->relid, AccessShareLock);
-				bool		is_view = rel->rd_rel->relkind == RELKIND_VIEW;
 
-				if (is_view)
-					query = get_view_query(rel);
-				else if (is_referenced && rel->rd_rel->relrowsecurity)
-					ereport(ERROR,
-							(errcode(ERRCODE_SYNTAX_ERROR),
-							 errmsg("cannot use table \"%s\" with row level security enabled as referenced table in foreign key join",
-									get_rel_name(rel->rd_id)),
-							 errdetail("Using a table with row level security as the referenced table would violate referential integrity."),
-							 parser_errposition(pstate, location)));
-				else
+				switch (rel->rd_rel->relkind)
 				{
-					*colnames_out = colnames;
-					base_relid = rte->relid;
+					case RELKIND_VIEW:
+						query = get_view_query(rel);
+						break;
+
+					case RELKIND_RELATION:
+						if (is_referenced && rel->rd_rel->relrowsecurity)
+							ereport(ERROR,
+									(errcode(ERRCODE_SYNTAX_ERROR),
+									 errmsg("cannot use table \"%s\" with row level security enabled as referenced table in foreign key join",
+											get_rel_name(rel->rd_id)),
+									 errdetail("Using a table with row level security as the referenced table would violate referential integrity."),
+									 parser_errposition(pstate, location)));
+						*colnames_out = colnames;
+						base_relid = rte->relid;
+						break;
+
+					default:
+						ereport(ERROR,
+								(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+								 errmsg("foreign key joins involving relation of type '%c' are not supported",
+										rel->rd_rel->relkind),
+								 parser_errposition(pstate, location)));
 				}
 
 				table_close(rel, AccessShareLock);

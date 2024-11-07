@@ -1144,3 +1144,13 @@ JOIN
 ERROR:  key columns must all come from the same table
 LINE 7:         t10_2.c24
                 ^
+--
+-- Test materialized views (not supported)
+--
+CREATE MATERIALIZED VIEW mv1 AS
+SELECT c1, c2 FROM t1;
+SELECT * FROM mv1 JOIN t2 KEY (c3, c4) -> mv1 (c1, c2);
+ERROR:  foreign key joins involving relation of type 'm' are not supported
+LINE 1: SELECT * FROM mv1 JOIN t2 KEY (c3, c4) -> mv1 (c1, c2);
+                                  ^
+DROP MATERIALIZED VIEW mv1;
