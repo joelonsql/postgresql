@@ -925,6 +925,8 @@ FROM
 ) AS q1
 JOIN t7 KEY (c15, c16) -> q1 (c9, c10);
 ERROR:  virtual foreign key constraint violation
+LINE 17: JOIN t7 KEY (c15, c16) -> q1 (c9, c10);
+                 ^
 DETAIL:  Referenced columns target a non-referencing table in derived table, violating uniqueness
 SELECT
     q1.c19,
@@ -943,6 +945,8 @@ FROM
 ) AS q1
 JOIN t9 KEY (c21, c22) -> q1 (c17, c18);
 ERROR:  virtual foreign key constraint violation
+LINE 16: JOIN t9 KEY (c21, c22) -> q1 (c17, c18);
+                 ^
 DETAIL:  Nullable columns in derived table's referencing relation violate referential integrity
 --
 -- Test revalidation of views

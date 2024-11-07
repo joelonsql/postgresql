@@ -47,7 +47,8 @@ static Oid	validate_and_resolve_derived_rel(ParseState *pstate, Query *query,
 											 List **colnames_out,
 											 bool is_referenced, int location);
 static void validate_derived_rel_joins(ParseState *pstate, Query *query,
-									   JoinExpr *join, RangeTblEntry *trunk_rte);
+									   JoinExpr *join, RangeTblEntry *trunk_rte,
+									   int location);
 
 void
 transformAndValidateForeignKeyJoin(ParseState *pstate, JoinExpr *join,
@@ -557,7 +558,7 @@ validate_and_resolve_derived_rel(ParseState *pstate, Query *query, RangeTblEntry
 			{
 				JoinExpr   *join = castNode(JoinExpr, lfirst(lc));
 
-				validate_derived_rel_joins(pstate, query, join, trunk_rte);
+				validate_derived_rel_joins(pstate, query, join, trunk_rte, location);
 			}
 		}
 	}
@@ -576,7 +577,7 @@ validate_and_resolve_derived_rel(ParseState *pstate, Query *query, RangeTblEntry
  */
 static void
 validate_derived_rel_joins(ParseState *pstate, Query *query, JoinExpr *join,
-						   RangeTblEntry *trunk_rte)
+						   RangeTblEntry *trunk_rte, int location)
 {
 	ForeignKeyJoinNode *fkjn;
 	RangeTblEntry *referencing_rte;
@@ -590,7 +591,8 @@ validate_derived_rel_joins(ParseState *pstate, Query *query, JoinExpr *join,
 		ereport(ERROR,
 				(errcode(ERRCODE_INTEGRITY_CONSTRAINT_VIOLATION),
 				 errmsg("virtual foreign key constraint violation"),
-				 errdetail("The derived table contains a join that is not a foreign key join")));
+				 errdetail("The derived table contains a join that is not a foreign key join"),
+				 parser_errposition(pstate, location)));
 
 	Assert(IsA(join->fkJoin, ForeignKeyJoinNode));
 	fkjn = (ForeignKeyJoinNode *) join->fkJoin;
@@ -608,7 +610,8 @@ validate_derived_rel_joins(ParseState *pstate, Query *query, JoinExpr *join,
 		ereport(ERROR,
 				(errcode(ERRCODE_INTEGRITY_CONSTRAINT_VIOLATION),
 				 errmsg("virtual foreign key constraint violation"),
-				 errdetail("Referenced columns target a non-referencing table in derived table, violating uniqueness")));
+				 errdetail("Referenced columns target a non-referencing table in derived table, violating uniqueness"),
+				 parser_errposition(pstate, location)));
 
 	referencing_attnums = fkjn->referencingAttnums;
 
@@ -622,7 +625,7 @@ validate_derived_rel_joins(ParseState *pstate, Query *query, JoinExpr *join,
 
 	base_relid = drill_down_to_base_rel(pstate, referencing_rte,
 										&base_colnames, colaliases, false,
-										-1);
+										location);
 
 	foreach(lc, base_colnames)
 	{
@@ -650,7 +653,8 @@ validate_derived_rel_joins(ParseState *pstate, Query *query, JoinExpr *join,
 			ereport(ERROR,
 					(errcode(ERRCODE_INTEGRITY_CONSTRAINT_VIOLATION),
 					 errmsg("virtual foreign key constraint violation"),
-					 errdetail("Nullable columns in derived table's referencing relation violate referential integrity")));
+					 errdetail("Nullable columns in derived table's referencing relation violate referential integrity"),
+					 parser_errposition(pstate, location)));
 
 		ReleaseSysCache(tuple);
 	}
