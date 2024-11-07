@@ -72,18 +72,31 @@ COPY x from stdin (log_verbosity default, log_verbosity verbose);
 -- incorrect options
 COPY x from stdin (format BINARY, delimiter ',');
 COPY x from stdin (format BINARY, null 'x');
+COPY x (c) from stdin (format LIST, null 'x');
+COPY x from stdin (format TEXT, escape 'x');
+COPY x from stdin (format BINARY, escape 'x');
+COPY x (c) from stdin (format LIST, escape 'x');
+COPY x from stdin (format TEXT, quote 'x');
+COPY x from stdin (format BINARY, quote 'x');
+COPY x (c) from stdin (format LIST, quote 'x');
 COPY x from stdin (format BINARY, on_error ignore);
 COPY x from stdin (on_error unsupported);
 COPY x from stdin (format TEXT, force_quote(a));
 COPY x from stdin (format TEXT, force_quote *);
+COPY x (c) from stdin (format LIST, force_quote(a));
+COPY x (c) from stdin (format LIST, force_quote *);
 COPY x from stdin (format CSV, force_quote(a));
 COPY x from stdin (format CSV, force_quote *);
 COPY x from stdin (format TEXT, force_not_null(a));
 COPY x from stdin (format TEXT, force_not_null *);
+COPY x (c) from stdin (format LIST, force_not_null(a));
+COPY x (c) from stdin (format LIST, force_not_null *);
 COPY x to stdout (format CSV, force_not_null(a));
 COPY x to stdout (format CSV, force_not_null *);
 COPY x from stdin (format TEXT, force_null(a));
 COPY x from stdin (format TEXT, force_null *);
+COPY x (c) from stdin (format LIST, force_null(a));
+COPY x (c) from stdin (format LIST, force_null *);
 COPY x to stdout (format CSV, force_null(a));
 COPY x to stdout (format CSV, force_null *);
 COPY x to stdout (format BINARY, on_error unsupported);
@@ -636,8 +649,9 @@ select id, text_value, ts_value from copy_default;
 
 truncate copy_default;
 
--- DEFAULT cannot be used in binary mode
+-- DEFAULT cannot be used in binary or list mode
 copy copy_default from stdin with (format binary, default '\D');
+copy copy_default (text_value) from stdin with (format list, default '\D');
 
 -- DEFAULT cannot be new line nor carriage return
 copy copy_default from stdin with (default E'\n');
@@ -707,3 +721,11 @@ truncate copy_default;
 
 -- DEFAULT cannot be used in COPY TO
 copy (select 1 as test) TO stdout with (default '\D');
+
+-- Test list column requirement
+copy copy_default from stdin with (format list);
+
+-- Test error on newlines in list format
+create table copy_list_test (line text);
+insert into copy_list_test values (E'a\nb');
+copy copy_list_test to stdout with (format list);

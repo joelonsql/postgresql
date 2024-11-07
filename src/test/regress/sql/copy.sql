@@ -348,3 +348,24 @@ COPY parted_si(id, data) FROM :'filename';
 SELECT tableoid::regclass, id % 2 = 0 is_even, count(*) from parted_si GROUP BY 1, 2 ORDER BY 1;
 
 DROP TABLE parted_si;
+
+-- Test 'list' format
+\set filename :abs_srcdir '/data/emp.data'
+create temp table single_copytest (col text);
+copy single_copytest from :'filename' (format list);
+select col from single_copytest order by col collate "C";
+copy single_copytest to stdout (format list);
+truncate single_copytest;
+copy single_copytest (col) from stdin (format list, header match);
+col
+abc\.
+"def",
+ghi
+\.
+select col from single_copytest order by col collate "C";
+copy single_copytest (col) to stdout (format list, header);
+truncate single_copytest;
+alter table single_copytest add column json_line jsonb;
+insert into single_copytest (json_line) values ('{"a": "b"}');
+copy single_copytest (json_line) to stdout (format list);
+drop table single_copytest;

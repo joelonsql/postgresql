@@ -113,6 +113,7 @@ static void CopyOneRowTo(CopyToState cstate, TupleTableSlot *slot);
 static void CopyAttributeOutText(CopyToState cstate, const char *string);
 static void CopyAttributeOutCSV(CopyToState cstate, const char *string,
 								bool use_quote);
+static void CopyAttributeOutList(CopyToState cstate, const char *string, Oid typid);
 
 /* Low-level communications functions */
 static void SendCopyBegin(CopyToState cstate);
@@ -574,6 +575,13 @@ BeginCopyTo(ParseState *pstate,
 	/* Generate or convert list of attributes to process */
 	cstate->attnumlist = CopyGetAttnums(tupDesc, cstate->rel, attnamelist);
 
+	/* Enforce single column requirement for "list" format */
+	if (cstate->opts.format == COPY_FORMAT_LIST &&
+		list_length(cstate->attnumlist) != 1)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("COPY with format \"list\" must specify exactly one column")));
+
 	num_phys_attrs = tupDesc->natts;
 
 	/* Convert FORCE_QUOTE name list to per-column flags, check validity */
@@ -830,17 +838,20 @@ DoCopyTo(CopyToState cstate)
 			{
 				int			attnum = lfirst_int(cur);
 				char	   *colname;
+				Form_pg_attribute attr = TupleDescAttr(tupDesc, attnum - 1);
 
 				if (hdr_delim)
 					CopySendChar(cstate, cstate->opts.delim[0]);
 				hdr_delim = true;
 
-				colname = NameStr(TupleDescAttr(tupDesc, attnum - 1)->attname);
+				colname = NameStr(attr->attname);
 
 				if (cstate->opts.format == COPY_FORMAT_CSV)
 					CopyAttributeOutCSV(cstate, colname, false);
-				else
+				else if (cstate->opts.format == COPY_FORMAT_TEXT)
 					CopyAttributeOutText(cstate, colname);
+				else if (cstate->opts.format == COPY_FORMAT_LIST)
+					CopyAttributeOutList(cstate, colname, attr->atttypid);
 			}
 
 			CopySendEndOfRow(cstate);
@@ -921,7 +932,8 @@ CopyOneRowTo(CopyToState cstate, TupleTableSlot *slot)
 	/* Make sure the tuple is fully deconstructed */
 	slot_getallattrs(slot);
 
-	if (cstate->opts.format != COPY_FORMAT_BINARY)
+	if (cstate->opts.format == COPY_FORMAT_TEXT ||
+		cstate->opts.format == COPY_FORMAT_CSV)
 	{
 		bool		need_delim = false;
 
@@ -949,7 +961,7 @@ CopyOneRowTo(CopyToState cstate, TupleTableSlot *slot)
 			}
 		}
 	}
-	else
+	else if (cstate->opts.format == COPY_FORMAT_BINARY)
 	{
 		foreach_int(attnum, cstate->attnumlist)
 		{
@@ -969,6 +981,37 @@ CopyOneRowTo(CopyToState cstate, TupleTableSlot *slot)
 			}
 		}
 	}
+	else if (cstate->opts.format == COPY_FORMAT_LIST)
+	{
+		int			attnum;
+		Datum		value;
+		bool		isnull;
+		Oid			typid;
+
+		/* Assert only one column is being copied */
+		Assert(list_length(cstate->attnumlist) == 1);
+
+		attnum = linitial_int(cstate->attnumlist);
+		value = slot->tts_values[attnum - 1];
+		isnull = slot->tts_isnull[attnum - 1];
+		typid = TupleDescAttr(slot->tts_tupleDescriptor, attnum - 1)->atttypid;
+
+		if (!isnull)
+		{
+			char	   *string = OutputFunctionCall(&out_functions[attnum - 1],
+													value);
+
+			CopyAttributeOutList(cstate, string, typid);
+		}
+		/* For "list" format, we don't send anything for NULL values */
+	}
+	else
+	{
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("unsupported COPY format")));
+	}
+
 
 	CopySendEndOfRow(cstate);
 
@@ -1221,6 +1264,73 @@ CopyAttributeOutCSV(CopyToState cstate, const char *string,
 		/* If it doesn't need quoting, we can just dump it as-is */
 		CopySendString(cstate, ptr);
 	}
+}
+
+/*
+ * Send text representation of the attribute for "list" format.
+ * Scan for and error on newlines unless the type is known to be newline-free.
+ */
+static void
+CopyAttributeOutList(CopyToState cstate, const char *string, Oid typid)
+{
+	const char *ptr;
+	const char *start;
+	char		c;
+
+	if (cstate->need_transcoding)
+		ptr = pg_server_to_any(string, strlen(string), cstate->file_encoding);
+	else
+		ptr = string;
+
+	/* Fast path for some types that cannot contain newlines */
+	switch (typid)
+	{
+			/* Numeric types */
+		case INT2OID:
+		case INT4OID:
+		case INT8OID:
+		case FLOAT4OID:
+		case FLOAT8OID:
+		case NUMERICOID:
+		case OIDOID:
+			/* Date/time types */
+		case DATEOID:
+		case TIMEOID:
+		case TIMESTAMPOID:
+		case TIMESTAMPTZOID:
+		case INTERVALOID:
+			/* Network types */
+		case INETOID:
+		case CIDROID:
+		case MACADDROID:
+		case MACADDR8OID:
+			/* Other types */
+		case BOOLOID:
+		case UUIDOID:
+		case JSONBOID:
+			CopySendString(cstate, ptr);
+			return;
+	}
+
+	/*
+	 * Scan the string for newlines, and error if any are found.
+	 */
+	start = ptr;
+	while ((c = *ptr) != '\0')
+	{
+		if (c == '\n' || c == '\r')
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+					 errmsg("COPY with format \"list\" doesn't support newlines in field values")));
+
+		if (IS_HIGHBIT_SET(c) && cstate->encoding_embeds_ascii)
+			ptr += pg_encoding_mblen(cstate->file_encoding, ptr);
+		else
+			ptr++;
+	}
+
+	/* If we got here, there were no newlines, so send the string */
+	CopySendString(cstate, start);
 }
 
 /*

@@ -90,6 +90,20 @@ COPY x from stdin (format BINARY, delimiter ',');
 ERROR:  cannot specify DELIMITER in BINARY mode
 COPY x from stdin (format BINARY, null 'x');
 ERROR:  cannot specify NULL in BINARY mode
+COPY x (c) from stdin (format LIST, null 'x');
+ERROR:  cannot specify NULL in LIST mode
+COPY x from stdin (format TEXT, escape 'x');
+ERROR:  COPY ESCAPE requires CSV mode
+COPY x from stdin (format BINARY, escape 'x');
+ERROR:  COPY ESCAPE requires CSV mode
+COPY x (c) from stdin (format LIST, escape 'x');
+ERROR:  COPY ESCAPE requires CSV mode
+COPY x from stdin (format TEXT, quote 'x');
+ERROR:  COPY QUOTE requires CSV mode
+COPY x from stdin (format BINARY, quote 'x');
+ERROR:  COPY QUOTE requires CSV mode
+COPY x (c) from stdin (format LIST, quote 'x');
+ERROR:  COPY QUOTE requires CSV mode
 COPY x from stdin (format BINARY, on_error ignore);
 ERROR:  only ON_ERROR STOP is allowed in BINARY mode
 COPY x from stdin (on_error unsupported);
@@ -100,6 +114,10 @@ COPY x from stdin (format TEXT, force_quote(a));
 ERROR:  COPY FORCE_QUOTE requires CSV mode
 COPY x from stdin (format TEXT, force_quote *);
 ERROR:  COPY FORCE_QUOTE requires CSV mode
+COPY x (c) from stdin (format LIST, force_quote(a));
+ERROR:  COPY FORCE_QUOTE requires CSV mode
+COPY x (c) from stdin (format LIST, force_quote *);
+ERROR:  COPY FORCE_QUOTE requires CSV mode
 COPY x from stdin (format CSV, force_quote(a));
 ERROR:  COPY FORCE_QUOTE cannot be used with COPY FROM
 COPY x from stdin (format CSV, force_quote *);
@@ -108,6 +126,10 @@ COPY x from stdin (format TEXT, force_not_null(a));
 ERROR:  COPY FORCE_NOT_NULL requires CSV mode
 COPY x from stdin (format TEXT, force_not_null *);
 ERROR:  COPY FORCE_NOT_NULL requires CSV mode
+COPY x (c) from stdin (format LIST, force_not_null(a));
+ERROR:  COPY FORCE_NOT_NULL requires CSV mode
+COPY x (c) from stdin (format LIST, force_not_null *);
+ERROR:  COPY FORCE_NOT_NULL requires CSV mode
 COPY x to stdout (format CSV, force_not_null(a));
 ERROR:  COPY FORCE_NOT_NULL cannot be used with COPY TO
 COPY x to stdout (format CSV, force_not_null *);
@@ -115,6 +137,10 @@ ERROR:  COPY FORCE_NOT_NULL cannot be used with COPY TO
 COPY x from stdin (format TEXT, force_null(a));
 ERROR:  COPY FORCE_NULL requires CSV mode
 COPY x from stdin (format TEXT, force_null *);
+ERROR:  COPY FORCE_NULL requires CSV mode
+COPY x (c) from stdin (format LIST, force_null(a));
+ERROR:  COPY FORCE_NULL requires CSV mode
+COPY x (c) from stdin (format LIST, force_null *);
 ERROR:  COPY FORCE_NULL requires CSV mode
 COPY x to stdout (format CSV, force_null(a));
 ERROR:  COPY FORCE_NULL cannot be used with COPY TO
@@ -858,9 +884,11 @@ select id, text_value, ts_value from copy_default;
 (2 rows)
 
 truncate copy_default;
--- DEFAULT cannot be used in binary mode
+-- DEFAULT cannot be used in binary or list mode
 copy copy_default from stdin with (format binary, default '\D');
 ERROR:  cannot specify DEFAULT in BINARY mode
+copy copy_default (text_value) from stdin with (format list, default '\D');
+ERROR:  cannot specify DEFAULT in LIST mode
 -- DEFAULT cannot be new line nor carriage return
 copy copy_default from stdin with (default E'\n');
 ERROR:  COPY default representation cannot use newline or carriage return
@@ -929,3 +957,11 @@ truncate copy_default;
 -- DEFAULT cannot be used in COPY TO
 copy (select 1 as test) TO stdout with (default '\D');
 ERROR:  COPY DEFAULT cannot be used with COPY TO
+-- Test list column requirement
+copy copy_default from stdin with (format list);
+ERROR:  COPY with format "list" must specify exactly one column
+-- Test error on newlines in list format
+create table copy_list_test (line text);
+insert into copy_list_test values (E'a\nb');
+copy copy_list_test to stdout with (format list);
+ERROR:  COPY with format "list" doesn't support newlines in field values
