@@ -542,11 +542,6 @@ revalidateDependentViews(Oid viewOid)
 	HeapTuple	tup;
 	HTAB	   *seen_views;
 	HASHCTL		hash_ctl;
-	Datum		viewdef;
-	char	   *viewdef_str;
-	List	   *parsetree_list;
-	RawStmt    *parsetree;
-	ParseState *pstate;
 
 	memset(&hash_ctl, 0, sizeof(hash_ctl));
 	hash_ctl.keysize = sizeof(Oid);
@@ -575,7 +570,7 @@ revalidateDependentViews(Oid viewOid)
 	{
 		Form_pg_depend depform = (Form_pg_depend) GETSTRUCT(tup);
 		Oid			dependentViewOid;
-		bool		found = false;
+		bool		found;
 		Relation	rewriteRel;
 		ScanKeyData rewritescankey[1];
 		SysScanDesc rewritescan;
@@ -616,6 +611,12 @@ revalidateDependentViews(Oid viewOid)
 		 */
 		if (!found)
 		{
+			Datum		viewdef;
+			char	   *viewdef_str;
+			List	   *parsetree_list;
+			RawStmt    *parsetree;
+			ParseState *pstate;
+
 			CommandCounterIncrement();
 
 			viewdef = DirectFunctionCall1(pg_get_viewdef, ObjectIdGetDatum(dependentViewOid));
