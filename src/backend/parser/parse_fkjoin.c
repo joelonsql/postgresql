@@ -437,6 +437,19 @@ validate_and_resolve_derived_rel(ParseState *pstate, Query *query, RangeTblEntry
 				 errmsg("foreign key joins involving set operations are not supported"),
 				 parser_errposition(pstate, location)));
 
+	/* XXX: Overly aggressive disallowing */
+	if (query->commandType != CMD_SELECT ||
+		query->groupClause ||
+		query->distinctClause ||
+		query->groupingSets ||
+		query->hasTargetSRFs ||
+		query->havingQual ||
+		query->limitOffset)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("foreign key joins not supported for these relations"),
+				 parser_errposition(pstate, location)));
+
 	/*
 	 * Determine the trunk_rte, which is the relation in query->targetList the
 	 * colaliases refer to, which must be one and the same.
