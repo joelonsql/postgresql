@@ -1015,8 +1015,7 @@ SELECT
 FROM customers AS c
 JOIN customer_addresses AS ca KEY (customer_id) -> c (id)
 JOIN addresses AS a KEY (id) <- ca (address_id);
-ERROR:  virtual foreign key constraint violation
-DETAIL:  Referenced columns target a non-referencing table in derived table, violating uniqueness
+ERROR:  virtual foreign key constraint violation while re-validating view "public.orders_by_country"
 --
 -- Test various error conditions
 --
