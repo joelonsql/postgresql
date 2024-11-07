@@ -47,14 +47,14 @@ static Oid	validate_and_resolve_derived_rel(ParseState *pstate, Query *query,
 											 List **colnames_out,
 											 bool is_referenced, int location);
 static void validate_derived_rel_joins(ParseState *pstate, Query *query,
-									   Node *jtnode, RangeTblEntry *trunk_rte);
+									   JoinExpr *join, RangeTblEntry *trunk_rte);
 
 void
-transformAndValidateForeignKeyJoin(ParseState *pstate, JoinExpr *j,
+transformAndValidateForeignKeyJoin(ParseState *pstate, JoinExpr *join,
 								   ParseNamespaceItem *r_nsitem,
 								   List *l_namespace)
 {
-	ForeignKeyClause *fkjn = castNode(ForeignKeyClause, j->fkJoin);
+	ForeignKeyClause *fkjn = castNode(ForeignKeyClause, join->fkJoin);
 	List	   *referencingVars = NIL;
 	List	   *referencedVars = NIL;
 	ListCell   *lc,
@@ -167,7 +167,7 @@ transformAndValidateForeignKeyJoin(ParseState *pstate, JoinExpr *j,
 										 referenced_var->varattno);
 	}
 
-	j->quals = build_fk_join_on_clause(pstate, referencingVars, referencedVars);
+	join->quals = build_fk_join_on_clause(pstate, referencingVars, referencedVars);
 
 	fkjn_node = makeNode(ForeignKeyJoinNode);
 	fkjn_node->fkdir = fkjn->fkdir;
@@ -177,7 +177,7 @@ transformAndValidateForeignKeyJoin(ParseState *pstate, JoinExpr *j,
 	fkjn_node->referencedAttnums = referenced_attnums;
 	fkjn_node->constraint = fkoid;
 
-	j->fkJoin = (Node *) fkjn_node;
+	join->fkJoin = (Node *) fkjn_node;
 }
 
 /*
@@ -531,9 +531,9 @@ validate_and_resolve_derived_rel(ParseState *pstate, Query *query, RangeTblEntry
 
 			foreach(lc, query->jointree->fromlist)
 			{
-				Node	   *jtnode = (Node *) lfirst(lc);
+				JoinExpr   *join = castNode(JoinExpr, lfirst(lc));
 
-				validate_derived_rel_joins(pstate, query, jtnode, trunk_rte);
+				validate_derived_rel_joins(pstate, query, join, trunk_rte);
 			}
 		}
 
@@ -554,10 +554,9 @@ validate_and_resolve_derived_rel(ParseState *pstate, Query *query, RangeTblEntry
  *		Ensures that all joins uphold virtual foreign key integrity
  */
 static void
-validate_derived_rel_joins(ParseState *pstate, Query *query, Node *jtnode,
+validate_derived_rel_joins(ParseState *pstate, Query *query, JoinExpr *join,
 						   RangeTblEntry *trunk_rte)
 {
-	JoinExpr   *j;
 	ForeignKeyJoinNode *fkjn;
 	RangeTblEntry *referencing_rte;
 	List	   *referencing_attnums;
@@ -566,19 +565,17 @@ validate_derived_rel_joins(ParseState *pstate, Query *query, Node *jtnode,
 	List	   *colaliases = NIL;
 	Oid			base_relid;
 
-	if (jtnode == NULL || !IsA(jtnode, JoinExpr))
+	if (join == NULL)
 		return;
 
-	j = (JoinExpr *) jtnode;
-
-	if (j->fkJoin == NULL)
+	if (join->fkJoin == NULL)
 		ereport(ERROR,
 				(errcode(ERRCODE_INTEGRITY_CONSTRAINT_VIOLATION),
 				 errmsg("virtual foreign key constraint violation"),
 				 errdetail("The derived table contains a join that is not a foreign key join")));
 
-	Assert(IsA(j->fkJoin, ForeignKeyJoinNode));
-	fkjn = (ForeignKeyJoinNode *) j->fkJoin;
+	Assert(IsA(join->fkJoin, ForeignKeyJoinNode));
+	fkjn = (ForeignKeyJoinNode *) join->fkJoin;
 
 	Assert(query->rtable != NIL);
 	Assert(fkjn->referencingVarno > 0 &&
