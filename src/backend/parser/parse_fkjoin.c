@@ -532,7 +532,16 @@ validate_and_resolve_derived_rel(ParseState *pstate, Query *query, RangeTblEntry
 	 */
 	if (is_referenced)
 	{
-		if (query->jointree->quals != NULL ||
+		bool has_rls = false;
+		if (trunk_rte->rtekind == RTE_RELATION)
+		{
+			Relation rel = table_open(trunk_rte->relid, AccessShareLock);
+			has_rls = rel->rd_rel->relrowsecurity;
+			table_close(rel, AccessShareLock);
+		}
+
+		if (has_rls ||
+			query->jointree->quals != NULL ||
 			query->limitOffset != NULL ||
 			query->limitCount != NULL)
 			ereport(ERROR,
