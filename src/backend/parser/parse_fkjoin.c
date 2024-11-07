@@ -335,12 +335,12 @@ column_list_to_string(const List *columns)
 
 	foreach(l, columns)
 	{
-		Node	   *name = (Node *) lfirst(l);
+		char	   *name = strVal(lfirst(l));
 
 		if (!first)
 			appendStringInfoString(&string, ", ");
 
-		appendStringInfoString(&string, strVal(name));
+		appendStringInfoString(&string, name);
 
 		first = false;
 	}
