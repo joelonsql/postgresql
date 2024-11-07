@@ -510,6 +510,13 @@ SELECT * FROM t1 JOIN v2 KEY (c3) -> t1 (c1);
 -- also invalid, since v1 is filtered and is the referenced table
 SELECT * FROM v1 JOIN v2 KEY (c3) -> v1 (c1);
 
+-- also invalid, filters uisng a having clause
+SELECT * FROM
+(
+    SELECT c1, count(*) FROM t1 GROUP BY c1 HAVING c2 > 100
+) AS u
+JOIN t2 KEY (c3) -> u (c1);
+
 WITH q2 AS
 (
     SELECT * FROM t5 WHERE t5.c11 > 0
