@@ -428,7 +428,6 @@ validate_and_resolve_derived_rel(ParseState *pstate, Query *query, RangeTblEntry
 {
 	RangeTblEntry *trunk_rte = NULL;
 	List	   *base_colnames = NIL;
-	Oid			base_relid;
 	Index		first_varno = InvalidOid;
 	ListCell   *lc_colname;
 
@@ -543,10 +542,8 @@ validate_and_resolve_derived_rel(ParseState *pstate, Query *query, RangeTblEntry
 	 * Once the trunk_rte is determined, we drill down to the base relation,
 	 * which is then returned.
 	 */
-	base_relid = drill_down_to_base_rel(pstate, trunk_rte, colnames_out,
-										base_colnames, is_referenced, location);
-
-	return base_relid;
+	return drill_down_to_base_rel(pstate, trunk_rte, colnames_out,
+								  base_colnames, is_referenced, location);
 }
 
 /*
