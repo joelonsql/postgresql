@@ -434,7 +434,8 @@ validate_and_resolve_derived_rel(ParseState *pstate, Query *query, RangeTblEntry
 	if (query->setOperations != NULL)
 		ereport(ERROR,
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-				 errmsg("foreign key joins involving set operations are not supported")));
+				 errmsg("foreign key joins involving set operations are not supported"),
+				 parser_errposition(pstate, location)));
 
 	/*
 	 * Determine the trunk_rte, which is the relation in query->targetList the
@@ -472,12 +473,13 @@ validate_and_resolve_derived_rel(ParseState *pstate, Query *query, RangeTblEntry
 		if (matches == 0)
 			ereport(ERROR,
 					(errcode(ERRCODE_UNDEFINED_COLUMN),
-					 errmsg("column reference \"%s\" not found", colname)));
+					 errmsg("column reference \"%s\" not found", colname),
+					 parser_errposition(pstate, location)));
 		else if (matches > 1)
 			ereport(ERROR,
 					(errcode(ERRCODE_AMBIGUOUS_COLUMN),
-					 errmsg("column reference \"%s\" is ambiguous",
-							colname)));
+					 errmsg("column reference \"%s\" is ambiguous", colname),
+					 parser_errposition(pstate, location)));
 
 		Assert(matching_tle != NULL);
 
@@ -487,7 +489,8 @@ validate_and_resolve_derived_rel(ParseState *pstate, Query *query, RangeTblEntry
 			ereport(ERROR,
 					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 					 errmsg("target entry \"%s\" is an expression, not a direct column reference",
-							tle->resname)));
+							tle->resname),
+					 parser_errposition(pstate, location)));
 
 		var = (Var *) tle->expr;
 
@@ -521,7 +524,8 @@ validate_and_resolve_derived_rel(ParseState *pstate, Query *query, RangeTblEntry
 			ereport(ERROR,
 					(errcode(ERRCODE_SYNTAX_ERROR),
 					 errmsg("cannot use filtered query as referenced table in foreign key join"),
-					 errdetail("Using a filtered query as the referenced table would violate referential integrity.")));
+					 errdetail("Using a filtered query as the referenced table would violate referential integrity."),
+					 parser_errposition(pstate, location)));
 
 		if (list_length(query->rtable) > 1 &&
 			IsA(query->jointree->fromlist, List))
