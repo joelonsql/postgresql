@@ -586,9 +586,6 @@ validate_derived_rel_joins(ParseState *pstate, Query *query, JoinExpr *join,
 	List	   *colaliases = NIL;
 	Oid			base_relid;
 
-	if (join == NULL)
-		return;
-
 	if (join->fkJoin == NULL)
 		ereport(ERROR,
 				(errcode(ERRCODE_INTEGRITY_CONSTRAINT_VIOLATION),
