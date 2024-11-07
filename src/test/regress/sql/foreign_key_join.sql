@@ -517,6 +517,15 @@ SELECT * FROM
 ) AS u
 JOIN t2 KEY (c3) -> u (c1);
 
+-- invalid, since u is filtered and is the referenced table
+SELECT * FROM (SELECT c1 FROM t1 LIMIT 1) AS u
+JOIN t2 KEY (c3) -> u (c1);
+
+-- invalid, since u is filtered and is the referenced table
+SELECT * FROM (SELECT c1 FROM t1 OFFSET 1) AS u
+JOIN t2 KEY (c3) -> u (c1);
+
+
 WITH q2 AS
 (
     SELECT * FROM t5 WHERE t5.c11 > 0

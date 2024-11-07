@@ -443,8 +443,7 @@ validate_and_resolve_derived_rel(ParseState *pstate, Query *query, RangeTblEntry
 		query->distinctClause ||
 		query->groupingSets ||
 		query->hasTargetSRFs ||
-		query->havingQual ||
-		query->limitOffset)
+		query->havingQual)
 		ereport(ERROR,
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 				 errmsg("foreign key joins not supported for these relations"),
@@ -533,7 +532,9 @@ validate_and_resolve_derived_rel(ParseState *pstate, Query *query, RangeTblEntry
 	 */
 	if (is_referenced)
 	{
-		if (query->jointree->quals != NULL)
+		if (query->jointree->quals != NULL ||
+			query->limitOffset != NULL ||
+			query->limitCount != NULL)
 			ereport(ERROR,
 					(errcode(ERRCODE_SYNTAX_ERROR),
 					 errmsg("cannot use filtered query as referenced table in foreign key join"),
