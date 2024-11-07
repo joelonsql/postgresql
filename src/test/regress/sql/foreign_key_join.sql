@@ -533,7 +533,6 @@ CREATE POLICY t1_policy ON t1 USING (false);
 SELECT * FROM (SELECT c1 FROM t1) AS u
 JOIN t2 KEY (c3) -> u (c1);
 
--- XXX: This should fail, but it doesn't
 SELECT * FROM t1 JOIN t2 KEY (c3) -> t1 (c1);
 
 ALTER TABLE t1 DISABLE ROW LEVEL SECURITY;
