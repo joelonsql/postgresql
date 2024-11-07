@@ -368,6 +368,13 @@ drill_down_to_base_rel(ParseState *pstate, RangeTblEntry *rte,
 
 				if (is_view)
 					query = get_view_query(rel);
+				else if (is_referenced && rel->rd_rel->relrowsecurity)
+					ereport(ERROR,
+							(errcode(ERRCODE_SYNTAX_ERROR),
+							 errmsg("cannot use table \"%s\" with row level security enabled as referenced table in foreign key join",
+									get_rel_name(rel->rd_id)),
+							 errdetail("Using a table with row level security as the referenced table would violate referential integrity."),
+							 parser_errposition(pstate, location)));
 				else
 				{
 					*colnames_out = colnames;
@@ -532,16 +539,7 @@ validate_and_resolve_derived_rel(ParseState *pstate, Query *query, RangeTblEntry
 	 */
 	if (is_referenced)
 	{
-		bool has_rls = false;
-		if (trunk_rte->rtekind == RTE_RELATION)
-		{
-			Relation rel = table_open(trunk_rte->relid, AccessShareLock);
-			has_rls = rel->rd_rel->relrowsecurity;
-			table_close(rel, AccessShareLock);
-		}
-
-		if (has_rls ||
-			query->jointree->quals != NULL ||
+		if (query->jointree->quals != NULL ||
 			query->limitOffset != NULL ||
 			query->limitCount != NULL)
 			ereport(ERROR,
