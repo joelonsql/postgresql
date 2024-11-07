@@ -466,7 +466,6 @@ validate_and_resolve_derived_rel(ParseState *pstate, Query *query, RangeTblEntry
 		char	   *colname = strVal(lfirst(lc_colname));
 		TargetEntry *matching_tle = NULL;
 		int			matches = 0;
-		TargetEntry *tle;
 		Var		   *var;
 		char	   *base_colname;
 		ListCell   *lc_tle,
@@ -503,16 +502,14 @@ validate_and_resolve_derived_rel(ParseState *pstate, Query *query, RangeTblEntry
 
 		Assert(matching_tle != NULL);
 
-		tle = matching_tle;
-
-		if (!IsA(tle->expr, Var))
+		if (!IsA(matching_tle->expr, Var))
 			ereport(ERROR,
 					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 					 errmsg("target entry \"%s\" is an expression, not a direct column reference",
-							tle->resname),
+							matching_tle->resname),
 					 parser_errposition(pstate, location)));
 
-		var = (Var *) tle->expr;
+		var = (Var *) matching_tle->expr;
 
 		if (first_varno == InvalidOid)
 		{
@@ -524,7 +521,7 @@ validate_and_resolve_derived_rel(ParseState *pstate, Query *query, RangeTblEntry
 					(errcode(ERRCODE_UNDEFINED_TABLE),
 					 errmsg("key columns must all come from the same table"),
 					 parser_errposition(pstate,
-										exprLocation((Node *) tle->expr))));
+										exprLocation((Node *) matching_tle->expr))));
 
 		base_colname = get_rte_attribute_name(trunk_rte, var->varattno);
 		base_colnames = lappend(base_colnames, makeString(base_colname));
