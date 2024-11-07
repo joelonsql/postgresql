@@ -649,13 +649,10 @@ validate_derived_rel_joins(ParseState *pstate, Query *query, JoinExpr *join,
 		attr = (Form_pg_attribute) GETSTRUCT(tuple);
 
 		if (!attr->attnotnull)
-		{
-			ReleaseSysCache(tuple);
 			ereport(ERROR,
 					(errcode(ERRCODE_INTEGRITY_CONSTRAINT_VIOLATION),
 					 errmsg("virtual foreign key constraint violation"),
 					 errdetail("Nullable columns in derived table's referencing relation violate referential integrity")));
-		}
 
 		ReleaseSysCache(tuple);
 	}
