@@ -475,15 +475,15 @@ validate_and_resolve_derived_rel(ParseState *pstate, Query *query, RangeTblEntry
 
 		foreach(lc_tle, query->targetList)
 		{
-			TargetEntry *cur_tle = (TargetEntry *) lfirst(lc_tle);
+			TargetEntry *tle = (TargetEntry *) lfirst(lc_tle);
 
-			if (cur_tle->resjunk)
+			if (tle->resjunk)
 				continue;
 
 			if (strcmp(strVal(lfirst(lc_alias)), colname) == 0)
 			{
 				matches++;
-				matching_tle = cur_tle;
+				matching_tle = tle;
 			}
 
 			lc_alias = lnext(rte->eref->colnames, lc_alias);
