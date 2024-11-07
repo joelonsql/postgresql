@@ -341,6 +341,12 @@ JOIN
     JOIN t10 AS t10_2 KEY (c23, c24) <- t10 (c25, c26)
 ) AS q1 KEY (c23, c24) -> t1 (c1, c2);
 
+SELECT *
+FROM t1
+JOIN LATERAL (
+    SELECT c3, c4 FROM t2 WHERE c4 = c1 + 9
+) AS q1 KEY (c3) -> t1 (c1);
+
 --
 -- Test CTEs
 --
