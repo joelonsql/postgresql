@@ -543,7 +543,6 @@ revalidateDependentViews(Oid viewOid)
 	HTAB	   *seen_views;
 	HASHCTL		hash_ctl;
 
-	memset(&hash_ctl, 0, sizeof(hash_ctl));
 	hash_ctl.keysize = sizeof(Oid);
 	hash_ctl.entrysize = sizeof(Oid);
 	hash_ctl.hcxt = CurrentMemoryContext;
