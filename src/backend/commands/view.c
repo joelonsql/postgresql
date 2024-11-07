@@ -547,7 +547,7 @@ revalidateDependentViews(Oid viewOid)
 	hash_ctl.entrysize = sizeof(Oid);
 	hash_ctl.hcxt = CurrentMemoryContext;
 	seen_views = hash_create("Dependent view tracking",
-							 100,	/* start small */
+							 100,
 							 &hash_ctl,
 							 HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
 
