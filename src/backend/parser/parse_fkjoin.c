@@ -594,8 +594,7 @@ validate_derived_rel_joins(ParseState *pstate, Query *query, JoinExpr *join,
 				 errdetail("The derived table contains a join that is not a foreign key join"),
 				 parser_errposition(pstate, location)));
 
-	Assert(IsA(join->fkJoin, ForeignKeyJoinNode));
-	fkjn = (ForeignKeyJoinNode *) join->fkJoin;
+	fkjn = castNode(ForeignKeyJoinNode, join->fkJoin);
 
 	Assert(query->rtable != NIL);
 	Assert(fkjn->referencingVarno > 0 &&
