@@ -386,6 +386,7 @@ drill_down_to_base_rel(ParseState *pstate, RangeTblEntry *rte,
 			{
 				Index		levelsup;
 				CommonTableExpr *cte = scanNameSpaceForCTE(pstate, rte->ctename, &levelsup);
+
 				Assert(cte != NULL);
 
 				if (cte->cterecursive)
@@ -448,7 +449,8 @@ validate_and_resolve_derived_rel(ParseState *pstate, Query *query, RangeTblEntry
 		TargetEntry *tle;
 		Var		   *var;
 		char	   *base_colname;
-		ListCell   *lc_tle, *lc_alias;
+		ListCell   *lc_tle,
+				   *lc_alias;
 
 		lc_alias = list_head(rte->eref->colnames);
 
