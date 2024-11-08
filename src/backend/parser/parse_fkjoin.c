@@ -141,9 +141,11 @@ transformAndValidateForeignKeyJoin(ParseState *pstate, JoinExpr *join,
 		ereport(ERROR,
 				(errcode(ERRCODE_UNDEFINED_OBJECT),
 				 errmsg("there is no foreign key constraint on table \"%s\" (%s) referencing table \"%s\" (%s)",
-						referencing_rte->eref->aliasname,
+						referencing_rte->alias ? referencing_rte->alias->aliasname :
+						get_rel_name(referencing_rte->relid),
 						column_list_to_string(referencing_cols),
-						referenced_rte->eref->aliasname,
+						referenced_rte->alias ? referenced_rte->alias->aliasname :
+						get_rel_name(referenced_rte->relid),
 						column_list_to_string(referenced_cols)),
 				 parser_errposition(pstate, fkjn->location)));
 
