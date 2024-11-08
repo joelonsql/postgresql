@@ -637,9 +637,11 @@ revalidateDependentViews(Oid viewOid)
 			}
 			PG_CATCH();
 			{
-				elog(ERROR, "virtual foreign key constraint violation while re-validating view \"%s.%s\"",
-					 get_namespace_name(get_rel_namespace(dependentViewOid)),
-					 get_rel_name(dependentViewOid));
+				ereport(ERROR,
+						(errcode(ERRCODE_INTEGRITY_CONSTRAINT_VIOLATION),
+						 errmsg("virtual foreign key constraint violation while re-validating view \"%s.%s\"",
+								get_namespace_name(get_rel_namespace(dependentViewOid)),
+								get_rel_name(dependentViewOid))));
 			}
 			PG_END_TRY();
 
