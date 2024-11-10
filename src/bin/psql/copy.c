@@ -544,7 +544,7 @@ handleCopyIn(PGconn *conn, FILE *copystream, bool isbinary, PGresult **res)
 
 	OK = true;
 
-	if (isbinary)
+	if (isbinary || copystream != pset.cur_cmd_source)
 	{
 		/* interactive input probably silly, but give one prompt anyway */
 		if (showprompt)
