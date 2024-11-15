@@ -513,6 +513,7 @@ handleCopyIn(PGconn *conn, FILE *copystream, bool isbinary, PGresult **res)
 	bool		OK;
 	char		buf[COPYBUFSIZ];
 	bool		showprompt;
+	const bool	check_dot_command = (copystream == pset.cur_cmd_source);
 
 	/*
 	 * Establish longjmp destination for exiting from wait-for-input. (This is
@@ -536,24 +537,25 @@ handleCopyIn(PGconn *conn, FILE *copystream, bool isbinary, PGresult **res)
 	{
 		showprompt = true;
 		if (!pset.quiet)
-			puts(_("Enter data to be copied followed by a newline.\n"
-				   "End with a backslash and a period on a line by itself, or an EOF signal."));
+		{
+			if (isbinary)
+				puts(_("End with an EOF signal."));
+			else if (check_dot_command)
+				puts(_("Enter data to be copied followed by a newline.\n"
+					   "End with a backslash and a period on a line by itself, or an EOF signal."));
+			else
+				puts(_("Enter data to be copied followed by a newline.\n"
+					   "End with an EOF signal."));
+		}
 	}
 	else
 		showprompt = false;
 
 	OK = true;
 
-	if (isbinary)
-	{
-		/* interactive input probably silly, but give one prompt anyway */
-		if (showprompt)
-		{
-			const char *prompt = get_prompt(PROMPT_COPY, NULL);
 
-			fputs(prompt, stdout);
-			fflush(stdout);
-		}
+	if ((isbinary || !check_dot_command) && !showprompt)
+	{
 
 		for (;;)
 		{
@@ -628,7 +630,7 @@ handleCopyIn(PGconn *conn, FILE *copystream, bool isbinary, PGresult **res)
 					 * an EOF or not depending on the format: in TEXT mode, \.
 					 * will be interpreted as an EOF, in CSV, it will not.
 					 */
-					if (at_line_begin && copystream == pset.cur_cmd_source)
+					if (at_line_begin && check_dot_command)
 					{
 						if ((linelen == 3 && memcmp(fgresult, "\\.\n", 3) == 0) ||
 							(linelen == 4 && memcmp(fgresult, "\\.\r\n", 4) == 0))
@@ -646,7 +648,7 @@ handleCopyIn(PGconn *conn, FILE *copystream, bool isbinary, PGresult **res)
 						}
 					}
 
-					if (copystream == pset.cur_cmd_source)
+					if (check_dot_command)
 					{
 						pset.lineno++;
 						pset.stmt_lineno++;
