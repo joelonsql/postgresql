@@ -5138,20 +5138,20 @@ match_previous_words(int pattern_id,
 	else if (TailMatches("JOIN"))
 		COMPLETE_WITH_SCHEMA_QUERY_PLUS(Query_for_list_of_selectables, "LATERAL");
 	else if (TailMatches("JOIN", MatchAny) && !TailMatches("CROSS|NATURAL", "JOIN", MatchAny))
-		COMPLETE_WITH("ON", "USING (");
+		COMPLETE_WITH("KEY (", "ON", "USING (");
 	else if (TailMatches("JOIN", MatchAny, MatchAny) &&
-			 !TailMatches("CROSS|NATURAL", "JOIN", MatchAny, MatchAny) && !TailMatches("ON|USING"))
-		COMPLETE_WITH("ON", "USING (");
+			 !TailMatches("CROSS|NATURAL", "JOIN", MatchAny, MatchAny) && !TailMatches("KEY|ON|USING"))
+		COMPLETE_WITH("KEY (", "ON", "USING (");
 	else if (TailMatches("JOIN", "LATERAL", MatchAny, MatchAny) &&
-			 !TailMatches("CROSS|NATURAL", "JOIN", "LATERAL", MatchAny, MatchAny) && !TailMatches("ON|USING"))
-		COMPLETE_WITH("ON", "USING (");
-	else if (TailMatches("JOIN", MatchAny, "USING") ||
-			 TailMatches("JOIN", MatchAny, MatchAny, "USING") ||
-			 TailMatches("JOIN", "LATERAL", MatchAny, MatchAny, "USING"))
+			 !TailMatches("CROSS|NATURAL", "JOIN", "LATERAL", MatchAny, MatchAny) && !TailMatches("KEY|ON|USING"))
+		COMPLETE_WITH("KEY (", "ON", "USING (");
+	else if (TailMatches("JOIN", MatchAny, "KEY|USING") ||
+			 TailMatches("JOIN", MatchAny, MatchAny, "KEY|USING") ||
+			 TailMatches("JOIN", "LATERAL", MatchAny, MatchAny, "KEY|USING"))
 		COMPLETE_WITH("(");
-	else if (TailMatches("JOIN", MatchAny, "USING", "("))
+	else if (TailMatches("JOIN", MatchAny, "KEY|USING", "("))
 		COMPLETE_WITH_ATTR(prev3_wd);
-	else if (TailMatches("JOIN", MatchAny, MatchAny, "USING", "("))
+	else if (TailMatches("JOIN", MatchAny, MatchAny, "KEY|USING", "("))
 		COMPLETE_WITH_ATTR(prev4_wd);
 
 /* ... AT [ LOCAL | TIME ZONE ] ... */
