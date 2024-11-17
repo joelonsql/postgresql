@@ -1288,8 +1288,15 @@ transformOnConflictClause(ParseState *pstate,
 		Assert((ParseNamespaceItem *) llast(pstate->p_namespace) == exclNSItem);
 		pstate->p_namespace = list_delete_last(pstate->p_namespace);
 	}
+	else if (onConflictClause->action == ONCONFLICT_SELECT)
+	{
+		onConflictWhere = transformWhereClause(pstate,
+											   onConflictClause->whereClause,
+											   EXPR_KIND_WHERE, "WHERE");
 
-	/* Finally, build ON CONFLICT DO [NOTHING | UPDATE] expression */
+	}
+
+	/* Finally, build ON CONFLICT DO [NOTHING | SELECT | UPDATE] expression */
 	result = makeNode(OnConflictExpr);
 
 	result->action = onConflictClause->action;
@@ -1297,6 +1304,7 @@ transformOnConflictClause(ParseState *pstate,
 	result->arbiterWhere = arbiterWhere;
 	result->constraint = arbiterConstraint;
 	result->onConflictSet = onConflictSet;
+	result->lockingStrength = onConflictClause->lockingStrength;
 	result->onConflictWhere = onConflictWhere;
 	result->exclRelIndex = exclRelIndex;
 	result->exclRelTlist = exclRelTlist;

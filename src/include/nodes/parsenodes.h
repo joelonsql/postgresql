@@ -1621,9 +1621,11 @@ typedef struct InferClause
 typedef struct OnConflictClause
 {
 	NodeTag		type;
-	OnConflictAction action;	/* DO NOTHING or UPDATE? */
+	OnConflictAction action;	/* DO NOTHING, SELECT or UPDATE? */
 	InferClause *infer;			/* Optional index inference clause */
 	List	   *targetList;		/* the target list (of ResTarget) */
+	LockClauseStrength lockingStrength; /* strengh of lock for DO SELECT, or
+										 * LCS_NONE */
 	Node	   *whereClause;	/* qualifications */
 	ParseLoc	location;		/* token location, or -1 if unknown */
 } OnConflictClause;

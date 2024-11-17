@@ -247,6 +247,8 @@ typedef struct ModifyTable
 	List	   *arbiterIndexes; /* List of ON CONFLICT arbiter index OIDs  */
 	List	   *onConflictSet;	/* INSERT ON CONFLICT DO UPDATE targetlist */
 	List	   *onConflictCols; /* target column numbers for onConflictSet */
+	LockClauseStrength onConflictLockingStrength;	/* lock strength for ON
+													 * CONFLICT SELECT */
 	Node	   *onConflictWhere;	/* WHERE for ON CONFLICT UPDATE */
 	Index		exclRelRTI;		/* RTI of the EXCLUDED pseudo relation */
 	List	   *exclRelTlist;	/* tlist of the EXCLUDED pseudo relation */
