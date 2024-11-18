@@ -1080,8 +1080,10 @@ ExecInsert(ModifyTableContext *context,
 				else if (onconflict == ONCONFLICT_SELECT)
 				{
 					/*
-					 * In case of ON CONFLICT DO SELECT, simply fetch the
-					 * conflicting tuple and project RETURNING on it.
+					 * In case of ON CONFLICT DO SELECT, optionally lock the
+					 * conflicting tuple, fetch it and project RETURNING on
+					 * it. Be prepared to retry if fetching fails because of a
+					 * concurrent UPDATE/DELETE to the conflict tuple.
 					 */
 					TupleTableSlot *returning = NULL;
 
