@@ -142,7 +142,8 @@ static bool ExecOnConflictLockRow(ModifyTableContext *context,
 								  TupleTableSlot *existing,
 								  ItemPointer conflictTid,
 								  Relation relation,
-								  LockTupleMode lockmode);
+								  LockTupleMode lockmode,
+								  bool isUpdate);
 static bool ExecOnConflictUpdate(ModifyTableContext *context,
 								 ResultRelInfo *resultRelInfo,
 								 ItemPointer conflictTid,
@@ -2547,7 +2548,8 @@ ExecOnConflictLockRow(ModifyTableContext *context,
 					  TupleTableSlot *existing,
 					  ItemPointer conflictTid,
 					  Relation relation,
-					  LockTupleMode lockmode)
+					  LockTupleMode lockmode,
+					  bool isUpdate)
 {
 	TM_FailureData tmfd;
 	TM_Result	test;
@@ -2600,7 +2602,7 @@ ExecOnConflictLockRow(ModifyTableContext *context,
 						(errcode(ERRCODE_CARDINALITY_VIOLATION),
 				/* translator: %s is a SQL command name */
 						 errmsg("%s command cannot affect row a second time",
-								"ON CONFLICT"),
+								isUpdate ? "ON CONFLICT DO UPDATE" : "ON CONFLICT DO SELECT"),
 						 errhint("Ensure that no rows proposed for insertion within the same command have duplicate constrained values.")));
 
 			/* This shouldn't happen */
@@ -2698,7 +2700,8 @@ ExecOnConflictUpdate(ModifyTableContext *context,
 	lockmode = ExecUpdateLockMode(context->estate, resultRelInfo);
 
 	/* Lock tuple for update. */
-	if (!ExecOnConflictLockRow(context, existing, conflictTid, resultRelInfo->ri_RelationDesc, lockmode))
+	if (!ExecOnConflictLockRow(context, existing, conflictTid,
+							   resultRelInfo->ri_RelationDesc, lockmode, true))
 		return false;
 
 	/*
@@ -2833,7 +2836,8 @@ ExecOnConflictSelect(ModifyTableContext *context,
 				elog(ERROR, "unexpected lock strength %d", lockstrength);
 		}
 
-		if (!ExecOnConflictLockRow(context, existing, conflictTid, resultRelInfo->ri_RelationDesc, lockmode))
+		if (!ExecOnConflictLockRow(context, existing, conflictTid,
+								   resultRelInfo->ri_RelationDesc, lockmode, false))
 			return false;
 	}
 	else
