@@ -112,6 +112,8 @@ insert into insertconflicttest values (1, 'Apple') on conflict (key) do select f
 insert into insertconflicttest values (1, 'Apple') on conflict (key) do select for update returning *;
 insert into insertconflicttest values (1, 'Apple') on conflict (key) do select for update where fruit <> 'Apple' returning *;
 
+explain (costs off) insert into insertconflicttest values (1, 'Apple') on conflict (key) do select for key share returning *;
+
 -- Give good diagnostic message when EXCLUDED.* spuriously referenced from
 -- RETURNING:
 insert into insertconflicttest values (1, 'Apple') on conflict (key) do update set fruit = excluded.fruit RETURNING excluded.fruit;

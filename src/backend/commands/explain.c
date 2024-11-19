@@ -4601,10 +4601,35 @@ show_modifytable_info(ModifyTableState *mtstate, List *ancestors,
 
 	if (node->onConflictAction != ONCONFLICT_NONE)
 	{
-		ExplainPropertyText("Conflict Resolution",
-							node->onConflictAction == ONCONFLICT_NOTHING ?
-							"NOTHING" : "UPDATE",
-							es);
+		const char *resolution;
+
+		if (node->onConflictAction == ONCONFLICT_NOTHING)
+			resolution = "NOTHING";
+		else if (node->onConflictAction == ONCONFLICT_UPDATE)
+			resolution = "UPDATE";
+		else if (node->onConflictAction == ONCONFLICT_SELECT)
+		{
+			switch (node->onConflictLockingStrength)
+			{
+				case LCS_NONE:
+					resolution = "SELECT";
+					break;
+				case LCS_FORKEYSHARE:
+					resolution = "SELECT FOR KEY SHARE";
+					break;
+				case LCS_FORSHARE:
+					resolution = "SELECT FOR SHARE";
+					break;
+				case LCS_FORNOKEYUPDATE:
+					resolution = "SELECT FOR NO KEY UPDATE";
+					break;
+				case LCS_FORUPDATE:
+					resolution = "SELECT FOR UPDATE";
+					break;
+			}
+		}
+
+		ExplainPropertyText("Conflict Resolution", resolution, es);
 
 		/*
 		 * Don't display arbiter indexes at all when DO NOTHING variant
