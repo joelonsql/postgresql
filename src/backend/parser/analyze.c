@@ -1061,6 +1061,12 @@ transformInsertStmt(ParseState *pstate, InsertStmt *stmt)
 						 false, true, true);
 	}
 
+	if (stmt->onConflictClause && stmt->onConflictClause->action == ONCONFLICT_SELECT && !stmt->returningList)
+		ereport(ERROR,
+				(errcode(ERRCODE_SYNTAX_ERROR),
+				 errmsg("ON CONFLICT DO SELECT requires a RETURNING clause"),
+				 parser_errposition(pstate, stmt->onConflictClause->location)));
+
 	/* Process ON CONFLICT, if any. */
 	if (stmt->onConflictClause)
 		qry->onConflict = transformOnConflictClause(pstate,

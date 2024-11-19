@@ -2863,6 +2863,9 @@ ExecOnConflictSelect(ModifyTableContext *context,
 		return true;			/* done with the tuple */
 	}
 
+	/* Parse analysis should already have disallowed this */
+	Assert(resultRelInfo->ri_projectReturning);
+
 	*returning = ExecProcessReturning(resultRelInfo, existing, planSlot);
 
 	/*

@@ -103,6 +103,7 @@ on conflict (key) do update set (fruit, key) = (excluded.fruit, excluded.key);
 
 -- DO SELECT
 delete from insertconflicttest where fruit = 'Apple';
+insert into insertconflicttest values (1, 'Apple') on conflict (key) do select; -- fails
 insert into insertconflicttest values (1, 'Apple') on conflict (key) do select returning *;
 insert into insertconflicttest values (1, 'Apple') on conflict (key) do select returning *;
 insert into insertconflicttest values (1, 'Apple') on conflict (key) do select where fruit <> 'Apple' returning *;

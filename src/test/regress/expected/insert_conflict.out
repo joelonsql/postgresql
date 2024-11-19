@@ -251,6 +251,10 @@ values (1, 'Apple'), (2, 'Orange')
 on conflict (key) do update set (fruit, key) = (excluded.fruit, excluded.key);
 -- DO SELECT
 delete from insertconflicttest where fruit = 'Apple';
+insert into insertconflicttest values (1, 'Apple') on conflict (key) do select; -- fails
+ERROR:  ON CONFLICT DO SELECT requires a RETURNING clause
+LINE 1: ...nsert into insertconflicttest values (1, 'Apple') on conflic...
+                                                             ^
 insert into insertconflicttest values (1, 'Apple') on conflict (key) do select returning *;
  key | fruit 
 -----+-------
