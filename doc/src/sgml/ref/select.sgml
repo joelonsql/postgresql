@@ -697,16 +697,102 @@ TABLE [ ONLY ] <replaceable class="parameter">table_name</replaceable> [ * ]
        </para>
       </listitem>
      </varlistentry>
-
      <varlistentry>
       <term><literal>KEY ( <replaceable class="parameter">column_name</replaceable> [, ...] ) { &lt;- | -&gt; } <replaceable class="parameter">from_reference</replaceable> ( <replaceable class="parameter">column_name</replaceable> [, ...] )</literal></term>
       <listitem>
        <para>
-        TODO: Write me!
+        The <literal>KEY</literal> join syntax allows you to explicitly declare that a set of columns in one table <emphasis>references</emphasis> a set of columns in another table within a query.
        </para>
+
+       <para>
+        The syntax components are as follows:
+       </para>
+
+       <itemizedlist>
+        <listitem>
+         <para>
+          <literal>KEY ( <replaceable class="parameter">column_name</replaceable> [, ...] )</literal>: Specifies the columns in the current table that participate in the relationship.
+         </para>
+        </listitem>
+        <listitem>
+         <para>
+          <literal>{ &lt;- | -&gt; }</literal>: Indicates the direction of the reference:
+          <itemizedlist>
+           <listitem>
+            <para>
+             <literal>-&gt;</literal>: The current table's columns <emphasis>reference</emphasis> the columns of the <replaceable class="parameter">from_reference</replaceable> table.
+            </para>
+           </listitem>
+           <listitem>
+            <para>
+             <literal>&lt;-</literal>: The columns of the <replaceable class="parameter">from_reference</replaceable> table <emphasis>reference</emphasis> the current table's columns.
+            </para>
+           </listitem>
+          </itemizedlist>
+         </para>
+        </listitem>
+        <listitem>
+         <para>
+          <replaceable class="parameter">from_reference</replaceable>: The name or alias of the other table involved in the relationship.
+         </para>
+        </listitem>
+        <listitem>
+         <para>
+          <literal>( <replaceable class="parameter">column_name</replaceable> [, ...] )</literal>: Specifies the corresponding columns in the other table that participate in the relationship.
+         </para>
+        </listitem>
+       </itemizedlist>
+
+       <para>
+        When one set of columns <emphasis>references</emphasis> another, two key properties are implied:
+       </para>
+
+       <itemizedlist>
+        <listitem>
+         <para>
+          <emphasis>Set Containment</emphasis>: Every value in the referencing columns exists in the referenced columns. This means the set of values in the referencing columns is a subset of those in the referenced columns.
+         </para>
+        </listitem>
+        <listitem>
+         <para>
+          <emphasis>Uniqueness</emphasis>: The combination of values in the referenced columns are unique within the referenced table.
+         </para>
+        </listitem>
+       </itemizedlist>
+
+       <para>
+        In the simplest case, this corresponds to an existing foreign key constraint between two base tables.
+        However, these properties must also hold through any derived tables involved, such as views, subqueries, or CTEs.
+       </para>
+
+       <para>
+        If these conditions are not satisfied—either because there is no matching foreign key constraint between the underlying base tables or because derived tables do not preserve these properties—an error will be raised during query planning.
+       </para>
+
+       <para>
+        <emphasis>Examples:</emphasis>
+       </para>
+
+       <itemizedlist>
+        <listitem>
+         <para>
+          To specify that <literal>b.c</literal> <emphasis>references</emphasis> <literal>a.d</literal>:
+         </para>
+         <programlisting>
+SELECT * FROM a JOIN b KEY (c) -&gt; a (d);
+         </programlisting>
+        </listitem>
+        <listitem>
+         <para>
+          Conversely, to specify that <literal>a.d</literal> <emphasis>references</emphasis> <literal>b.c</literal>:
+         </para>
+         <programlisting>
+SELECT * FROM a JOIN b KEY (c) &lt;- a (d);
+         </programlisting>
+        </listitem>
+       </itemizedlist>
       </listitem>
      </varlistentry>
-
      <varlistentry>
       <term><literal>NATURAL</literal></term>
       <listitem>
