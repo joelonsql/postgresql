@@ -1401,7 +1401,12 @@ transformFromClauseItem(ParseState *pstate, Node *n,
 												l_usingvars,
 												r_usingvars);
 		}
-		else if (j->fkJoin)
+		else if (j->quals && !j->fkJoin)
+		{
+			/* User-written ON-condition; transform it */
+			j->quals = transformJoinOnClause(pstate, j, my_namespace);
+		}
+		if (j->fkJoin)
 		{
 			/*
 			 * Transform foreign key join node, validate the foreign key
@@ -1412,12 +1417,18 @@ transformFromClauseItem(ParseState *pstate, Node *n,
 			 * conditions and j->fkJoin with a new ForeignKeyJoinNode
 			 * containing the validated foreign key information.
 			 */
-			transformAndValidateForeignKeyJoin(pstate, j, r_nsitem, l_namespace);
-		}
-		else if (j->quals)
-		{
-			/* User-written ON-condition; transform it */
-			j->quals = transformJoinOnClause(pstate, j, my_namespace);
+			{
+				char	   *error_msg = NULL;
+				ParseLoc	error_loc = -1;
+
+				if (!transformAndValidateForeignKeyJoin(pstate, j, r_nsitem, l_namespace,
+														&error_msg, &error_loc))
+					ereport(ERROR,
+							(errcode(ERRCODE_UNDEFINED_OBJECT),
+							 error_msg ? errmsg("%s", error_msg) :
+							 errmsg("foreign key join validation failed"),
+							 error_loc >= 0 ? parser_errposition(pstate, error_loc) : 0));
+			}
 		}
 		else
 		{

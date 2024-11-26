@@ -15,6 +15,9 @@
 
 #include "parser/parse_node.h"
 
-extern void transformAndValidateForeignKeyJoin(ParseState *pstate, JoinExpr *j, ParseNamespaceItem *r_nsitem, List *l_namespace);
+extern bool transformAndValidateForeignKeyJoin(ParseState *pstate, JoinExpr *j,
+											   ParseNamespaceItem *r_nsitem,
+											   List *l_namespace,
+											   char **error_msg, ParseLoc *error_loc);
 
 #endif							/* PARSE_FKJOIN_H */

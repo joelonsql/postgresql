@@ -33,27 +33,32 @@
 #include "utils/rel.h"
 #include "utils/syscache.h"
 
-static Node *build_fk_join_on_clause(ParseState *pstate, List *referencingVars,
-									 List *referencedVars);
+static bool build_fk_join_on_clause(ParseState *pstate, List *referencingVars,
+									List *referencedVars, Node **result,
+									char **error_msg, ParseLoc *error_loc);
 static Oid	find_foreign_key(Oid referencing_relid, Oid referenced_relid,
 							 List *referencing_cols, List *referenced_cols);
 static char *column_list_to_string(const List *columns);
-static Oid	drill_down_to_base_rel(ParseState *pstate, RangeTblEntry *rte,
+static bool drill_down_to_base_rel(ParseState *pstate, RangeTblEntry *rte,
 								   List **colnames_out, List *colnames,
-								   bool is_referenced, int location);
-static Oid	validate_and_resolve_derived_rel(ParseState *pstate, Query *query,
+								   bool is_referenced, ParseLoc location,
+								   Oid *base_relid_out, char **error_msg, ParseLoc *error_loc);
+static bool validate_and_resolve_derived_rel(ParseState *pstate, Query *query,
 											 RangeTblEntry *rte,
 											 List *colnames,
 											 List **colnames_out,
-											 bool is_referenced, int location);
-static void validate_derived_rel_joins(ParseState *pstate, Query *query,
+											 bool is_referenced, ParseLoc location,
+											 Oid *relid_out, char **error_msg, ParseLoc *error_loc);
+static bool validate_derived_rel_joins(ParseState *pstate, Query *query,
 									   JoinExpr *join, RangeTblEntry *trunk_rte,
-									   int location);
+									   ParseLoc location,
+									   char **error_msg, ParseLoc *error_loc);
 
-void
+bool
 transformAndValidateForeignKeyJoin(ParseState *pstate, JoinExpr *join,
 								   ParseNamespaceItem *r_nsitem,
-								   List *l_namespace)
+								   List *l_namespace,
+								   char **error_msg, ParseLoc *error_loc)
 {
 	ForeignKeyClause *fkjn = castNode(ForeignKeyClause, join->fkJoin);
 	List	   *referencingVars = NIL;
@@ -75,6 +80,12 @@ transformAndValidateForeignKeyJoin(ParseState *pstate, JoinExpr *join,
 	List	   *referenced_attnums = NIL;
 	Oid			referencing_relid;
 	Oid			referenced_relid;
+	Node	   *quals;
+
+	if (error_msg)
+		*error_msg = NULL;
+	if (error_loc)
+		*error_loc = -1;
 
 	other_rel = NULL;
 
@@ -94,16 +105,22 @@ transformAndValidateForeignKeyJoin(ParseState *pstate, JoinExpr *join,
 	}
 
 	if (other_rel == NULL)
-		ereport(ERROR,
-				(errcode(ERRCODE_UNDEFINED_TABLE),
-				 errmsg("table reference \"%s\" not found", fkjn->refAlias),
-				 parser_errposition(pstate, fkjn->location)));
+	{
+		if (error_msg)
+			*error_msg = psprintf("table reference \"%s\" not found", fkjn->refAlias);
+		if (error_loc)
+			*error_loc = fkjn->location;
+		return false;
+	}
 
 	if (list_length(fkjn->refCols) != list_length(fkjn->localCols))
-		ereport(ERROR,
-				(errcode(ERRCODE_SYNTAX_ERROR),
-				 errmsg("number of referencing and referenced columns must be the same"),
-				 parser_errposition(pstate, fkjn->location)));
+	{
+		if (error_msg)
+			*error_msg = psprintf("number of referencing and referenced columns must be the same");
+		if (error_loc)
+			*error_loc = fkjn->location;
+		return false;
+	}
 
 	if (fkjn->fkdir == FKDIR_FROM)
 	{
@@ -123,14 +140,21 @@ transformAndValidateForeignKeyJoin(ParseState *pstate, JoinExpr *join,
 	referencing_rte = rt_fetch(referencing_rel->p_rtindex, pstate->p_rtable);
 	referenced_rte = rt_fetch(referenced_rel->p_rtindex, pstate->p_rtable);
 
-	referencing_relid = drill_down_to_base_rel(pstate, referencing_rte,
-											   &referencing_base_cols,
-											   referencing_cols, false,
-											   fkjn->location);
-	referenced_relid = drill_down_to_base_rel(pstate, referenced_rte,
-											  &referenced_base_cols,
-											  referenced_cols, true,
-											  fkjn->location);
+	if (!drill_down_to_base_rel(pstate, referencing_rte,
+								&referencing_base_cols,
+								referencing_cols, false,
+								fkjn->location,
+								&referencing_relid,
+								error_msg, error_loc))
+		return false;
+
+	if (!drill_down_to_base_rel(pstate, referenced_rte,
+								&referenced_base_cols,
+								referenced_cols, true,
+								fkjn->location,
+								&referenced_relid,
+								error_msg, error_loc))
+		return false;
 
 	Assert(referencing_relid != InvalidOid && referenced_relid != InvalidOid);
 
@@ -138,16 +162,17 @@ transformAndValidateForeignKeyJoin(ParseState *pstate, JoinExpr *join,
 							 referencing_base_cols, referenced_base_cols);
 
 	if (fkoid == InvalidOid)
-		ereport(ERROR,
-				(errcode(ERRCODE_UNDEFINED_OBJECT),
-				 errmsg("there is no foreign key constraint on table \"%s\" (%s) referencing table \"%s\" (%s)",
-						referencing_rte->alias ? referencing_rte->alias->aliasname :
-						get_rel_name(referencing_rte->relid),
-						column_list_to_string(referencing_cols),
-						referenced_rte->alias ? referenced_rte->alias->aliasname :
-						get_rel_name(referenced_rte->relid),
-						column_list_to_string(referenced_cols)),
-				 parser_errposition(pstate, fkjn->location)));
+	{
+		*error_msg = psprintf("there is no foreign key constraint on table \"%s\" (%s) referencing table \"%s\" (%s)",
+							  referencing_rte->alias ? referencing_rte->alias->aliasname :
+							  get_rel_name(referencing_rte->relid),
+							  column_list_to_string(referencing_cols),
+							  referenced_rte->alias ? referenced_rte->alias->aliasname :
+							  get_rel_name(referenced_rte->relid),
+							  column_list_to_string(referenced_cols));
+		*error_loc = fkjn->location;
+		return false;
+	}
 
 	forboth(lc, referencing_cols, rc, referenced_cols)
 	{
@@ -170,7 +195,11 @@ transformAndValidateForeignKeyJoin(ParseState *pstate, JoinExpr *join,
 										 referenced_var->varattno);
 	}
 
-	join->quals = build_fk_join_on_clause(pstate, referencingVars, referencedVars);
+	if (!build_fk_join_on_clause(pstate, referencingVars, referencedVars,
+								 &quals, error_msg, error_loc))
+		return false;
+
+	join->quals = quals;
 
 	fkjn_node = makeNode(ForeignKeyJoinNode);
 	fkjn_node->fkdir = fkjn->fkdir;
@@ -181,17 +210,19 @@ transformAndValidateForeignKeyJoin(ParseState *pstate, JoinExpr *join,
 	fkjn_node->constraint = fkoid;
 
 	join->fkJoin = (Node *) fkjn_node;
+
+	return true;
 }
 
 /*
  * build_fk_join_on_clause
  *		Constructs the ON clause for the foreign key join
  */
-static Node *
+static bool
 build_fk_join_on_clause(ParseState *pstate, List *referencingVars,
-						List *referencedVars)
+						List *referencedVars, Node **result,
+						char **error_msg, ParseLoc *error_loc)
 {
-	Node	   *result;
 	List	   *andargs = NIL;
 	ListCell   *referencingvar,
 			   *referencedvar;
@@ -213,14 +244,14 @@ build_fk_join_on_clause(ParseState *pstate, List *referencingVars,
 	}
 
 	if (list_length(andargs) == 1)
-		result = (Node *) linitial(andargs);
+		*result = (Node *) linitial(andargs);
 	else
-		result = (Node *) makeBoolExpr(AND_EXPR, andargs, -1);
+		*result = (Node *) makeBoolExpr(AND_EXPR, andargs, -1);
 
-	result = transformExpr(pstate, result, EXPR_KIND_JOIN_ON);
-	result = coerce_to_boolean(pstate, result, "FOREIGN KEY JOIN");
+	*result = transformExpr(pstate, *result, EXPR_KIND_JOIN_ON);
+	*result = coerce_to_boolean(pstate, *result, "FOREIGN KEY JOIN");
 
-	return result;
+	return true;
 }
 
 /*
@@ -354,13 +385,19 @@ column_list_to_string(const List *columns)
  * drill_down_to_base_rel
  *		Resolves the base relation from a potentially derived relation
  */
-static Oid
+static bool
 drill_down_to_base_rel(ParseState *pstate, RangeTblEntry *rte,
 					   List **colnames_out, List *colnames,
-					   bool is_referenced, int location)
+					   bool is_referenced, ParseLoc location,
+					   Oid *base_relid_out, char **error_msg, ParseLoc *error_loc)
 {
-	Oid			base_relid;
 	Query	   *query = NULL;
+
+	*base_relid_out = InvalidOid;
+	if (error_msg)
+		*error_msg = NULL;
+	if (error_loc)
+		*error_loc = -1;
 
 	switch (rte->rtekind)
 	{
@@ -376,22 +413,28 @@ drill_down_to_base_rel(ParseState *pstate, RangeTblEntry *rte,
 
 					case RELKIND_RELATION:
 						if (is_referenced && rel->rd_rel->relrowsecurity)
-							ereport(ERROR,
-									(errcode(ERRCODE_SYNTAX_ERROR),
-									 errmsg("cannot use table \"%s\" with row level security enabled as referenced table in foreign key join",
-											get_rel_name(rel->rd_id)),
-									 errdetail("Using a table with row level security as the referenced table would violate referential integrity."),
-									 parser_errposition(pstate, location)));
+						{
+							if (error_msg)
+								*error_msg = psprintf("cannot use table \"%s\" with row level security enabled as referenced table in foreign key join",
+													  get_rel_name(rel->rd_id));
+							if (error_loc)
+								*error_loc = location;
+							table_close(rel, AccessShareLock);
+							return false;
+						}
 						*colnames_out = colnames;
-						base_relid = rte->relid;
-						break;
+						*base_relid_out = rte->relid;
+						table_close(rel, AccessShareLock);
+						return true;
 
 					default:
-						ereport(ERROR,
-								(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-								 errmsg("foreign key joins involving relation of type '%c' are not supported",
-										rel->rd_rel->relkind),
-								 parser_errposition(pstate, location)));
+						if (error_msg)
+							*error_msg = psprintf("foreign key joins involving relation of type '%c' are not supported",
+												  rel->rd_rel->relkind);
+						if (error_loc)
+							*error_loc = location;
+						table_close(rel, AccessShareLock);
+						return false;
 				}
 
 				table_close(rel, AccessShareLock);
@@ -410,41 +453,49 @@ drill_down_to_base_rel(ParseState *pstate, RangeTblEntry *rte,
 				Assert(cte != NULL);
 
 				if (cte->cterecursive)
-					ereport(ERROR,
-							(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-							 errmsg("foreign key joins involving this type of relation are not supported"),
-							 parser_errposition(pstate, location)));
+				{
+					if (error_msg)
+						*error_msg = psprintf("foreign key joins involving this type of relation are not supported");
+					if (error_loc)
+						*error_loc = location;
+					return false;
+				}
 
 				query = castNode(Query, cte->ctequery);
 			}
 			break;
 
 		default:
-			ereport(ERROR,
-					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-					 errmsg("foreign key joins involving this type of relation are not supported"),
-					 parser_errposition(pstate, location)));
+			if (error_msg)
+				*error_msg = psprintf("foreign key joins involving this type of relation are not supported");
+			if (error_loc)
+				*error_loc = location;
+			return false;
 	}
 
 	if (query)
-		base_relid = validate_and_resolve_derived_rel(pstate, query,
-													  rte,
-													  colnames,
-													  colnames_out,
-													  is_referenced,
-													  location);
+		return validate_and_resolve_derived_rel(pstate, query,
+												rte,
+												colnames,
+												colnames_out,
+												is_referenced,
+												location,
+												base_relid_out,
+												error_msg,
+												error_loc);
 
-	return base_relid;
+	return true;
 }
 
 /*
  * validate_and_resolve_derived_rel
  *		Ensures that derived tables uphold virtual foreign key integrity
  */
-static Oid
+static bool
 validate_and_resolve_derived_rel(ParseState *pstate, Query *query, RangeTblEntry *rte,
 								 List *colnames, List **colnames_out,
-								 bool is_referenced, int location)
+								 bool is_referenced, ParseLoc location,
+								 Oid *base_relid_out, char **error_msg, ParseLoc *error_loc)
 {
 	RangeTblEntry *trunk_rte = NULL;
 	List	   *base_colnames = NIL;
@@ -452,10 +503,13 @@ validate_and_resolve_derived_rel(ParseState *pstate, Query *query, RangeTblEntry
 	ListCell   *lc_colname;
 
 	if (query->setOperations != NULL)
-		ereport(ERROR,
-				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-				 errmsg("foreign key joins involving set operations are not supported"),
-				 parser_errposition(pstate, location)));
+	{
+		if (error_msg)
+			*error_msg = psprintf("foreign key joins involving set operations are not supported");
+		if (error_loc)
+			*error_loc = location;
+		return false;
+	}
 
 	/* XXX: Overly aggressive disallowing */
 	if (query->commandType != CMD_SELECT ||
@@ -464,10 +518,13 @@ validate_and_resolve_derived_rel(ParseState *pstate, Query *query, RangeTblEntry
 		query->groupingSets ||
 		query->hasTargetSRFs ||
 		query->havingQual)
-		ereport(ERROR,
-				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-				 errmsg("foreign key joins not supported for these relations"),
-				 parser_errposition(pstate, location)));
+	{
+		if (error_msg)
+			*error_msg = psprintf("foreign key joins not supported for these relations");
+		if (error_loc)
+			*error_loc = location;
+		return false;
+	}
 
 	/*
 	 * Determine the trunk_rte, which is the relation in query->targetList the
@@ -502,24 +559,33 @@ validate_and_resolve_derived_rel(ParseState *pstate, Query *query, RangeTblEntry
 		}
 
 		if (matches == 0)
-			ereport(ERROR,
-					(errcode(ERRCODE_UNDEFINED_COLUMN),
-					 errmsg("column reference \"%s\" not found", colname),
-					 parser_errposition(pstate, location)));
+		{
+			if (error_msg)
+				*error_msg = psprintf("column reference \"%s\" not found", colname);
+			if (error_loc)
+				*error_loc = location;
+			return false;
+		}
 		else if (matches > 1)
-			ereport(ERROR,
-					(errcode(ERRCODE_AMBIGUOUS_COLUMN),
-					 errmsg("column reference \"%s\" is ambiguous", colname),
-					 parser_errposition(pstate, location)));
+		{
+			if (error_msg)
+				*error_msg = psprintf("column reference \"%s\" is ambiguous", colname);
+			if (error_loc)
+				*error_loc = location;
+			return false;
+		}
 
 		Assert(matching_tle != NULL);
 
 		if (!IsA(matching_tle->expr, Var))
-			ereport(ERROR,
-					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-					 errmsg("target entry \"%s\" is an expression, not a direct column reference",
-							matching_tle->resname),
-					 parser_errposition(pstate, location)));
+		{
+			if (error_msg)
+				*error_msg = psprintf("target entry \"%s\" is an expression, not a direct column reference",
+									  matching_tle->resname);
+			if (error_loc)
+				*error_loc = location;
+			return false;
+		}
 
 		var = (Var *) matching_tle->expr;
 
@@ -529,11 +595,13 @@ validate_and_resolve_derived_rel(ParseState *pstate, Query *query, RangeTblEntry
 			trunk_rte = rt_fetch(first_varno, query->rtable);
 		}
 		else if (first_varno != var->varno)
-			ereport(ERROR,
-					(errcode(ERRCODE_UNDEFINED_TABLE),
-					 errmsg("key columns must all come from the same table"),
-					 parser_errposition(pstate,
-										exprLocation((Node *) matching_tle->expr))));
+		{
+			if (error_msg)
+				*error_msg = psprintf("key columns must all come from the same table");
+			if (error_loc)
+				*error_loc = exprLocation((Node *) matching_tle->expr);
+			return false;
+		}
 
 		base_colname = get_rte_attribute_name(trunk_rte, var->varattno);
 		base_colnames = lappend(base_colnames, makeString(base_colname));
@@ -552,11 +620,13 @@ validate_and_resolve_derived_rel(ParseState *pstate, Query *query, RangeTblEntry
 		if (query->jointree->quals != NULL ||
 			query->limitOffset != NULL ||
 			query->limitCount != NULL)
-			ereport(ERROR,
-					(errcode(ERRCODE_SYNTAX_ERROR),
-					 errmsg("cannot use filtered query as referenced table in foreign key join"),
-					 errdetail("Using a filtered query as the referenced table would violate referential integrity."),
-					 parser_errposition(pstate, location)));
+		{
+			if (error_msg)
+				*error_msg = psprintf("cannot use filtered query as referenced table in foreign key join");
+			if (error_loc)
+				*error_loc = location;
+			return false;
+		}
 
 		if (list_length(query->rtable) > 1 &&
 			IsA(query->jointree->fromlist, List))
@@ -567,7 +637,9 @@ validate_and_resolve_derived_rel(ParseState *pstate, Query *query, RangeTblEntry
 			{
 				JoinExpr   *join = castNode(JoinExpr, lfirst(lc));
 
-				validate_derived_rel_joins(pstate, query, join, trunk_rte, location);
+				if (!validate_derived_rel_joins(pstate, query, join, trunk_rte, location,
+												error_msg, error_loc))
+					return false;
 			}
 		}
 	}
@@ -577,16 +649,18 @@ validate_and_resolve_derived_rel(ParseState *pstate, Query *query, RangeTblEntry
 	 * which is then returned.
 	 */
 	return drill_down_to_base_rel(pstate, trunk_rte, colnames_out,
-								  base_colnames, is_referenced, location);
+								  base_colnames, is_referenced, location,
+								  base_relid_out, error_msg, error_loc);
 }
 
 /*
  * validate_derived_rel_joins
  *		Ensures that all joins uphold virtual foreign key integrity
  */
-static void
+static bool
 validate_derived_rel_joins(ParseState *pstate, Query *query, JoinExpr *join,
-						   RangeTblEntry *trunk_rte, int location)
+						   RangeTblEntry *trunk_rte, ParseLoc location,
+						   char **error_msg, ParseLoc *error_loc)
 {
 	ForeignKeyJoinNode *fkjn;
 	RangeTblEntry *referencing_rte;
@@ -597,11 +671,14 @@ validate_derived_rel_joins(ParseState *pstate, Query *query, JoinExpr *join,
 	Oid			base_relid;
 
 	if (join->fkJoin == NULL)
-		ereport(ERROR,
-				(errcode(ERRCODE_INTEGRITY_CONSTRAINT_VIOLATION),
-				 errmsg("virtual foreign key constraint violation"),
-				 errdetail("The derived table contains a join that is not a foreign key join"),
-				 parser_errposition(pstate, location)));
+	{
+		if (error_msg)
+			*error_msg = psprintf("virtual foreign key constraint violation: "
+								  "the derived table contains a join that is not a foreign key join");
+		if (error_loc)
+			*error_loc = location;
+		return false;
+	}
 
 	fkjn = castNode(ForeignKeyJoinNode, join->fkJoin);
 
@@ -615,11 +692,14 @@ validate_derived_rel_joins(ParseState *pstate, Query *query, JoinExpr *join,
 	Assert(referencing_rte != NULL);
 
 	if (trunk_rte != referencing_rte)
-		ereport(ERROR,
-				(errcode(ERRCODE_INTEGRITY_CONSTRAINT_VIOLATION),
-				 errmsg("virtual foreign key constraint violation"),
-				 errdetail("Referenced columns target a non-referencing table in derived table, violating uniqueness"),
-				 parser_errposition(pstate, location)));
+	{
+		if (error_msg)
+			*error_msg = psprintf("virtual foreign key constraint violation: "
+								  "referenced columns target a non-referencing table in derived table, violating uniqueness");
+		if (error_loc)
+			*error_loc = location;
+		return false;
+	}
 
 	referencing_attnums = fkjn->referencingAttnums;
 
@@ -631,9 +711,10 @@ validate_derived_rel_joins(ParseState *pstate, Query *query, JoinExpr *join,
 		colaliases = lappend(colaliases, makeString(colname));
 	}
 
-	base_relid = drill_down_to_base_rel(pstate, referencing_rte,
-										&base_colnames, colaliases, false,
-										location);
+	if (!drill_down_to_base_rel(pstate, referencing_rte,
+								&base_colnames, colaliases, false, location,
+								&base_relid, error_msg, error_loc))
+		return false;
 
 	foreach(lc, base_colnames)
 	{
@@ -644,26 +725,44 @@ validate_derived_rel_joins(ParseState *pstate, Query *query, JoinExpr *join,
 
 		attnum = get_attnum(base_relid, colname);
 		if (attnum == InvalidAttrNumber)
-			elog(ERROR, "cache lookup failed for column \"%s\" of relation %u",
-				 colname, base_relid);
+		{
+			if (error_msg)
+				*error_msg = psprintf("cache lookup failed for column \"%s\" of relation %u",
+									  colname, base_relid);
+			if (error_loc)
+				*error_loc = location;
+			return false;
+		}
 
 		tuple = SearchSysCache2(ATTNUM,
 								ObjectIdGetDatum(base_relid),
 								Int16GetDatum(attnum));
 
 		if (!HeapTupleIsValid(tuple))
-			elog(ERROR, "cache lookup failed for attribute %d of relation %u",
-				 attnum, base_relid);
+		{
+			if (error_msg)
+				*error_msg = psprintf("cache lookup failed for attribute %d of relation %u",
+									  attnum, base_relid);
+			if (error_loc)
+				*error_loc = location;
+			return false;
+		}
 
 		attr = (Form_pg_attribute) GETSTRUCT(tuple);
 
 		if (!attr->attnotnull)
-			ereport(ERROR,
-					(errcode(ERRCODE_INTEGRITY_CONSTRAINT_VIOLATION),
-					 errmsg("virtual foreign key constraint violation"),
-					 errdetail("Nullable columns in derived table's referencing relation violate referential integrity"),
-					 parser_errposition(pstate, location)));
+		{
+			ReleaseSysCache(tuple);
+			if (error_msg)
+				*error_msg = psprintf("virtual foreign key constraint violation: "
+									  "nullable columns in derived table's referencing relation violate referential integrity");
+			if (error_loc)
+				*error_loc = location;
+			return false;
+		}
 
 		ReleaseSysCache(tuple);
 	}
+
+	return true;
 }

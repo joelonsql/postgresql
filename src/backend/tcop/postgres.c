@@ -79,6 +79,7 @@
 #include "utils/timeout.h"
 #include "utils/timestamp.h"
 #include "utils/varlena.h"
+#include "utils/ruleutils.h"
 
 /* ----------------
  *		global variables
@@ -1196,9 +1197,29 @@ exec_simple_query(const char *query_string)
 		else
 			oldcontext = MemoryContextSwitchTo(MessageContext);
 
+		// elog(DEBUG1, "QUERY STRING:\n***\n%s\n***\n", query_string);
+
 		querytree_list = pg_analyze_and_rewrite_fixedparams(parsetree, query_string,
 															NULL, 0, NULL);
 
+/*
+		{
+			ListCell   *lc;
+
+			foreach(lc, querytree_list)
+			{
+				Query	   *query = (Query *) lfirst(lc);
+
+				if (query->commandType != CMD_UTILITY)
+				{
+					char	   *sql = pg_get_querydef(query, true);
+
+					elog(DEBUG1, "NORMALIZED QUERY:\n***\n%s\n***\n", sql);
+					pfree(sql);
+				}
+			}
+		}
+*/
 		plantree_list = pg_plan_queries(querytree_list, query_string,
 										CURSOR_OPT_PARALLEL_OK, NULL);
 
