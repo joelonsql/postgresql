@@ -163,14 +163,16 @@ transformAndValidateForeignKeyJoin(ParseState *pstate, JoinExpr *join,
 
 	if (fkoid == InvalidOid)
 	{
-		*error_msg = psprintf("there is no foreign key constraint on table \"%s\" (%s) referencing table \"%s\" (%s)",
-							  referencing_rte->alias ? referencing_rte->alias->aliasname :
-							  get_rel_name(referencing_rte->relid),
-							  column_list_to_string(referencing_cols),
-							  referenced_rte->alias ? referenced_rte->alias->aliasname :
-							  get_rel_name(referenced_rte->relid),
-							  column_list_to_string(referenced_cols));
-		*error_loc = fkjn->location;
+		if (error_msg)
+			*error_msg = psprintf("there is no foreign key constraint on table \"%s\" (%s) referencing table \"%s\" (%s)",
+								referencing_rte->alias ? referencing_rte->alias->aliasname :
+								get_rel_name(referencing_rte->relid),
+								column_list_to_string(referencing_cols),
+								referenced_rte->alias ? referenced_rte->alias->aliasname :
+								get_rel_name(referenced_rte->relid),
+								column_list_to_string(referenced_cols));
+		if (error_loc)
+			*error_loc = fkjn->location;
 		return false;
 	}
 
