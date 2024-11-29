@@ -1197,7 +1197,7 @@ exec_simple_query(const char *query_string)
 		else
 			oldcontext = MemoryContextSwitchTo(MessageContext);
 
-		// elog(DEBUG1, "QUERY STRING:\n***\n%s\n***\n", query_string);
+		/* elog(DEBUG1, "QUERY STRING:\n***\n%s\n***\n", query_string); */
 
 		querytree_list = pg_analyze_and_rewrite_fixedparams(parsetree, query_string,
 															NULL, 0, NULL);

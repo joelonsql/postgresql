@@ -100,10 +100,6 @@ static Node *transformFrameOffset(ParseState *pstate, int frameOptions,
 								  Oid rangeopfamily, Oid rangeopcintype, Oid *inRangeFunc,
 								  Node *clause);
 
-/*
- * column_list_to_string
- *		Converts a list of column names to a comma-separated string
- */
 static char *
 column_list_to_string(const List *columns)
 {
@@ -128,127 +124,131 @@ column_list_to_string(const List *columns)
 	return string.data;
 }
 
-static void
-debugLogNodeTreeRecursive(ParseState *pstate, Node *node, int level, bool *is_valid,
-                         const char *joined_table_alias, List **localCols,
-                         char **refAlias, List **refCols)
+static bool
+extractForeignKeyClause(ParseState *pstate, Node *node,
+						const char *joined_table_alias, List **localCols,
+						char **refAlias, List **refCols)
 {
-	if (node == NULL)
-	{
-		elog(DEBUG1, "Node is NULL");
-		return;
-	}
+	elog(WARNING, "extractForeignKeyClause called");
 
-	/* Create indentation string based on level */
-	char indent[64] = {0};
-	for (int i = 0; i < level && i < sizeof(indent)-1; i++)
-		indent[i] = ' ';
-
-	/* Log the node type with indentation */
-	// elog(DEBUG1, "%sNode type: %s", indent, nodeToString(node));
-
-	/* Recursively log children based on node type */
 	if (IsA(node, BoolExpr))
 	{
-		BoolExpr *boolExpr = (BoolExpr *) node;
-		ListCell *lc;
+		BoolExpr   *boolExpr = (BoolExpr *) node;
+		ListCell   *lc;
+
+		elog(WARNING, "node is BoolExpr");
 
 		if (boolExpr->boolop != AND_EXPR)
 		{
-			*is_valid = false;
-			elog(DEBUG1, "%sInvalid BoolExpr type - only AND is supported", indent);
-			return;
+			elog(WARNING, "boolExpr is not AND_EXPR");
+			return false;
 		}
-
-		elog(DEBUG1, "%sBoolExpr type: AND", indent);
 
 		foreach(lc, boolExpr->args)
 		{
-			debugLogNodeTreeRecursive(pstate, (Node *) lfirst(lc), level + 2, is_valid,
-									joined_table_alias, localCols, refAlias, refCols);
+			if (!extractForeignKeyClause(pstate, (Node *) lfirst(lc),
+										 joined_table_alias, localCols, refAlias, refCols))
+			{
+				elog(WARNING, "recursive extractForeignKeyClause failed for BoolExpr arg");
+				return false;
+			}
 		}
 	}
 	else if (IsA(node, A_Expr))
 	{
-		A_Expr *aExpr = (A_Expr *) node;
+		A_Expr	   *aExpr = (A_Expr *) node;
+
+		elog(WARNING, "node is A_Expr");
+
 		if (aExpr->kind != AEXPR_OP)
 		{
-			*is_valid = false;
-			elog(DEBUG1, "%sInvalid A_Expr kind - only AEXPR_OP is supported", indent);
-			return;
+			elog(WARNING, "aExpr is not AEXPR_OP");
+			return false;
 		}
 
-		elog(DEBUG1, "%sA_Expr kind: AEXPR_OP", indent);
-
-		debugLogNodeTreeRecursive(pstate, aExpr->lexpr, level + 2, is_valid,
-								joined_table_alias, localCols, refAlias, refCols);
-		debugLogNodeTreeRecursive(pstate, aExpr->rexpr, level + 2, is_valid,
-								joined_table_alias, localCols, refAlias, refCols);
+		if (!extractForeignKeyClause(pstate, aExpr->lexpr,
+									 joined_table_alias, localCols, refAlias, refCols))
+		{
+			elog(WARNING, "recursive extractForeignKeyClause failed for left expr");
+			return false;
+		}
+		if (!extractForeignKeyClause(pstate, aExpr->rexpr,
+									 joined_table_alias, localCols, refAlias, refCols))
+		{
+			elog(WARNING, "recursive extractForeignKeyClause failed for right expr"); 
+			return false;
+		}
 	}
 	else if (IsA(node, ColumnRef))
 	{
-		ColumnRef *colRef = (ColumnRef *) node;
-		ListCell *lc;
-		char *table_alias = NULL;
-		char *column_alias = NULL;
+		ColumnRef  *colRef = (ColumnRef *) node;
+		char	   *table_alias = NULL;
+		char	   *column_alias = NULL;
+		ListCell   *first;
+		ListCell   *second;
+		Node	   *field1;
+		Node	   *field2;
 
-		elog(DEBUG1, "%sColumnRef fields:", indent);
+		elog(WARNING, "node is ColumnRef");
+
 		if (list_length(colRef->fields) != 2)
 		{
-			elog(DEBUG1, "%s  [invalid number of fields]", indent);
-			*is_valid = false;
-			return;
+			elog(WARNING, "ColumnRef fields length is not 2");
+			return false;
 		}
 
+		first = list_head(colRef->fields);
+		second = lnext(colRef->fields, first);
+		field1 = (Node *) lfirst(first);
+		field2 = (Node *) lfirst(second);
+
+		if (!IsA(field1, String) || !IsA(field2, String))
 		{
-			ListCell *first = list_head(colRef->fields);
-			ListCell *second = lnext(colRef->fields, first);
-			Node *field1 = (Node *) lfirst(first);
-			Node *field2 = (Node *) lfirst(second);
+			elog(WARNING, "ColumnRef fields are not both strings");
+			return false;
+		}
 
-			if (!IsA(field1, String) || !IsA(field2, String))
+		table_alias = strVal(field1);
+		column_alias = strVal(field2);
+
+		elog(WARNING, "processing ColumnRef with table_alias=%s, column_alias=%s", 
+			 table_alias, column_alias);
+
+		if (strcmp(table_alias, joined_table_alias) == 0)
+		{
+			*localCols = lappend(*localCols, makeString(pstrdup(column_alias)));
+			elog(WARNING, "added column to localCols: %s", column_alias);
+		}
+		else
+		{
+			if (*refAlias == NULL)
 			{
-				elog(DEBUG1, "%s  [unexpected field type]", indent);
-				*is_valid = false;
-				return;
+				*refAlias = pstrdup(table_alias);
+				*refCols = lappend(*refCols, makeString(pstrdup(column_alias)));
+				elog(WARNING, "initialized refAlias=%s and added first refCol=%s", 
+					 table_alias, column_alias);
 			}
-
-			table_alias = strVal(field1);
-			column_alias = strVal(field2);
-
-			if (strcmp(table_alias, joined_table_alias) == 0)
+			else if (strcmp(table_alias, *refAlias) == 0)
 			{
-				*localCols = lappend(*localCols, makeString(pstrdup(column_alias)));
+				*refCols = lappend(*refCols, makeString(pstrdup(column_alias)));
+				elog(WARNING, "added column to refCols: %s", column_alias);
 			}
 			else
 			{
-				if (*refAlias == NULL)
-				{
-					*refAlias = pstrdup(table_alias);
-					*refCols = lappend(*refCols, makeString(pstrdup(column_alias)));
-				}
-				else if (strcmp(table_alias, *refAlias) == 0)
-				{
-					*refCols = lappend(*refCols, makeString(pstrdup(column_alias)));
-				}
-				else
-				{
-					elog(DEBUG1, "%s  [invalid table alias: must match either %s or %s]",
-						 indent, joined_table_alias, *refAlias);
-					*is_valid = false;
-					return;
-				}
+				elog(WARNING, "table alias mismatch: %s vs %s", table_alias, *refAlias);
+				return false;
 			}
-
-			elog(DEBUG1, "%s  %s.%s", indent, table_alias, column_alias);
 		}
 	}
 	else
 	{
 		/* Handle other node types as needed */
-		elog(DEBUG1, "%s[unexpected node type]", indent);
-		*is_valid = false;
+		elog(WARNING, "unhandled node type");
+		return false;
 	}
+
+	elog(WARNING, "extractForeignKeyClause succeeded");
+	return true;
 }
 
 /*
@@ -541,25 +541,28 @@ transformJoinOnClause(ParseState *pstate, JoinExpr *j, List *namespace)
 	return result;
 }
 
-/* tryTransformJoinOnClauseToKeyJoin()
+/* tryConvertToForeignKeyJoin()
  *	  Try to transform a JOIN/ON clause into a KEY JOIN.
  */
 static bool
-tryTransformJoinOnClauseToKeyJoin(ParseState *pstate, JoinExpr *j, List *namespace,
-								 ParseNamespaceItem *r_nsitem, List *l_namespace)
+tryConvertToForeignKeyJoin(ParseState *pstate, JoinExpr *j, List *namespace,
+						   ParseNamespaceItem *r_nsitem, List *l_namespace)
 {
-	Node	   *result;
 	List	   *save_namespace;
-	char *joined_table_alias = NULL;
-	bool is_valid = true;
+	char	   *joined_table_alias = NULL;
 	List	   *localCols = NIL;
 	char	   *refAlias = NULL;
 	List	   *refCols = NIL;
 	RangeTblRef *rtr;
 	RangeTblEntry *rte;
-	char       *error_msg = NULL;
-	ParseLoc    error_loc = -1;
+	char	   *error_msg = NULL;
+	ParseLoc	error_loc = -1;
+	ForeignKeyClause *fkc;
 
+	elog(WARNING, "tryConvertToForeignKeyJoin called");
+
+	/* XXX */
+	// return false;
 	setNamespaceLateralState(namespace, false, true);
 
 	save_namespace = pstate->p_namespace;
@@ -567,75 +570,92 @@ tryTransformJoinOnClauseToKeyJoin(ParseState *pstate, JoinExpr *j, List *namespa
 
 	/* Log the node type and details of rarg */
 	if (!j->rarg)
+	{
+		elog(WARNING, "rarg is NULL");
+		pstate->p_namespace = save_namespace;
 		return false;
+	}
 
 	if (!IsA(j->rarg, RangeTblRef))
-		return false;
-
-	rtr = (RangeTblRef *)j->rarg;
-	rte = rt_fetch(rtr->rtindex, pstate->p_rtable);
-	
-	joined_table_alias = (rte->alias) ? rte->alias->aliasname : rte->eref->aliasname;
-
-	elog(DEBUG1, "Joined table alias: %s", joined_table_alias);
-
-	debugLogNodeTreeRecursive(pstate, j->quals, 0, &is_valid,
-							 joined_table_alias, &localCols, &refAlias, &refCols);
-	elog(DEBUG1, "localCols: %s", localCols ? column_list_to_string(localCols) : "NIL");
-	elog(DEBUG1, "refAlias: %s", refAlias ? refAlias : "NULL");
-	elog(DEBUG1, "refCols: %s", refCols ? column_list_to_string(refCols) : "NIL");
-	elog(DEBUG1, "is_valid: %s", is_valid ? "true" : "false");
-
-	if (!is_valid)
 	{
+		elog(WARNING, "rarg is not RangeTblRef but %s", 
+			nodeTag(j->rarg) == T_RangeVar ? "RangeVar" :
+			nodeTag(j->rarg) == T_RangeSubselect ? "RangeSubselect" :
+			nodeTag(j->rarg) == T_RangeFunction ? "RangeFunction" :
+			nodeTag(j->rarg) == T_RangeTableFunc ? "RangeTableFunc" :
+			nodeTag(j->rarg) == T_RangeTableSample ? "RangeTableSample" :
+			nodeTag(j->rarg) == T_JoinExpr ? "JoinExpr" :
+			nodeTag(j->rarg) == T_FromExpr ? "FromExpr" :
+			"unknown node type");
+		pstate->p_namespace = save_namespace;
+		return false;
+	}
+
+	rtr = (RangeTblRef *) j->rarg;
+	rte = rt_fetch(rtr->rtindex, pstate->p_rtable);
+
+	joined_table_alias = (rte->alias) ? rte->alias->aliasname : rte->eref->aliasname;
+	elog(WARNING, "joined_table_alias = %s", joined_table_alias);
+
+	if (!extractForeignKeyClause(pstate, j->quals, joined_table_alias, &localCols, &refAlias, &refCols))
+	{
+		elog(WARNING, "extractForeignKeyClause failed");
 		pstate->p_namespace = save_namespace;
 		return false;
 	}
 
 	/* Try both directions of foreign key relationship */
-	ForeignKeyClause *fkc = makeNode(ForeignKeyClause);
+	fkc = makeNode(ForeignKeyClause);
+
 	fkc->refAlias = refAlias;
 	fkc->refCols = refCols;
 	fkc->localCols = localCols;
 	fkc->location = -1;
 
-	elog(DEBUG1, "ForeignKeyClause: refAlias=%s, refCols=%s, localCols=%s, fkdir=%d, location=%d",
-		 fkc->refAlias ? fkc->refAlias : "NULL",
-		 fkc->refCols ? column_list_to_string(fkc->refCols) : "NIL",
-		 fkc->localCols ? column_list_to_string(fkc->localCols) : "NIL",
-		 fkc->fkdir,
-		 fkc->location);
+	/* Log the column lists */
+	elog(WARNING, "refAlias = %s", refAlias ? refAlias : "NULL");
+	if (localCols)
+	{
+		char *local_cols_str = column_list_to_string(localCols);
+		elog(WARNING, "localCols = %s", local_cols_str);
+		pfree(local_cols_str);
+	}
+	if (refCols)
+	{
+		char *ref_cols_str = column_list_to_string(refCols);
+		elog(WARNING, "refCols = %s", ref_cols_str);
+		pfree(ref_cols_str);
+	}
+
+	/* Log the foreign key clause details */
+	elog(WARNING, "created ForeignKeyClause with refAlias=%s", refAlias);
 
 	/* First try FKDIR_FROM */
-	elog(DEBUG1, "Trying FKDIR_FROM direction");
 	fkc->fkdir = FKDIR_FROM;
 	j->fkJoin = (Node *) fkc;
+	elog(WARNING, "trying FKDIR_FROM");
 	if (transformAndValidateForeignKeyJoin(pstate, j, r_nsitem, l_namespace,
-										 &error_msg, &error_loc))
+										   &error_msg, &error_loc))
 	{
-		elog(DEBUG1, "FKDIR_FROM validation succeeded");
+		elog(WARNING, "FKDIR_FROM succeeded");
 		pstate->p_namespace = save_namespace;
 		return true;
 	}
-	elog(DEBUG1, "FKDIR_FROM validation failed: %s (at location %d)", 
-		 error_msg ? error_msg : "no error message", error_loc);
 
 	/* Then try FKDIR_TO */
-	elog(DEBUG1, "Trying FKDIR_TO direction");
 	fkc->fkdir = FKDIR_TO;
 	error_msg = NULL;
 	error_loc = -1;
+	elog(WARNING, "trying FKDIR_TO");
 	if (transformAndValidateForeignKeyJoin(pstate, j, r_nsitem, l_namespace,
-										 &error_msg, &error_loc))
+										   &error_msg, &error_loc))
 	{
-		elog(DEBUG1, "FKDIR_TO validation succeeded");
+		elog(WARNING, "FKDIR_TO succeeded");
 		pstate->p_namespace = save_namespace;
 		return true;
 	}
-	elog(DEBUG1, "FKDIR_TO validation failed: %s (at location %d)",
-		 error_msg ? error_msg : "no error message", error_loc);
 
-	elog(DEBUG1, "Both FK directions failed, clearing fkJoin");
+	elog(WARNING, "both directions failed");
 	j->fkJoin = NULL;
 	pstate->p_namespace = save_namespace;
 	return false;
@@ -1654,12 +1674,8 @@ transformFromClauseItem(ParseState *pstate, Node *n,
 		}
 		else if (j->quals && !j->fkJoin)
 		{
-			if (tryTransformJoinOnClauseToKeyJoin(pstate, j, my_namespace,
-												r_nsitem, l_namespace))
-			{
-				/* Successfully transformed to key join */
-			}
-			else
+			if (!tryConvertToForeignKeyJoin(pstate, j, my_namespace,
+										   r_nsitem, l_namespace))
 			{
 				/* User-written ON-condition; transform it */
 				j->quals = transformJoinOnClause(pstate, j, my_namespace);
