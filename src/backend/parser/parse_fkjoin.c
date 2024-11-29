@@ -637,7 +637,18 @@ validate_and_resolve_derived_rel(ParseState *pstate, Query *query, RangeTblEntry
 
 			foreach(lc, query->jointree->fromlist)
 			{
-				JoinExpr   *join = castNode(JoinExpr, lfirst(lc));
+				Node	   *node = lfirst(lc);
+
+				if (!IsA(node, JoinExpr))
+				{
+					if (error_msg)
+						*error_msg = psprintf("invalid node type in referenced table join list");
+					if (error_loc)
+						*error_loc = location;
+					return false;
+				}
+
+				JoinExpr   *join = (JoinExpr *) node;
 
 				if (!validate_derived_rel_joins(pstate, query, join, trunk_rte, location,
 												error_msg, error_loc))
