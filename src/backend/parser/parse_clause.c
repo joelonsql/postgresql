@@ -251,6 +251,126 @@ extractForeignKeyClause(ParseState *pstate, Node *node,
 	return true;
 }
 
+/* tryConvertToForeignKeyJoin()
+ *	  Try to transform a JOIN/ON clause into a KEY JOIN.
+ */
+static bool
+tryConvertToForeignKeyJoin(ParseState *pstate, JoinExpr *j, List *namespace,
+						   ParseNamespaceItem *r_nsitem, List *l_namespace)
+{
+	List	   *save_namespace;
+	char	   *joined_table_alias = NULL;
+	List	   *localCols = NIL;
+	char	   *refAlias = NULL;
+	List	   *refCols = NIL;
+	RangeTblRef *rtr;
+	RangeTblEntry *rte;
+	char	   *error_msg = NULL;
+	ParseLoc	error_loc = -1;
+	ForeignKeyClause *fkc;
+
+	elog(WARNING, "tryConvertToForeignKeyJoin called");
+
+	/* XXX */
+	// return false;
+	setNamespaceLateralState(namespace, false, true);
+
+	save_namespace = pstate->p_namespace;
+	pstate->p_namespace = namespace;
+
+	/* Log the node type and details of rarg */
+	if (!j->rarg)
+	{
+		elog(WARNING, "rarg is NULL");
+		pstate->p_namespace = save_namespace;
+		return false;
+	}
+
+	if (!IsA(j->rarg, RangeTblRef))
+	{
+		elog(WARNING, "rarg is not RangeTblRef but %s", 
+			nodeTag(j->rarg) == T_RangeVar ? "RangeVar" :
+			nodeTag(j->rarg) == T_RangeSubselect ? "RangeSubselect" :
+			nodeTag(j->rarg) == T_RangeFunction ? "RangeFunction" :
+			nodeTag(j->rarg) == T_RangeTableFunc ? "RangeTableFunc" :
+			nodeTag(j->rarg) == T_RangeTableSample ? "RangeTableSample" :
+			nodeTag(j->rarg) == T_JoinExpr ? "JoinExpr" :
+			nodeTag(j->rarg) == T_FromExpr ? "FromExpr" :
+			"unknown node type");
+		pstate->p_namespace = save_namespace;
+		return false;
+	}
+
+	rtr = (RangeTblRef *) j->rarg;
+	rte = rt_fetch(rtr->rtindex, pstate->p_rtable);
+
+	joined_table_alias = (rte->alias) ? rte->alias->aliasname : rte->eref->aliasname;
+	elog(WARNING, "joined_table_alias = %s", joined_table_alias);
+
+	if (!extractForeignKeyClause(pstate, j->quals, joined_table_alias, &localCols, &refAlias, &refCols))
+	{
+		elog(WARNING, "extractForeignKeyClause failed");
+		pstate->p_namespace = save_namespace;
+		return false;
+	}
+
+	/* Try both directions of foreign key relationship */
+	fkc = makeNode(ForeignKeyClause);
+
+	fkc->refAlias = refAlias;
+	fkc->refCols = refCols;
+	fkc->localCols = localCols;
+	fkc->location = -1;
+
+	/* Log the column lists */
+	elog(WARNING, "refAlias = %s", refAlias ? refAlias : "NULL");
+	if (localCols)
+	{
+		char *local_cols_str = column_list_to_string(localCols);
+		elog(WARNING, "localCols = %s", local_cols_str);
+		pfree(local_cols_str);
+	}
+	if (refCols)
+	{
+		char *ref_cols_str = column_list_to_string(refCols);
+		elog(WARNING, "refCols = %s", ref_cols_str);
+		pfree(ref_cols_str);
+	}
+
+	/* Log the foreign key clause details */
+	elog(WARNING, "created ForeignKeyClause with refAlias=%s", refAlias);
+
+	/* First try FKDIR_FROM */
+	fkc->fkdir = FKDIR_FROM;
+	j->fkJoin = (Node *) fkc;
+	elog(WARNING, "trying FKDIR_FROM");
+	if (transformAndValidateForeignKeyJoin(pstate, j, r_nsitem, l_namespace,
+										   &error_msg, &error_loc))
+	{
+		elog(WARNING, "FKDIR_FROM succeeded");
+		pstate->p_namespace = save_namespace;
+		return true;
+	}
+
+	/* Then try FKDIR_TO */
+	fkc->fkdir = FKDIR_TO;
+	error_msg = NULL;
+	error_loc = -1;
+	elog(WARNING, "trying FKDIR_TO");
+	if (transformAndValidateForeignKeyJoin(pstate, j, r_nsitem, l_namespace,
+										   &error_msg, &error_loc))
+	{
+		elog(WARNING, "FKDIR_TO succeeded");
+		pstate->p_namespace = save_namespace;
+		return true;
+	}
+
+	elog(WARNING, "both directions failed");
+	j->fkJoin = NULL;
+	pstate->p_namespace = save_namespace;
+	return false;
+}
+
 /*
  * transformFromClause -
  *	  Process the FROM clause and add items to the query's range table,
@@ -539,126 +659,6 @@ transformJoinOnClause(ParseState *pstate, JoinExpr *j, List *namespace)
 	pstate->p_namespace = save_namespace;
 
 	return result;
-}
-
-/* tryConvertToForeignKeyJoin()
- *	  Try to transform a JOIN/ON clause into a KEY JOIN.
- */
-static bool
-tryConvertToForeignKeyJoin(ParseState *pstate, JoinExpr *j, List *namespace,
-						   ParseNamespaceItem *r_nsitem, List *l_namespace)
-{
-	List	   *save_namespace;
-	char	   *joined_table_alias = NULL;
-	List	   *localCols = NIL;
-	char	   *refAlias = NULL;
-	List	   *refCols = NIL;
-	RangeTblRef *rtr;
-	RangeTblEntry *rte;
-	char	   *error_msg = NULL;
-	ParseLoc	error_loc = -1;
-	ForeignKeyClause *fkc;
-
-	elog(WARNING, "tryConvertToForeignKeyJoin called");
-
-	/* XXX */
-	// return false;
-	setNamespaceLateralState(namespace, false, true);
-
-	save_namespace = pstate->p_namespace;
-	pstate->p_namespace = namespace;
-
-	/* Log the node type and details of rarg */
-	if (!j->rarg)
-	{
-		elog(WARNING, "rarg is NULL");
-		pstate->p_namespace = save_namespace;
-		return false;
-	}
-
-	if (!IsA(j->rarg, RangeTblRef))
-	{
-		elog(WARNING, "rarg is not RangeTblRef but %s", 
-			nodeTag(j->rarg) == T_RangeVar ? "RangeVar" :
-			nodeTag(j->rarg) == T_RangeSubselect ? "RangeSubselect" :
-			nodeTag(j->rarg) == T_RangeFunction ? "RangeFunction" :
-			nodeTag(j->rarg) == T_RangeTableFunc ? "RangeTableFunc" :
-			nodeTag(j->rarg) == T_RangeTableSample ? "RangeTableSample" :
-			nodeTag(j->rarg) == T_JoinExpr ? "JoinExpr" :
-			nodeTag(j->rarg) == T_FromExpr ? "FromExpr" :
-			"unknown node type");
-		pstate->p_namespace = save_namespace;
-		return false;
-	}
-
-	rtr = (RangeTblRef *) j->rarg;
-	rte = rt_fetch(rtr->rtindex, pstate->p_rtable);
-
-	joined_table_alias = (rte->alias) ? rte->alias->aliasname : rte->eref->aliasname;
-	elog(WARNING, "joined_table_alias = %s", joined_table_alias);
-
-	if (!extractForeignKeyClause(pstate, j->quals, joined_table_alias, &localCols, &refAlias, &refCols))
-	{
-		elog(WARNING, "extractForeignKeyClause failed");
-		pstate->p_namespace = save_namespace;
-		return false;
-	}
-
-	/* Try both directions of foreign key relationship */
-	fkc = makeNode(ForeignKeyClause);
-
-	fkc->refAlias = refAlias;
-	fkc->refCols = refCols;
-	fkc->localCols = localCols;
-	fkc->location = -1;
-
-	/* Log the column lists */
-	elog(WARNING, "refAlias = %s", refAlias ? refAlias : "NULL");
-	if (localCols)
-	{
-		char *local_cols_str = column_list_to_string(localCols);
-		elog(WARNING, "localCols = %s", local_cols_str);
-		pfree(local_cols_str);
-	}
-	if (refCols)
-	{
-		char *ref_cols_str = column_list_to_string(refCols);
-		elog(WARNING, "refCols = %s", ref_cols_str);
-		pfree(ref_cols_str);
-	}
-
-	/* Log the foreign key clause details */
-	elog(WARNING, "created ForeignKeyClause with refAlias=%s", refAlias);
-
-	/* First try FKDIR_FROM */
-	fkc->fkdir = FKDIR_FROM;
-	j->fkJoin = (Node *) fkc;
-	elog(WARNING, "trying FKDIR_FROM");
-	if (transformAndValidateForeignKeyJoin(pstate, j, r_nsitem, l_namespace,
-										   &error_msg, &error_loc))
-	{
-		elog(WARNING, "FKDIR_FROM succeeded");
-		pstate->p_namespace = save_namespace;
-		return true;
-	}
-
-	/* Then try FKDIR_TO */
-	fkc->fkdir = FKDIR_TO;
-	error_msg = NULL;
-	error_loc = -1;
-	elog(WARNING, "trying FKDIR_TO");
-	if (transformAndValidateForeignKeyJoin(pstate, j, r_nsitem, l_namespace,
-										   &error_msg, &error_loc))
-	{
-		elog(WARNING, "FKDIR_TO succeeded");
-		pstate->p_namespace = save_namespace;
-		return true;
-	}
-
-	elog(WARNING, "both directions failed");
-	j->fkJoin = NULL;
-	pstate->p_namespace = save_namespace;
-	return false;
 }
 
 /*
