@@ -565,8 +565,15 @@ validate_and_resolve_derived_rel(ParseState *pstate, Query *query, RangeTblEntry
 
 			foreach(lc, query->jointree->fromlist)
 			{
-				JoinExpr   *join = castNode(JoinExpr, lfirst(lc));
+				Node	   *node = lfirst(lc);
+				JoinExpr   *join;
+				if (!IsA(node, JoinExpr))
+					ereport(ERROR,
+							(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+							 errmsg("unsupported query structure in referenced table"),
+							 parser_errposition(pstate, location)));
 
+				join = castNode(JoinExpr, node);
 				validate_derived_rel_joins(pstate, query, join, trunk_rte, location);
 			}
 		}
