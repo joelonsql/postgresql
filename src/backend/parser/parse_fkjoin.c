@@ -638,6 +638,7 @@ validate_and_resolve_derived_rel(ParseState *pstate, Query *query, RangeTblEntry
 			foreach(lc, query->jointree->fromlist)
 			{
 				Node	   *node = lfirst(lc);
+				JoinExpr   *join;
 
 				if (!IsA(node, JoinExpr))
 				{
@@ -648,7 +649,7 @@ validate_and_resolve_derived_rel(ParseState *pstate, Query *query, RangeTblEntry
 					return false;
 				}
 
-				JoinExpr   *join = (JoinExpr *) node;
+				join = castNode(JoinExpr, node);
 
 				if (!validate_derived_rel_joins(pstate, query, join, trunk_rte, location,
 												error_msg, error_loc))
