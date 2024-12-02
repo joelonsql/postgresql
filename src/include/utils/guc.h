@@ -261,6 +261,7 @@ extern PGDLLIMPORT char *event_source;
 
 extern PGDLLIMPORT bool check_function_bodies;
 extern PGDLLIMPORT bool current_role_is_superuser;
+extern PGDLLIMPORT bool convert_on_joins_to_key_joins;
 
 extern PGDLLIMPORT bool AllowAlterSystem;
 extern PGDLLIMPORT bool log_duration;

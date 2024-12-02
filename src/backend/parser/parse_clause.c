@@ -49,6 +49,7 @@
 #include "utils/syscache.h"
 #include "utils/fmgroids.h"
 #include "parser/parse_fkjoin.h"
+#include "utils/guc.h"
 
 
 static int	extractRemainingColumns(ParseState *pstate,
@@ -1586,7 +1587,7 @@ transformFromClauseItem(ParseState *pstate, Node *n,
 		}
 		else if (j->quals && !j->fkJoin)
 		{
-			if (!tryConvertToForeignKeyJoin(pstate, j, my_namespace,
+			if (!convert_on_joins_to_key_joins || !tryConvertToForeignKeyJoin(pstate, j, my_namespace,
 											r_nsitem, l_namespace))
 			{
 				/* User-written ON-condition; transform it */

@@ -509,6 +509,7 @@ char	   *event_source;
 
 bool		row_security;
 bool		check_function_bodies = true;
+bool		convert_on_joins_to_key_joins = false;
 
 /*
  * This GUC exists solely for backward compatibility, check its definition for
@@ -1018,6 +1019,16 @@ struct config_bool ConfigureNamesBool[] =
 			GUC_REPORT | GUC_NO_SHOW_ALL | GUC_NO_RESET_ALL | GUC_NOT_IN_SAMPLE | GUC_DISALLOW_IN_FILE | GUC_ALLOW_IN_PARALLEL
 		},
 		&current_role_is_superuser,
+		false,
+		NULL, NULL, NULL
+	},
+	{
+		{"convert_on_joins_to_key_joins", PGC_USERSET, UNGROUPED,
+			gettext_noop("Enables conversion of ON clause joins to KEY joins."),
+			NULL,
+			GUC_REPORT | GUC_NO_SHOW_ALL | GUC_NO_RESET_ALL | GUC_NOT_IN_SAMPLE | GUC_DISALLOW_IN_FILE | GUC_ALLOW_IN_PARALLEL
+		},
+		&convert_on_joins_to_key_joins,
 		false,
 		NULL, NULL, NULL
 	},
