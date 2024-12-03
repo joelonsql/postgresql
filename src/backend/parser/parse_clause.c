@@ -130,20 +130,21 @@ extractForeignKeyClause(ParseState *pstate, Node *node,
 		A_Expr	   *aExpr = (A_Expr *) node;
 
 		if (aExpr->kind != AEXPR_OP)
-		{
 			return false;
-		}
+
+		if (!aExpr->lexpr)
+			return false;
 
 		if (!extractForeignKeyClause(pstate, aExpr->lexpr,
 									 joined_table_alias, localCols, refAlias, refCols))
-		{
 			return false;
-		}
+
+		if (!aExpr->rexpr)
+			return false;
+
 		if (!extractForeignKeyClause(pstate, aExpr->rexpr,
 									 joined_table_alias, localCols, refAlias, refCols))
-		{
 			return false;
-		}
 	}
 	else if (IsA(node, ColumnRef))
 	{
@@ -155,10 +156,9 @@ extractForeignKeyClause(ParseState *pstate, Node *node,
 		Node	   *field1;
 		Node	   *field2;
 
+
 		if (list_length(colRef->fields) != 2)
-		{
 			return false;
-		}
 
 		first = list_head(colRef->fields);
 		second = lnext(colRef->fields, first);
@@ -166,9 +166,7 @@ extractForeignKeyClause(ParseState *pstate, Node *node,
 		field2 = (Node *) lfirst(second);
 
 		if (!IsA(field1, String) || !IsA(field2, String))
-		{
 			return false;
-		}
 
 		table_alias = strVal(field1);
 		column_alias = strVal(field2);
@@ -243,6 +241,12 @@ tryConvertToForeignKeyJoin(ParseState *pstate, JoinExpr *j, List *namespace,
 	rte = rt_fetch(rtr->rtindex, pstate->p_rtable);
 
 	joined_table_alias = (rte->alias) ? rte->alias->aliasname : rte->eref->aliasname;
+
+	if (!j->quals)
+	{
+		pstate->p_namespace = save_namespace;
+		return false;
+	}
 
 	if (!extractForeignKeyClause(pstate, j->quals, joined_table_alias, &localCols, &refAlias, &refCols))
 	{
