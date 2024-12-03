@@ -154,6 +154,7 @@ static bool ExecOnConflictSelect(ModifyTableContext *context,
 								 ResultRelInfo *resultRelInfo,
 								 ItemPointer conflictTid,
 								 TupleTableSlot *planSlot,
+								 bool canSetTag,
 								 TupleTableSlot **returning);
 static TupleTableSlot *ExecPrepareTupleRouting(ModifyTableState *mtstate,
 											   EState *estate,
@@ -1089,7 +1090,7 @@ ExecInsert(ModifyTableContext *context,
 					TupleTableSlot *returning = NULL;
 
 					if (ExecOnConflictSelect(context, resultRelInfo,
-											 &conflictTid, planSlot,
+											 &conflictTid, planslot, canSetTag,
 											 &returning))
 					{
 						InstrCountFiltered2(&mtstate->ps, 1);
@@ -2797,6 +2798,7 @@ ExecOnConflictSelect(ModifyTableContext *context,
 					 ResultRelInfo *resultRelInfo,
 					 ItemPointer conflictTid,
 					 TupleTableSlot *planSlot,
+					 bool canSetTag,
 					 TupleTableSlot **returning)
 {
 	ModifyTableState *mtstate = context->mtstate;
@@ -2871,6 +2873,9 @@ ExecOnConflictSelect(ModifyTableContext *context,
 	Assert(resultRelInfo->ri_projectReturning);
 
 	*returning = ExecProcessReturning(resultRelInfo, existing, planSlot);
+
+	if (canSetTag)
+		context->estate->es_processed++;
 
 	/*
 	 * Clear out existing tuple, as there might not be another conflict among
