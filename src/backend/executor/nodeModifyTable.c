@@ -1090,7 +1090,7 @@ ExecInsert(ModifyTableContext *context,
 					TupleTableSlot *returning = NULL;
 
 					if (ExecOnConflictSelect(context, resultRelInfo,
-											 &conflictTid, planslot, canSetTag,
+											 &conflictTid, slot, canSetTag,
 											 &returning))
 					{
 						InstrCountTuples2(&mtstate->ps, 1);
