@@ -2804,7 +2804,7 @@ ExecOnConflictSelect(ModifyTableContext *context,
 	Relation	relation = resultRelInfo->ri_RelationDesc;
 	ExprState  *onConflictSelectWhere = resultRelInfo->ri_onConflict->oc_WhereClause;
 	TupleTableSlot *existing = resultRelInfo->ri_onConflict->oc_Existing;
-	LockClauseStrength lockstrength = resultRelInfo->ri_onConflictLockingStrength;
+	LockClauseStrength lockstrength = resultRelInfo->ri_onConflict->oc_LockingStrength;
 
 	/*
 	 * Parse analysis should have blocked ON CONFLICT for all system
@@ -4809,7 +4809,7 @@ ExecInitModifyTable(ModifyTable *node, EState *estate, int eflags)
 			onconfl->oc_WhereClause = qualexpr;
 		}
 
-		resultRelInfo->ri_onConflictLockingStrength = node->onConflictLockingStrength;
+		onconfl->oc_LockingStrength = node->onConflictLockingStrength;
 	}
 
 	/*

@@ -412,6 +412,8 @@ typedef struct OnConflictSetState
 	TupleTableSlot *oc_Existing;	/* slot to store existing target tuple in */
 	TupleTableSlot *oc_ProjSlot;	/* CONFLICT ... SET ... projection target */
 	ProjectionInfo *oc_ProjInfo;	/* for ON CONFLICT DO UPDATE SET */
+	LockClauseStrength oc_LockingStrength;	/* strengh of lock for ON CONFLICT
+											 * DO SELECT, or LCS_NONE */
 	ExprState  *oc_WhereClause; /* state for the WHERE clause */
 } OnConflictSetState;
 
@@ -551,9 +553,6 @@ typedef struct ResultRelInfo
 
 	/* ON CONFLICT evaluation state */
 	OnConflictSetState *ri_onConflict;
-
-	/* strengh of lock for ON CONFLICT DO SELECT, or LCS_NONE */
-	LockClauseStrength ri_onConflictLockingStrength;
 
 	/* for MERGE, lists of MergeActionState (one per MergeMatchKind) */
 	List	   *ri_MergeActions[NUM_MERGE_MATCH_KINDS];
