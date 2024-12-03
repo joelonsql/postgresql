@@ -1093,7 +1093,7 @@ ExecInsert(ModifyTableContext *context,
 											 &conflictTid, planslot, canSetTag,
 											 &returning))
 					{
-						InstrCountFiltered2(&mtstate->ps, 1);
+						InstrCountTuples2(&mtstate->ps, 1);
 						return returning;
 					}
 					else
