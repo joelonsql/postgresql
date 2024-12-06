@@ -231,81 +231,78 @@ static Oid
 find_foreign_key(Oid referencing_relid, Oid referenced_relid,
 				 List *referencing_cols, List *referenced_cols)
 {
-	HeapTuple	tuple;
-	ScanKeyData skey[1];
+	int			ncols = list_length(referencing_cols);
+	Relation	rel = table_open(ConstraintRelationId, AccessShareLock);
 	SysScanDesc scan;
-	Relation	relation;
+	ScanKeyData skey[1];
+	HeapTuple	tup;
 	Oid			fkoid = InvalidOid;
+	int			i,
+				j;
+	AttrNumber *ref_attnums = palloc(sizeof(AttrNumber) * ncols);
+	AttrNumber *refd_attnums = palloc(sizeof(AttrNumber) * ncols);
+	ListCell   *lc;
+	int			pos = 0;
 
-	relation = table_open(ConstraintRelationId, AccessShareLock);
+	/* Convert referencing and referenced column lists to arrays of attnums */
+	foreach(lc, referencing_cols)
+		ref_attnums[pos++] = get_attnum(referencing_relid, strVal(lfirst(lc)));
+	pos = 0;
+	foreach(lc, referenced_cols)
+		refd_attnums[pos++] = get_attnum(referenced_relid, strVal(lfirst(lc)));
 
 	ScanKeyInit(&skey[0],
 				Anum_pg_constraint_conrelid,
 				BTEqualStrategyNumber, F_OIDEQ,
 				ObjectIdGetDatum(referencing_relid));
+	scan = systable_beginscan(rel, ConstraintRelidTypidNameIndexId, true, NULL, 1, skey);
 
-	scan = systable_beginscan(relation, ConstraintRelidTypidNameIndexId,
-							  true, NULL, 1, skey);
-
-	while (HeapTupleIsValid(tuple = systable_getnext(scan)))
+	while (HeapTupleIsValid(tup = systable_getnext(scan)))
 	{
-		Form_pg_constraint con = (Form_pg_constraint) GETSTRUCT(tuple);
-		Datum		conkey_datum;
-		Datum		confkey_datum;
-		bool		conkey_isnull;
-		bool		confkey_isnull;
-		ArrayType  *conkey_array;
-		ArrayType  *confkey_array;
-		int16	   *conkey;
-		int16	   *confkey;
+		Form_pg_constraint con = (Form_pg_constraint) GETSTRUCT(tup);
+		bool		conkey_isnull,
+					confkey_isnull;
+		Datum		conkey_datum,
+					confkey_datum;
+		ArrayType  *conkey_arr,
+				   *confkey_arr;
+		int16	   *conkey,
+				   *confkey;
 		int			nkeys;
 		bool		found = true;
 
-		if (con->contype != CONSTRAINT_FOREIGN ||
-			con->confrelid != referenced_relid)
+		if (con->contype != CONSTRAINT_FOREIGN || con->confrelid != referenced_relid)
 			continue;
 
-		conkey_datum = SysCacheGetAttr(CONSTROID, tuple,
-									   Anum_pg_constraint_conkey,
-									   &conkey_isnull);
-		confkey_datum = SysCacheGetAttr(CONSTROID, tuple,
-										Anum_pg_constraint_confkey,
-										&confkey_isnull);
-
+		conkey_datum = SysCacheGetAttr(CONSTROID, tup, Anum_pg_constraint_conkey, &conkey_isnull);
+		confkey_datum = SysCacheGetAttr(CONSTROID, tup, Anum_pg_constraint_confkey, &confkey_isnull);
 		if (conkey_isnull || confkey_isnull)
 			continue;
 
-		conkey_array = DatumGetArrayTypeP(conkey_datum);
-		confkey_array = DatumGetArrayTypeP(confkey_datum);
-
-		nkeys = ArrayGetNItems(ARR_NDIM(conkey_array), ARR_DIMS(conkey_array));
-
-		if (nkeys != ArrayGetNItems(ARR_NDIM(confkey_array),
-									ARR_DIMS(confkey_array)))
+		conkey_arr = DatumGetArrayTypeP(conkey_datum);
+		confkey_arr = DatumGetArrayTypeP(confkey_datum);
+		nkeys = ArrayGetNItems(ARR_NDIM(conkey_arr), ARR_DIMS(conkey_arr));
+		if (nkeys != ArrayGetNItems(ARR_NDIM(confkey_arr), ARR_DIMS(confkey_arr)) ||
+			nkeys != ncols)
 			continue;
 
-		if (nkeys != list_length(referencing_cols) ||
-			nkeys != list_length(referenced_cols))
-			continue;
+		conkey = (int16 *) ARR_DATA_PTR(conkey_arr);
+		confkey = (int16 *) ARR_DATA_PTR(confkey_arr);
 
-		conkey = (int16 *) ARR_DATA_PTR(conkey_array);
-		confkey = (int16 *) ARR_DATA_PTR(confkey_array);
-
-		for (int i = 0; i < nkeys; i++)
+		/*
+		 * Check if each fk pair (conkey[i], confkey[i]) matches some
+		 * (ref_attnums[j], refd_attnums[j])
+		 */
+		for (i = 0; i < nkeys && found; i++)
 		{
-			char	   *ref_col = strVal(list_nth(referencing_cols, i));
-			char	   *refd_col = strVal(list_nth(referenced_cols, i));
-			AttrNumber	ref_attnum = get_attnum(referencing_relid, ref_col);
-			AttrNumber	refd_attnum = get_attnum(referenced_relid, refd_col);
+			bool		match = false;
 
-			if (ref_attnum == InvalidAttrNumber ||
-				refd_attnum == InvalidAttrNumber ||
-				conkey[i] != ref_attnum ||
-				confkey[i] != refd_attnum)
-			{
+			for (j = 0; j < ncols && !match; j++)
+				if (ref_attnums[j] == conkey[i] && refd_attnums[j] == confkey[i])
+					match = true;
+
+			if (!match)
 				found = false;
-				break;
-			}
 		}
 
 		if (found)
@@ -316,7 +313,9 @@ find_foreign_key(Oid referencing_relid, Oid referenced_relid,
 	}
 
 	systable_endscan(scan);
-	table_close(relation, AccessShareLock);
+	table_close(rel, AccessShareLock);
+	pfree(ref_attnums);
+	pfree(refd_attnums);
 
 	return fkoid;
 }
@@ -567,6 +566,7 @@ validate_and_resolve_derived_rel(ParseState *pstate, Query *query, RangeTblEntry
 			{
 				Node	   *node = lfirst(lc);
 				JoinExpr   *join;
+
 				if (!IsA(node, JoinExpr))
 					ereport(ERROR,
 							(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
