@@ -129,6 +129,9 @@ INSERT INTO t3 (c5, c6) VALUES (1234, NULL); -- ok
 INSERT INTO t3 (c5, c6) VALUES (NULL, 5678); -- ok
 INSERT INTO t3 (c5, c6) VALUES (NULL, NULL); -- ok
 
+--
+-- Test composite foreign key joins with columns in matching order
+--
 SELECT *
 FROM t1
 JOIN t2 KEY (c3,c4) -> t1 (c1,c2)
@@ -143,6 +146,22 @@ SELECT *
 FROM t1
 JOIN t2 KEY (c3,c4) -> t1 (c1,c2)
 RIGHT JOIN t3 KEY (c5,c6) -> t1 (c1,c2);
+
+--
+-- Test composite foreign key joins with swapped column orders
+--
+SELECT *
+FROM t1
+JOIN t2 KEY (c4,c3) -> t1 (c2,c1)
+JOIN t3 KEY (c6,c5) -> t1 (c2,c1);
+
+--
+-- Test mismatched column orders between referencing and referenced sides
+--
+SELECT *
+FROM t1
+JOIN t2 KEY (c4,c3) -> t1 (c2,c1)
+JOIN t3 KEY (c6,c5) -> t1 (c1,c2); -- error
 
 --
 -- Test defining foreign key constraints with MATCH FULL
