@@ -813,3 +813,100 @@ SELECT c1, c2 FROM t1;
 SELECT * FROM mv1 JOIN t2 KEY (c3, c4) -> mv1 (c1, c2);
 
 DROP MATERIALIZED VIEW mv1;
+
+--
+-- Test nested foreign keyjoins
+--
+CREATE TABLE t12 (id integer PRIMARY KEY);
+CREATE TABLE t13 (id integer PRIMARY KEY, a_id integer REFERENCES t12(id));
+CREATE TABLE t14 (id integer PRIMARY KEY, b_id integer REFERENCES t13(id));
+
+CREATE TABLE t15 (
+    id integer,
+    id2 integer,
+    PRIMARY KEY (id, id2)
+);
+CREATE TABLE t16 (
+    id integer,
+    id2 integer,
+    a_id integer,
+    a_id2 integer,
+    PRIMARY KEY (id, id2),
+    FOREIGN KEY (a_id, a_id2) REFERENCES t15 (id, id2)
+);
+CREATE TABLE t17 (
+    id integer,
+    id2 integer,
+    b_id integer,
+    b_id2 integer,
+    PRIMARY KEY (id, id2),
+    FOREIGN KEY (b_id, b_id2) REFERENCES t16 (id, id2)
+);
+
+INSERT INTO t12 VALUES (1), (2), (3);
+INSERT INTO t13 VALUES (4, 1), (5, 2);
+INSERT INTO t14 VALUES (6, 4);
+INSERT INTO t15 VALUES (1, 10), (2, 20), (3, 30);
+INSERT INTO t16 VALUES (4, 40, 1, 10), (5, 50, 2, 20);
+INSERT INTO t17 VALUES (6, 60, 4, 40);
+
+--
+-- Test nested foreign key joins
+--
+SELECT *
+FROM t12
+JOIN
+    t13 JOIN t14 KEY (b_id) -> t13 (id)
+KEY (a_id) -> t12 (id);
+
+SELECT *
+FROM t12
+JOIN (t13 JOIN t14 KEY (b_id) -> t13 (id)) KEY (a_id) -> t12 (id);
+
+--
+-- Test nested foreign key joins with composite foreign keys
+--
+SELECT *
+FROM t15
+JOIN
+    t16 JOIN t17 KEY (b_id, b_id2) -> t16 (id, id2)
+KEY (a_id, a_id2) -> t15 (id, id2);
+
+--
+-- Explicit parenthesization:
+--
+SELECT *
+FROM t15
+JOIN
+(
+    t16 JOIN t17 KEY (b_id, b_id2) -> t16 (id, id2)
+) KEY (a_id, a_id2) -> t15 (id, id2);
+
+--
+-- Test swapping the column order:
+--
+
+SELECT *
+FROM t15
+JOIN
+(
+    t16 JOIN t17 KEY (b_id, b_id2) -> t16 (id, id2)
+) KEY (a_id2, a_id) -> t15 (id2, id);
+
+--
+-- Test mismatched column orders between referencing and referenced sides:
+--
+
+SELECT *
+FROM t15
+JOIN
+(
+    t16 JOIN t17 KEY (b_id, b_id2) -> t16 (id, id2)
+) KEY (a_id, a_id2) -> t15 (id2, id); -- error
+
+SELECT *
+FROM t15
+JOIN
+(
+    t16 JOIN t17 KEY (b_id, b_id2) -> t16 (id2, id)
+) KEY (a_id2, a_id) -> t15 (id2, id); -- error
