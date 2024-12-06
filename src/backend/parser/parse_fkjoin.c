@@ -142,9 +142,11 @@ transformAndValidateForeignKeyJoin(ParseState *pstate, JoinExpr *join,
 				(errcode(ERRCODE_UNDEFINED_OBJECT),
 				 errmsg("there is no foreign key constraint on table \"%s\" (%s) referencing table \"%s\" (%s)",
 						referencing_rte->alias ? referencing_rte->alias->aliasname :
+						(referencing_rte->relid == InvalidOid) ? "<unnamed derived table>" :
 						get_rel_name(referencing_rte->relid),
 						column_list_to_string(referencing_cols),
 						referenced_rte->alias ? referenced_rte->alias->aliasname :
+						(referenced_rte->relid == InvalidOid) ? "<unnamed derived table>" :
 						get_rel_name(referenced_rte->relid),
 						column_list_to_string(referenced_cols)),
 				 parser_errposition(pstate, fkjn->location)));
@@ -415,6 +417,114 @@ drill_down_to_base_rel(ParseState *pstate, RangeTblEntry *rte,
 							 parser_errposition(pstate, location)));
 
 				query = castNode(Query, cte->ctequery);
+			}
+			break;
+
+		case RTE_JOIN:
+			{
+				List	   *base_colnames_local = NIL;
+				Oid			common_base_relid = InvalidOid;
+				ListCell   *lc_col;
+				Node	   *aliasnode;
+
+				/*
+				 * For each requested column, find its position in the join
+				 * RTE's output (erefname), then locate the corresponding Var
+				 * in joinaliasvars. This Var references one of the input
+				 * relations of the join. We then recursively resolve that
+				 * down to a base rel.
+				 */
+				foreach(lc_col, colnames)
+				{
+					char	   *colname = strVal(lfirst(lc_col));
+					int			colpos = 0;
+					bool		found = false;
+					ListCell   *lc_alias;
+					Var		   *aliasvar;
+
+					/*
+					 * Locate the requested column in the join's output
+					 * aliases
+					 */
+					foreach(lc_alias, rte->eref->colnames)
+					{
+						char	   *aliasname = strVal(lfirst(lc_alias));
+
+						if (strcmp(aliasname, colname) == 0)
+						{
+							found = true;
+							break;
+						}
+						colpos++;
+					}
+
+					if (!found)
+						ereport(ERROR,
+								(errcode(ERRCODE_UNDEFINED_COLUMN),
+								 errmsg("column reference \"%s\" not found", colname),
+								 parser_errposition(pstate, location)));
+
+					/*
+					 * Get the Var from joinaliasvars corresponding to this
+					 * column
+					 */
+					if (colpos < 0 || colpos >= list_length(rte->joinaliasvars))
+						elog(ERROR, "joinaliasvars does not match eref->colnames");
+
+
+					aliasnode = list_nth(rte->joinaliasvars, colpos);
+					if (!IsA(aliasnode, Var))
+						ereport(ERROR,
+								(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+								 errmsg("foreign key joins require direct column references, found expression"),
+								 parser_errposition(pstate, location)));
+
+					aliasvar = castNode(Var, aliasnode);
+
+					/*
+					 * Recursively resolve this Var. It points to a column in
+					 * one of the join's input relations. We'll drill down
+					 * further until we hit a base rel. Construct a
+					 * one-element column name list for recursion.
+					 */
+					{
+						RangeTblEntry *childrte = rt_fetch(aliasvar->varno, pstate->p_rtable);
+						List	   *child_colnames_in = list_make1(makeString(get_rte_attribute_name(childrte, aliasvar->varattno)));
+						List	   *child_colnames_out = NIL;
+						Oid			child_base_relid;
+
+						child_base_relid = drill_down_to_base_rel(pstate,
+																  childrte,
+																  &child_colnames_out,
+																  child_colnames_in,
+																  is_referenced,
+																  location);
+
+						/*
+						 * Check that all columns map to the same base
+						 * relation
+						 */
+						if (common_base_relid == InvalidOid)
+							common_base_relid = child_base_relid;
+						else if (common_base_relid != child_base_relid)
+							ereport(ERROR,
+									(errcode(ERRCODE_UNDEFINED_TABLE),
+									 errmsg("key columns must all come from the same table"),
+									 parser_errposition(pstate, location)));
+
+						/*
+						 * We expect exactly one column name out from
+						 * recursion
+						 */
+						if (list_length(child_colnames_out) != 1)
+							elog(ERROR, "expected exactly one base column name for join column");
+
+						base_colnames_local = lappend(base_colnames_local, linitial(child_colnames_out));
+					}
+				}
+
+				*colnames_out = base_colnames_local;
+				return common_base_relid;
 			}
 			break;
 
