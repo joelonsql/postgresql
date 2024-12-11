@@ -464,14 +464,6 @@ drill_down_to_base_rel(ParseState *pstate, RangeTblEntry *rte,
 								 errmsg("column reference \"%s\" not found", colname),
 								 parser_errposition(pstate, location)));
 
-					/*
-					 * Get the Var from joinaliasvars corresponding to this
-					 * column
-					 */
-					if (colpos < 0 || colpos >= list_length(rte->joinaliasvars))
-						elog(ERROR, "joinaliasvars does not match eref->colnames");
-
-
 					aliasnode = list_nth(rte->joinaliasvars, colpos);
 					if (!IsA(aliasnode, Var))
 						ereport(ERROR,
