@@ -422,7 +422,7 @@ drill_down_to_base_rel(ParseState *pstate, RangeTblEntry *rte,
 
 		case RTE_JOIN:
 			{
-				List	   *base_colnames_local = NIL;
+				List	   *base_colnames = NIL;
 				Oid			common_base_relid = InvalidOid;
 				ListCell   *lc_col;
 				Node	   *aliasnode;
@@ -506,10 +506,10 @@ drill_down_to_base_rel(ParseState *pstate, RangeTblEntry *rte,
 								 errmsg("key columns must all come from the same table"),
 								 parser_errposition(pstate, location)));
 
-					base_colnames_local = lappend(base_colnames_local, linitial(child_colnames_out));
+					base_colnames = lappend(base_colnames, linitial(child_colnames_out));
 				}
 
-				*colnames_out = base_colnames_local;
+				*colnames_out = base_colnames;
 				return common_base_relid;
 			}
 			break;
