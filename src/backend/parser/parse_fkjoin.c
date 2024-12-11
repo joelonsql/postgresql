@@ -441,6 +441,10 @@ drill_down_to_base_rel(ParseState *pstate, RangeTblEntry *rte,
 					bool		found = false;
 					ListCell   *lc_alias;
 					Var		   *aliasvar;
+					RangeTblEntry *childrte;
+					List	   *child_colnames_in;
+					List	   *child_colnames_out = NIL;
+					Oid			child_base_relid;
 
 					/*
 					 * Locate the requested column in the join's output
@@ -479,40 +483,34 @@ drill_down_to_base_rel(ParseState *pstate, RangeTblEntry *rte,
 					 * further until we hit a base rel. Construct a
 					 * one-element column name list for recursion.
 					 */
-					{
-						RangeTblEntry *childrte = rt_fetch(aliasvar->varno, pstate->p_rtable);
-						List	   *child_colnames_in = list_make1(makeString(get_rte_attribute_name(childrte, aliasvar->varattno)));
-						List	   *child_colnames_out = NIL;
-						Oid			child_base_relid;
+					childrte = rt_fetch(aliasvar->varno, pstate->p_rtable);
+					child_colnames_in = list_make1(makeString(get_rte_attribute_name(childrte, aliasvar->varattno)));
 
-						child_base_relid = drill_down_to_base_rel(pstate,
-																  childrte,
-																  &child_colnames_out,
-																  child_colnames_in,
-																  is_referenced,
-																  location);
+					child_base_relid = drill_down_to_base_rel(pstate,
+															  childrte,
+															  &child_colnames_out,
+															  child_colnames_in,
+															  is_referenced,
+															  location);
 
-						/*
-						 * Check that all columns map to the same base
-						 * relation
-						 */
-						if (common_base_relid == InvalidOid)
-							common_base_relid = child_base_relid;
-						else if (common_base_relid != child_base_relid)
-							ereport(ERROR,
-									(errcode(ERRCODE_UNDEFINED_TABLE),
-									 errmsg("key columns must all come from the same table"),
-									 parser_errposition(pstate, location)));
+					/*
+					 * Check that all columns map to the same base relation
+					 */
+					if (common_base_relid == InvalidOid)
+						common_base_relid = child_base_relid;
+					else if (common_base_relid != child_base_relid)
+						ereport(ERROR,
+								(errcode(ERRCODE_UNDEFINED_TABLE),
+								 errmsg("key columns must all come from the same table"),
+								 parser_errposition(pstate, location)));
 
-						/*
-						 * We expect exactly one column name out from
-						 * recursion
-						 */
-						if (list_length(child_colnames_out) != 1)
-							elog(ERROR, "expected exactly one base column name for join column");
+					/*
+					 * We expect exactly one column name out from recursion
+					 */
+					if (list_length(child_colnames_out) != 1)
+						elog(ERROR, "expected exactly one base column name for join column");
 
-						base_colnames_local = lappend(base_colnames_local, linitial(child_colnames_out));
-					}
+					base_colnames_local = lappend(base_colnames_local, linitial(child_colnames_out));
 				}
 
 				*colnames_out = base_colnames_local;
