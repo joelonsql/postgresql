@@ -422,10 +422,10 @@ drill_down_to_base_rel(ParseState *pstate, RangeTblEntry *rte,
 
 		case RTE_JOIN:
 			{
-				List	   *base_colnames = NIL;
-				Oid			common_base_relid = InvalidOid;
 				ListCell   *lc_col;
 				Node	   *aliasnode;
+				RangeTblEntry *childrte = NULL;
+				List	   *child_colnames = NIL;
 
 				/*
 				 * For each requested column, find its position in the join
@@ -441,10 +441,7 @@ drill_down_to_base_rel(ParseState *pstate, RangeTblEntry *rte,
 					bool		found = false;
 					ListCell   *lc_alias;
 					Var		   *aliasvar;
-					RangeTblEntry *childrte;
-					List	   *child_colnames_in;
-					List	   *child_colnames_out = NIL;
-					Oid			child_base_relid;
+					RangeTblEntry *aliasrte;
 
 					/*
 					 * Locate the requested column in the join's output
@@ -477,40 +474,30 @@ drill_down_to_base_rel(ParseState *pstate, RangeTblEntry *rte,
 
 					aliasvar = castNode(Var, aliasnode);
 
-					/*
-					 * Recursively resolve this Var. It points to a column in
-					 * one of the join's input relations. We'll drill down
-					 * further until we hit a base rel. Construct a
-					 * one-element column name list for recursion.
-					 */
-					childrte = rt_fetch(aliasvar->varno, pstate->p_rtable);
-					child_colnames_in = list_make1(makeString(get_rte_attribute_name(childrte, aliasvar->varattno)));
-
-					child_base_relid = drill_down_to_base_rel(pstate,
-															  childrte,
-															  &child_colnames_out,
-															  child_colnames_in,
-															  is_referenced,
-															  location);
-
-					Assert(list_length(child_colnames_out) == 1);
+					aliasrte = rt_fetch(aliasvar->varno, pstate->p_rtable);
 
 					/*
 					 * Check that all columns map to the same base relation
 					 */
-					if (common_base_relid == InvalidOid)
-						common_base_relid = child_base_relid;
-					else if (common_base_relid != child_base_relid)
+					if (childrte == NULL)
+						childrte = aliasrte;
+					else if (childrte != aliasrte)
 						ereport(ERROR,
 								(errcode(ERRCODE_UNDEFINED_TABLE),
 								 errmsg("key columns must all come from the same table"),
 								 parser_errposition(pstate, location)));
 
-					base_colnames = lappend(base_colnames, linitial(child_colnames_out));
+					child_colnames = lappend(child_colnames, makeString(get_rte_attribute_name(childrte, aliasvar->varattno)));
 				}
 
-				*colnames_out = base_colnames;
-				return common_base_relid;
+				base_relid = drill_down_to_base_rel(pstate,
+													childrte,
+													colnames_out,
+													child_colnames,
+													is_referenced,
+													location);
+
+				return base_relid;
 			}
 			break;
 
