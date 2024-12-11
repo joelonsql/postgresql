@@ -476,9 +476,7 @@ drill_down_to_base_rel(ParseState *pstate, RangeTblEntry *rte,
 
 					aliasrte = rt_fetch(aliasvar->varno, pstate->p_rtable);
 
-					/*
-					 * Check that all columns map to the same base relation
-					 */
+					/* Check that all columns map to the same rte */
 					if (childrte == NULL)
 						childrte = aliasrte;
 					else if (childrte != aliasrte)
