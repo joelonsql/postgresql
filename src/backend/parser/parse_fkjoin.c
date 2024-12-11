@@ -493,6 +493,8 @@ drill_down_to_base_rel(ParseState *pstate, RangeTblEntry *rte,
 															  is_referenced,
 															  location);
 
+					Assert(list_length(child_colnames_out) == 1);
+
 					/*
 					 * Check that all columns map to the same base relation
 					 */
@@ -503,12 +505,6 @@ drill_down_to_base_rel(ParseState *pstate, RangeTblEntry *rte,
 								(errcode(ERRCODE_UNDEFINED_TABLE),
 								 errmsg("key columns must all come from the same table"),
 								 parser_errposition(pstate, location)));
-
-					/*
-					 * We expect exactly one column name out from recursion
-					 */
-					if (list_length(child_colnames_out) != 1)
-						elog(ERROR, "expected exactly one base column name for join column");
 
 					base_colnames_local = lappend(base_colnames_local, linitial(child_colnames_out));
 				}
