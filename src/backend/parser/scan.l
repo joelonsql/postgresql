@@ -455,10 +455,6 @@ other			.
 
 %%
 
-%{
-		static bool inleftarrow = false;
-%}
-
 {whitespace}	{
 					/* ignore */
 				}
@@ -904,9 +900,9 @@ other			.
 
 {self}			{
 					SET_YYLLOC();
-					if (yytext[0] == '-' && inleftarrow)
+					if (yytext[0] == '-' && yyextra->inleftarrow)
 					{
-						inleftarrow = false;
+						yyextra->inleftarrow = false;
 						return LEFT_ARROW_MINUS;
 					}
 					return yytext[0];
@@ -939,18 +935,18 @@ other			.
 						/* Strip the unwanted chars from the token */
 						yyless(1);
 
-						inleftarrow = true;
+						yyextra->inleftarrow = true;
 
 						return LEFT_ARROW_LESS;
 					}
 
-					if (nchars == 1 && yytext[0] == '-' && inleftarrow)
+					if (nchars == 1 && yytext[0] == '-' && yyextra->inleftarrow)
 					{
 						/* Strip the unwanted chars from the token */
 						if (nchars < yyleng)
 							yyless(nchars);
 
-						inleftarrow = false;
+						yyextra->inleftarrow = false;
 						return LEFT_ARROW_MINUS;
 					}
 
@@ -1330,6 +1326,8 @@ scanner_init(const char *str,
 	yyext->literalalloc = 1024;
 	yyext->literalbuf = (char *) palloc(yyext->literalalloc);
 	yyext->literallen = 0;
+
+	yyext->inleftarrow = false;
 
 	return scanner;
 }
