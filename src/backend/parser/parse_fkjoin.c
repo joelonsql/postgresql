@@ -32,24 +32,31 @@
 #include "utils/lsyscache.h"
 #include "utils/rel.h"
 #include "utils/syscache.h"
+#include "parser/parse_fkgraph.h"
 
-static Node *build_fk_join_on_clause(ParseState *pstate, List *referencingVars,
+/*
+ * Local functions
+ */
+static Node *build_fk_join_on_clause(ParseState *pstate,
+									 List *referencingVars,
 									 List *referencedVars);
-static Oid	find_foreign_key(Oid referencing_relid, Oid referenced_relid,
-							 List *referencing_cols, List *referenced_cols);
+static Oid	find_foreign_key(Oid referencing_relid,
+							 Oid referenced_relid,
+							 List *referencing_cols,
+							 List *referenced_cols);
 static char *column_list_to_string(const List *columns);
-static Oid	drill_down_to_base_rel(ParseState *pstate, RangeTblEntry *rte,
-								   List **colnames_out, List *colnames,
-								   bool is_referenced, int location);
-static Oid	validate_and_resolve_derived_rel(ParseState *pstate, Query *query,
+static Oid	validate_and_resolve_derived_rel(ParseState *pstate,
+											 Query *query,
 											 RangeTblEntry *rte,
 											 List *colnames,
 											 List **colnames_out,
-											 bool is_referenced, int location);
-static void validate_derived_rel_joins(ParseState *pstate, Query *query,
-									   JoinExpr *join, RangeTblEntry *trunk_rte,
-									   int location);
+											 bool is_referenced,
+											 int location);
 
+/*
+ * transformAndValidateForeignKeyJoin
+ *		Transform a ForeignKeyClause into a ForeignKeyJoinNode and validate it
+ */
 void
 transformAndValidateForeignKeyJoin(ParseState *pstate, JoinExpr *join,
 								   ParseNamespaceItem *r_nsitem,
@@ -355,7 +362,7 @@ column_list_to_string(const List *columns)
  * drill_down_to_base_rel
  *		Resolves the base relation from a potentially derived relation
  */
-static Oid
+Oid
 drill_down_to_base_rel(ParseState *pstate, RangeTblEntry *rte,
 					   List **colnames_out, List *colnames,
 					   bool is_referenced, int location)
@@ -429,10 +436,9 @@ drill_down_to_base_rel(ParseState *pstate, RangeTblEntry *rte,
 
 				/*
 				 * For each requested column, find its position in the join
-				 * RTE's output (erefname), then locate the corresponding Var
-				 * in joinaliasvars. This Var references one of the input
-				 * relations of the join. We then recursively resolve that
-				 * down to a base rel.
+				 * output (rte->eref->colnames), then locate the corresponding
+				 * Var in joinaliasvars. That Var references one of the input
+				 * rels. We'll recursively drill down on that input rel.
 				 */
 				foreach(lc_col, colnames)
 				{
@@ -443,10 +449,6 @@ drill_down_to_base_rel(ParseState *pstate, RangeTblEntry *rte,
 					Var		   *aliasvar;
 					RangeTblEntry *aliasrte;
 
-					/*
-					 * Locate the requested column in the join's output
-					 * aliases
-					 */
 					foreach(lc_alias, rte->eref->colnames)
 					{
 						char	   *aliasname = strVal(lfirst(lc_alias));
@@ -476,7 +478,7 @@ drill_down_to_base_rel(ParseState *pstate, RangeTblEntry *rte,
 
 					aliasrte = rt_fetch(aliasvar->varno, pstate->p_rtable);
 
-					/* Check that all columns map to the same rte */
+					/* All columns must map to the same child RTE */
 					if (childrte == NULL)
 						childrte = aliasrte;
 					else if (childrte != aliasrte)
@@ -485,7 +487,9 @@ drill_down_to_base_rel(ParseState *pstate, RangeTblEntry *rte,
 								 errmsg("key columns must all come from the same table"),
 								 parser_errposition(pstate, location)));
 
-					child_colnames = lappend(child_colnames, makeString(get_rte_attribute_name(childrte, aliasvar->varattno)));
+					child_colnames = lappend(child_colnames,
+											 makeString(get_rte_attribute_name(childrte,
+																			   aliasvar->varattno)));
 				}
 
 				base_relid = drill_down_to_base_rel(pstate,
@@ -550,8 +554,7 @@ validate_and_resolve_derived_rel(ParseState *pstate, Query *query, RangeTblEntry
 				 parser_errposition(pstate, location)));
 
 	/*
-	 * Determine the trunk_rte, which is the relation in query->targetList the
-	 * colaliases refer to, which must be one and the same.
+	 * Determine the trunk_rte, which must be unique for all colnames.
 	 */
 	foreach(lc_colname, colnames)
 	{
@@ -622,13 +625,12 @@ validate_and_resolve_derived_rel(ParseState *pstate, Query *query, RangeTblEntry
 	Assert(trunk_rte != NULL);
 
 	/*
-	 * If this is the referenced side, we need to ensure it's not filtered,
-	 * and if there are any joins, they must all use the trunk_rte as their
-	 * referencing table, and the referencing columns must not be nullable,
-	 * since otherwise the virtual foreign key integrity would not be upheld.
+	 * If this is the referenced side, ensure there is no filtering, and
+	 * uniqueness is preserved (the latter done via fkgraph_verify).
 	 */
 	if (is_referenced)
 	{
+		/* If there's filtering or limit clauses, that breaks set-containment. */
 		if (query->jointree->quals != NULL ||
 			query->limitOffset != NULL ||
 			query->limitCount != NULL)
@@ -638,120 +640,12 @@ validate_and_resolve_derived_rel(ParseState *pstate, Query *query, RangeTblEntry
 					 errdetail("Using a filtered query as the referenced table would violate referential integrity."),
 					 parser_errposition(pstate, location)));
 
-		if (list_length(query->rtable) > 1 &&
-			IsA(query->jointree->fromlist, List))
-		{
-			ListCell   *lc;
-
-			foreach(lc, query->jointree->fromlist)
-			{
-				Node	   *node = lfirst(lc);
-				JoinExpr   *join;
-
-				if (!IsA(node, JoinExpr))
-					ereport(ERROR,
-							(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-							 errmsg("unsupported query structure in referenced table"),
-							 parser_errposition(pstate, location)));
-
-				join = castNode(JoinExpr, node);
-				validate_derived_rel_joins(pstate, query, join, trunk_rte, location);
-			}
-		}
+		fkgraph_verify(pstate, query, trunk_rte, location);
 	}
 
 	/*
-	 * Once the trunk_rte is determined, we drill down to the base relation,
-	 * which is then returned.
+	 * Finally, drill down from trunk_rte to the underlying base table.
 	 */
 	return drill_down_to_base_rel(pstate, trunk_rte, colnames_out,
 								  base_colnames, is_referenced, location);
-}
-
-/*
- * validate_derived_rel_joins
- *		Ensures that all joins uphold virtual foreign key integrity
- */
-static void
-validate_derived_rel_joins(ParseState *pstate, Query *query, JoinExpr *join,
-						   RangeTblEntry *trunk_rte, int location)
-{
-	ForeignKeyJoinNode *fkjn;
-	RangeTblEntry *referencing_rte;
-	List	   *referencing_attnums;
-	ListCell   *lc;
-	List	   *base_colnames = NIL;
-	List	   *colaliases = NIL;
-	Oid			base_relid;
-
-	if (join->fkJoin == NULL)
-		ereport(ERROR,
-				(errcode(ERRCODE_INTEGRITY_CONSTRAINT_VIOLATION),
-				 errmsg("virtual foreign key constraint violation"),
-				 errdetail("The derived table contains a join that is not a foreign key join"),
-				 parser_errposition(pstate, location)));
-
-	fkjn = castNode(ForeignKeyJoinNode, join->fkJoin);
-
-	Assert(query->rtable != NIL);
-	Assert(fkjn->referencingVarno > 0 &&
-		   fkjn->referencingVarno <= list_length(query->rtable) &&
-		   fkjn->referencedVarno > 0 &&
-		   fkjn->referencedVarno <= list_length(query->rtable));
-
-	referencing_rte = rt_fetch(fkjn->referencingVarno, query->rtable);
-	Assert(referencing_rte != NULL);
-
-	if (trunk_rte != referencing_rte)
-		ereport(ERROR,
-				(errcode(ERRCODE_INTEGRITY_CONSTRAINT_VIOLATION),
-				 errmsg("virtual foreign key constraint violation"),
-				 errdetail("Referenced columns target a non-referencing table in derived table, violating uniqueness"),
-				 parser_errposition(pstate, location)));
-
-	referencing_attnums = fkjn->referencingAttnums;
-
-	foreach(lc, referencing_attnums)
-	{
-		int			attnum = lfirst_int(lc);
-		char	   *colname = get_rte_attribute_name(referencing_rte, attnum);
-
-		colaliases = lappend(colaliases, makeString(colname));
-	}
-
-	base_relid = drill_down_to_base_rel(pstate, referencing_rte,
-										&base_colnames, colaliases, false,
-										location);
-
-	foreach(lc, base_colnames)
-	{
-		char	   *colname = strVal(lfirst(lc));
-		AttrNumber	attnum;
-		HeapTuple	tuple;
-		Form_pg_attribute attr;
-
-		attnum = get_attnum(base_relid, colname);
-		if (attnum == InvalidAttrNumber)
-			elog(ERROR, "cache lookup failed for column \"%s\" of relation %u",
-				 colname, base_relid);
-
-		tuple = SearchSysCache2(ATTNUM,
-								ObjectIdGetDatum(base_relid),
-								Int16GetDatum(attnum));
-
-		if (!HeapTupleIsValid(tuple))
-			elog(ERROR, "cache lookup failed for attribute %d of relation %u",
-				 attnum, base_relid);
-
-		attr = (Form_pg_attribute) GETSTRUCT(tuple);
-
-		if (!attr->attnotnull)
-			ereport(ERROR,
-					(errcode(ERRCODE_INTEGRITY_CONSTRAINT_VIOLATION),
-					 errmsg("virtual foreign key constraint violation"),
-					 errdetail("Nullable columns in derived table's referencing relation violate referential integrity"),
-					 parser_errposition(pstate, location)));
-
-		ReleaseSysCache(tuple);
-	}
 }

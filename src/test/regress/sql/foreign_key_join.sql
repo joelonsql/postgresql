@@ -1,3 +1,6 @@
+CREATE SCHEMA fkjoins;
+SET search_path TO fkjoins;
+
 --
 -- Test Foreign Key Joins.
 --
@@ -910,3 +913,196 @@ JOIN
 (
     t16 JOIN t17 KEY (b_id, b_id2) -> t16 (id2, id)
 ) KEY (a_id2, a_id) -> t15 (id2, id); -- error
+
+--
+-- Test referenced side is an arborescence (directed rooted tree)
+--
+
+CREATE TABLE a1 (id INT NOT NULL PRIMARY KEY);
+CREATE TABLE a2 (id INT NOT NULL PRIMARY KEY);
+CREATE TABLE b1 (id INT NOT NULL PRIMARY KEY);
+CREATE TABLE b2 (id INT NOT NULL PRIMARY KEY);
+
+INSERT INTO a1 (id) VALUES (100), (101);
+INSERT INTO a2 (id) VALUES (200), (201);
+INSERT INTO b1 (id) VALUES (300), (301);
+INSERT INTO b2 (id) VALUES (400), (401);
+
+CREATE TABLE a (
+    id          INT NOT NULL,
+    a1_id       INT NOT NULL,
+    a1_id_null  INT,
+    a2_id       INT NOT NULL,
+    a2_id_null  INT,
+    PRIMARY KEY (id),
+    FOREIGN KEY (a1_id) REFERENCES a1 (id),
+    FOREIGN KEY (a1_id_null) REFERENCES a1 (id),
+    FOREIGN KEY (a2_id) REFERENCES a2 (id),
+    FOREIGN KEY (a2_id_null) REFERENCES a2 (id)
+);
+
+INSERT INTO a (id, a1_id, a1_id_null, a2_id, a2_id_null)
+       VALUES (10, 100  , NULL      , 200  , NULL      );
+
+CREATE TABLE b (
+    id          INT NOT NULL,
+    b1_id       INT NOT NULL,
+    b1_id_null  INT,
+    b2_id       INT NOT NULL,
+    b2_id_null  INT,
+    PRIMARY KEY (id),
+    FOREIGN KEY (b1_id) REFERENCES b1 (id),
+    FOREIGN KEY (b1_id_null) REFERENCES b1 (id),
+    FOREIGN KEY (b2_id) REFERENCES b2 (id),
+    FOREIGN KEY (b2_id_null) REFERENCES b2 (id)
+);
+
+INSERT INTO b (id, b1_id, b1_id_null, b2_id, b2_id_null)
+       VALUES (20, 300  , NULL      , 400  , NULL      );
+
+CREATE TABLE root (
+    id          INT NOT NULL,
+    a_id        INT NOT NULL,
+    a_id_null   INT,
+    b_id        INT NOT NULL,
+    b_id_null   INT,
+    PRIMARY KEY (id),
+    FOREIGN KEY (a_id) REFERENCES a (id),
+    FOREIGN KEY (a_id_null) REFERENCES a (id),
+    FOREIGN KEY (b_id) REFERENCES b (id),
+    FOREIGN KEY (b_id_null) REFERENCES b (id)
+);
+
+INSERT INTO root (id, a_id, a_id_null, b_id, b_id_null)
+       VALUES (1, 10, NULL, 20, NULL);
+
+CREATE TABLE t (
+    id INT NOT NULL PRIMARY KEY,
+    root_id INT REFERENCES root
+);
+
+INSERT INTO t (id, root_id) VALUES (1, 1);
+
+--
+-- This query should be accepted, since uniqueness and set containment
+-- of q (id) is preserved, since root within q is a rooted directed tree,
+-- and all referencing columns that are nullable are joined
+-- with the appropriate outer join, and so are all subsequent joins DFS from
+-- each such node in the tree, until the leaf node is reached.
+--
+WITH q AS (
+    SELECT root.id FROM root
+        INNER JOIN a KEY (id) <- root (a_id)
+            INNER JOIN a1 KEY (id) <- a (a1_id)
+            LEFT JOIN a1 AS a1n KEY (id) <- a (a1_id_null)
+            INNER JOIN a2 KEY (id) <- a (a2_id)
+            LEFT JOIN a2 AS a2n KEY (id) <- a (a2_id_null)
+        LEFT JOIN a AS an KEY (id) <- root (a_id_null)
+            LEFT JOIN a1 AS an1 KEY (id) <- an (a1_id)
+            LEFT JOIN a1 AS an1n KEY (id) <- an (a1_id_null)
+            LEFT JOIN a2 AS an2 KEY (id) <- an (a2_id)
+            LEFT JOIN a2 AS an2n KEY (id) <- an (a2_id_null)
+        INNER JOIN b KEY (id) <- root (b_id)
+            INNER JOIN b1 KEY (id) <- b (b1_id)
+            LEFT JOIN b1 AS b1n KEY (id) <- b (b1_id_null)
+            INNER JOIN b2 KEY (id) <- b (b2_id)
+            LEFT JOIN b2 AS b2n KEY (id) <- b (b2_id_null)
+        LEFT JOIN b AS bn KEY (id) <- root (b_id_null)
+            LEFT JOIN b1 AS bn1 KEY (id) <- bn (b1_id)
+            LEFT JOIN b1 AS bn1n KEY (id) <- bn (b1_id_null)
+            LEFT JOIN b2 AS bn2 KEY (id) <- bn (b2_id)
+            LEFT JOIN b2 AS bn2n KEY (id) <- bn (b2_id_null)
+)
+SELECT * FROM q INNER JOIN t KEY (root_id) -> q (id);
+
+--
+-- This query should also be accepted, since q is the same tree as the
+-- previous query, it's just that it starts at b, but the foreign key joins
+-- construct the same type of tree.
+--
+WITH q AS (
+    SELECT root.id FROM b
+            INNER JOIN b1 KEY (id) <- b (b1_id)
+            LEFT JOIN b1 AS b1n KEY (id) <- b (b1_id_null)
+            INNER JOIN b2 KEY (id) <- b (b2_id)
+            LEFT JOIN b2 AS b2n KEY (id) <- b (b2_id_null)
+    INNER JOIN root KEY (b_id) -> b (id)
+        INNER JOIN a KEY (id) <- root (a_id)
+            INNER JOIN a1 KEY (id) <- a (a1_id)
+            LEFT JOIN a1 AS a1n KEY (id) <- a (a1_id_null)
+            INNER JOIN a2 KEY (id) <- a (a2_id)
+            LEFT JOIN a2 AS a2n KEY (id) <- a (a2_id_null)
+        LEFT JOIN a AS an KEY (id) <- root (a_id_null)
+            LEFT JOIN a1 AS an1 KEY (id) <- an (a1_id)
+            LEFT JOIN a1 AS an1n KEY (id) <- an (a1_id_null)
+            LEFT JOIN a2 AS an2 KEY (id) <- an (a2_id)
+            LEFT JOIN a2 AS an2n KEY (id) <- an (a2_id_null)
+        LEFT JOIN b AS bn KEY (id) <- root (b_id_null)
+            LEFT JOIN b1 AS bn1 KEY (id) <- bn (b1_id)
+            LEFT JOIN b1 AS bn1n KEY (id) <- bn (b1_id_null)
+            LEFT JOIN b2 AS bn2 KEY (id) <- bn (b2_id)
+            LEFT JOIN b2 AS bn2n KEY (id) <- bn (b2_id_null)
+)
+SELECT * FROM q INNER JOIN t KEY (root_id) -> q (id);
+
+--
+-- This query should also be accepted, since q is the same tree as the
+-- previous query, it's just that it starts at bn, but the foreign key joins
+-- construct the same type of tree.
+--
+WITH q AS (
+    SELECT root.id FROM b AS bn
+        LEFT JOIN b1 AS bn1 KEY (id) <- bn (b1_id)
+        LEFT JOIN b1 AS bn1n KEY (id) <- bn (b1_id_null)
+        LEFT JOIN b2 AS bn2 KEY (id) <- bn (b2_id)
+        LEFT JOIN b2 AS bn2n KEY (id) <- bn (b2_id_null)
+    RIGHT JOIN root KEY (b_id_null) -> bn (id)
+        INNER JOIN a KEY (id) <- root (a_id)
+            INNER JOIN a1 KEY (id) <- a (a1_id)
+            LEFT JOIN a1 AS a1n KEY (id) <- a (a1_id_null)
+            INNER JOIN a2 KEY (id) <- a (a2_id)
+            LEFT JOIN a2 AS a2n KEY (id) <- a (a2_id_null)
+        LEFT JOIN a AS an KEY (id) <- root (a_id_null)
+            LEFT JOIN a1 AS an1 KEY (id) <- an (a1_id)
+            LEFT JOIN a1 AS an1n KEY (id) <- an (a1_id_null)
+            LEFT JOIN a2 AS an2 KEY (id) <- an (a2_id)
+            LEFT JOIN a2 AS an2n KEY (id) <- an (a2_id_null)
+        INNER JOIN b KEY (id) <- root (b_id)
+            INNER JOIN b1 KEY (id) <- b (b1_id)
+            LEFT JOIN b1 AS b1n KEY (id) <- b (b1_id_null)
+            INNER JOIN b2 KEY (id) <- b (b2_id)
+            LEFT JOIN b2 AS b2n KEY (id) <- b (b2_id_null)
+)
+SELECT * FROM q INNER JOIN t KEY (root_id) -> q (id);
+
+--
+-- This query should not be accepted, since
+-- `INNER JOIN b1 AS b1n KEY (id) <- b (b1_id_null)`
+-- will filter out rows.
+--
+WITH q AS (
+    SELECT root.id FROM root
+        INNER JOIN a KEY (id) <- root (a_id)
+            INNER JOIN a1 KEY (id) <- a (a1_id)
+            LEFT JOIN a1 AS a1n KEY (id) <- a (a1_id_null)
+            INNER JOIN a2 KEY (id) <- a (a2_id)
+            LEFT JOIN a2 AS a2n KEY (id) <- a (a2_id_null)
+        LEFT JOIN a AS an KEY (id) <- root (a_id_null)
+            LEFT JOIN a1 AS an1 KEY (id) <- an (a1_id)
+            LEFT JOIN a1 AS an1n KEY (id) <- an (a1_id_null)
+            LEFT JOIN a2 AS an2 KEY (id) <- an (a2_id)
+            LEFT JOIN a2 AS an2n KEY (id) <- an (a2_id_null)
+        INNER JOIN b KEY (id) <- root (b_id)
+            INNER JOIN b1 KEY (id) <- b (b1_id)
+            INNER JOIN b1 AS b1n KEY (id) <- b (b1_id_null)
+            INNER JOIN b2 KEY (id) <- b (b2_id)
+            LEFT JOIN b2 AS b2n KEY (id) <- b (b2_id_null)
+        LEFT JOIN b AS bn KEY (id) <- root (b_id_null)
+            LEFT JOIN b1 AS bn1 KEY (id) <- bn (b1_id)
+            LEFT JOIN b1 AS bn1n KEY (id) <- bn (b1_id_null)
+            LEFT JOIN b2 AS bn2 KEY (id) <- bn (b2_id)
+            LEFT JOIN b2 AS bn2n KEY (id) <- bn (b2_id_null)
+)
+SELECT * FROM q INNER JOIN t KEY (root_id) -> q (id);
+
+DROP SCHEMA fkjoins CASCADE;

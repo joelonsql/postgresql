@@ -16,6 +16,7 @@ OBJS = \
 	analyze.o \
 	gram.o \
 	parse_agg.o \
+	parse_fkgraph.o \
 	parse_fkjoin.o \
 	parse_clause.o \
 	parse_coerce.o \
