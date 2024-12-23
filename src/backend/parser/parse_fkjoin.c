@@ -52,6 +52,9 @@ static Oid	validate_and_resolve_derived_rel(ParseState *pstate,
 											 List **colnames_out,
 											 bool is_referenced,
 											 int location);
+static Oid	drill_down_to_base_rel(ParseState *pstate, RangeTblEntry *rte,
+								   List **colnames_out, List *colnames,
+								   bool is_referenced, int location);
 
 /*
  * transformAndValidateForeignKeyJoin
@@ -362,7 +365,7 @@ column_list_to_string(const List *columns)
  * drill_down_to_base_rel
  *		Resolves the base relation from a potentially derived relation
  */
-Oid
+static Oid
 drill_down_to_base_rel(ParseState *pstate, RangeTblEntry *rte,
 					   List **colnames_out, List *colnames,
 					   bool is_referenced, int location)
@@ -648,4 +651,70 @@ validate_and_resolve_derived_rel(ParseState *pstate, Query *query, RangeTblEntry
 	 */
 	return drill_down_to_base_rel(pstate, trunk_rte, colnames_out,
 								  base_colnames, is_referenced, location);
+}
+
+/*
+ * check_referencing_columns_nullability
+ *		Determine if all referencing columns are NOT NULL by checking the base table
+ */
+bool
+check_referencing_columns_nullability(ParseState *pstate,
+									  RangeTblEntry *referencing_rte,
+									  List *referencingAttnums,
+									  int location)
+{
+	List	   *colaliases = NIL;
+	List	   *base_colnames = NIL;
+	Oid			base_relid;
+	ListCell   *lc_attnum;
+
+	/* Build list of column aliases from attnums */
+	foreach(lc_attnum, referencingAttnums)
+	{
+		int			attnum = lfirst_int(lc_attnum);
+		char	   *colname = get_rte_attribute_name(referencing_rte, attnum);
+
+		colaliases = lappend(colaliases, makeString(colname));
+	}
+
+	/* Get the base relation ID and column names */
+	base_relid = drill_down_to_base_rel(pstate,
+										referencing_rte,
+										&base_colnames,
+										colaliases,
+										false,	/* is_referenced = false */
+										location);
+
+	/* Check each column's nullability in the system catalog */
+	foreach(lc_attnum, base_colnames)
+	{
+		char	   *colname = strVal(lfirst(lc_attnum));
+		AttrNumber	base_attnum;
+		HeapTuple	tuple;
+		Form_pg_attribute attr;
+
+		base_attnum = get_attnum(base_relid, colname);
+		if (base_attnum == InvalidAttrNumber)
+			elog(ERROR, "cache lookup failed for column \"%s\" of relation %u",
+				 colname, base_relid);
+
+		tuple = SearchSysCache2(ATTNUM,
+								ObjectIdGetDatum(base_relid),
+								Int16GetDatum(base_attnum));
+		if (!HeapTupleIsValid(tuple))
+			elog(ERROR, "cache lookup failed for attribute %d of relation %u",
+				 base_attnum, base_relid);
+
+		attr = (Form_pg_attribute) GETSTRUCT(tuple);
+
+		if (!attr->attnotnull)
+		{
+			ReleaseSysCache(tuple);
+			return false;
+		}
+
+		ReleaseSysCache(tuple);
+	}
+
+	return true;
 }
