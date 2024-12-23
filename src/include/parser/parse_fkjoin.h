@@ -16,11 +16,9 @@
 #include "parser/parse_node.h"
 
 extern void transformAndValidateForeignKeyJoin(ParseState *pstate, JoinExpr *j, ParseNamespaceItem *r_nsitem, List *l_namespace);
-extern Oid	drill_down_to_base_rel(ParseState *pstate,
-								   RangeTblEntry *rte,
-								   List **colnames_out,
-								   List *colnames,
-								   bool is_referenced,
-								   int location);
+extern bool check_referencing_columns_nullability(ParseState *pstate,
+												  RangeTblEntry *referencing_rte,
+												  List *referencingAttnums,
+												  int location);
 
 #endif							/* PARSE_FKJOIN_H */
