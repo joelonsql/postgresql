@@ -667,7 +667,6 @@ check_referencing_columns_nullability(ParseState *pstate,
 	List	   *base_colnames = NIL;
 	Oid			base_relid;
 	ListCell   *lc_attnum;
-	bool		all_non_null = true;
 
 	/* Build list of column aliases from attnums */
 	foreach(lc_attnum, referencingAttnums)
@@ -709,10 +708,13 @@ check_referencing_columns_nullability(ParseState *pstate,
 		attr = (Form_pg_attribute) GETSTRUCT(tuple);
 
 		if (!attr->attnotnull)
-			all_non_null = false;
+		{
+			ReleaseSysCache(tuple);
+			return false;
+		}
 
 		ReleaseSysCache(tuple);
 	}
 
-	return all_non_null;
+	return true;
 }
