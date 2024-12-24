@@ -169,14 +169,12 @@ void
 fkgraph_verify(ParseState *pstate, Query *query,
 			   RangeTblEntry *trunk_rte, int location)
 {
-	FKCheckContext ctx;
-
-	/* Zero the struct and initialize relevant fields. */
-	memset(&ctx, 0, sizeof(FKCheckContext));
-	ctx.pstate = pstate;
-	ctx.query = query;
-	ctx.trunk_rte = trunk_rte;
-	ctx.location = location;
+	FKCheckContext ctx = {
+		.pstate = pstate,
+		.query = query,
+		.trunk_rte = trunk_rte,
+		.location = location
+	};
 
 	/* Walk the top-level FROM list. */
 	if (query->jointree != NULL)
