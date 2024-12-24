@@ -65,12 +65,9 @@ varno_in_subtree(Node *jtnode, Index varno)
 /*
  * Recursively walk a jointree node, counting RTEs, validating foreign-key edges,
  * and checking that no rows get improperly filtered.
- *
- * 'parentMightBeMissing' means the current subtree's parent might be absent
- * due to an earlier outer join or a nullable referencing side above us.
  */
 static void
-fkgraph_walk(Node *jtnode, FKCheckContext * ctx, bool parentMightBeMissing)
+fkgraph_walk(Node *jtnode, FKCheckContext *ctx)
 {
 	if (!jtnode)
 		return;
@@ -104,11 +101,10 @@ fkgraph_walk(Node *jtnode, FKCheckContext * ctx, bool parentMightBeMissing)
 		RangeTblEntry *referencing_rte;
 		RangeTblEntry *referenced_rte;
 		bool		nonNullRefCols;
-		bool		childMightBeMissing;
 
 		/* Recurse left and right. */
-		fkgraph_walk(join->larg, ctx, parentMightBeMissing);
-		fkgraph_walk(join->rarg, ctx, parentMightBeMissing);
+		fkgraph_walk(join->larg, ctx);
+		fkgraph_walk(join->rarg, ctx);
 
 		/* All joins must be foreign key joins */
 		if (!join->fkJoin)
@@ -137,16 +133,10 @@ fkgraph_walk(Node *jtnode, FKCheckContext * ctx, bool parentMightBeMissing)
 															   ctx->location);
 
 		/*
-		 * If the parent might be missing, or if referencing columns are
-		 * nullable => child might be missing.
+		 * If child might be missing, i.e. referencing columns are nullable, we
+		 * must have an outer join that preserves such rows.
 		 */
-		childMightBeMissing = (parentMightBeMissing || !nonNullRefCols);
-
-		/*
-		 * If child might be missing, we must have an outer join that
-		 * preserves such rows.
-		 */
-		if (childMightBeMissing)
+		if (!nonNullRefCols)
 		{
 			bool		referencingIsLeft = varno_in_subtree(join->larg, fkjn->referencingVarno);
 			bool		outerJoinSafe = (join->jointype == JOIN_LEFT && referencingIsLeft) ||
@@ -194,7 +184,7 @@ fkgraph_verify(ParseState *pstate, Query *query,
 		ListCell   *lc;
 
 		foreach(lc, query->jointree->fromlist)
-			fkgraph_walk((Node *) lfirst(lc), &ctx, false);
+			fkgraph_walk((Node *) lfirst(lc), &ctx);
 	}
 
 	/*
