@@ -39,7 +39,7 @@ typedef struct
 	int			edgeCount;		/* total foreign-key edges encountered */
 	bool		trunkFound;		/* did we see the trunk RTE? */
 	bool		trunkHasInbound;	/* trunk must not have inbound edges */
-}			FKCheckContext;
+} FKCheckContext;
 
 /*
  * Return true if varno is somewhere in the given jointree node.
