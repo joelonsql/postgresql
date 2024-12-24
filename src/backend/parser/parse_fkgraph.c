@@ -162,12 +162,10 @@ fkgraph_walk(Node *jtnode, FKCheckContext * ctx, bool parentMightBeMissing)
 		}
 	}
 	else
-	{
 		ereport(ERROR,
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 				 errmsg("unsupported join tree node in foreign key join"),
 				 parser_errposition(ctx->pstate, ctx->location)));
-	}
 }
 
 /*
