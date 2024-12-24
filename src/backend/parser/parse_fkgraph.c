@@ -27,7 +27,7 @@
 /*
  * Recursion context for single-pass foreign-key-join checks.
  */
-typedef struct FKCheckContext
+typedef struct
 {
 	ParseState *pstate;
 	Query	   *query;
