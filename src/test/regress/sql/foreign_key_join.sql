@@ -822,33 +822,41 @@ CREATE TABLE t13 (id integer PRIMARY KEY, a_id integer REFERENCES t12(id));
 CREATE TABLE t14 (id integer PRIMARY KEY, b_id integer REFERENCES t13(id));
 
 CREATE TABLE t15 (
-    id integer,
-    id2 integer,
+    id integer NOT NULL,
+    id2 integer NOT NULL,
     PRIMARY KEY (id, id2)
 );
 CREATE TABLE t16 (
-    id integer,
-    id2 integer,
-    a_id integer,
-    a_id2 integer,
+    id integer NOT NULL,
+    id2 integer NOT NULL,
+    a_id integer NOT NULL,
+    a_id2 integer NOT NULL,
     PRIMARY KEY (id, id2),
     FOREIGN KEY (a_id, a_id2) REFERENCES t15 (id, id2)
 );
 CREATE TABLE t17 (
-    id integer,
-    id2 integer,
-    b_id integer,
-    b_id2 integer,
+    id integer NOT NULL,
+    id2 integer NOT NULL,
+    b_id integer NOT NULL,
+    b_id2 integer NOT NULL,
     PRIMARY KEY (id, id2),
     FOREIGN KEY (b_id, b_id2) REFERENCES t16 (id, id2)
 );
-
+CREATE TABLE t18 (
+    id integer NOT NULL,
+    id2 integer NOT NULL,
+    c_id integer NOT NULL,
+    c_id2 integer NOT NULL,
+    PRIMARY KEY (id, id2),
+    FOREIGN KEY (c_id, c_id2) REFERENCES t17 (id, id2)
+);
 INSERT INTO t12 VALUES (1), (2), (3);
 INSERT INTO t13 VALUES (4, 1), (5, 2);
 INSERT INTO t14 VALUES (6, 4);
 INSERT INTO t15 VALUES (1, 10), (2, 20), (3, 30);
 INSERT INTO t16 VALUES (4, 40, 1, 10), (5, 50, 2, 20);
 INSERT INTO t17 VALUES (6, 60, 4, 40);
+INSERT INTO t18 VALUES (7, 70, 6, 60);
 
 --
 -- Test nested foreign key joins
@@ -910,3 +918,54 @@ JOIN
 (
     t16 JOIN t17 KEY (b_id, b_id2) -> t16 (id2, id)
 ) KEY (a_id2, a_id) -> t15 (id2, id); -- error
+
+--
+-- Test snow flake joins as referenced side
+--
+WITH
+q1 AS
+(
+    SELECT
+        t17.id,
+        t17.id2
+    FROM t15
+    JOIN t16 KEY (a_id, a_id2) -> t15 (id, id2)
+    JOIN t17 KEY (b_id, b_id2) -> t16 (id, id2)
+)
+SELECT
+    t18.id,
+    t18.id2
+FROM q1
+JOIN t18 KEY (c_id, c_id2) -> q1 (id, id2);
+
+WITH
+q1 AS
+(
+    SELECT
+        t17.id,
+        t17.id2
+    FROM t17
+    JOIN t16 KEY (id, id2) <- t17 (b_id, b_id2)
+    JOIN t15 KEY (id, id2) <- t16 (a_id, a_id2)
+)
+SELECT
+    t18.id,
+    t18.id2
+FROM t18
+JOIN q1 KEY (id, id2) <- t18 (c_id, c_id2);
+
+WITH
+q1 AS
+(
+    SELECT
+        t17.id,
+        t17.id2
+    FROM t16
+    JOIN t15 KEY (id, id2) <- t16 (a_id, a_id2)
+    JOIN t17 KEY (b_id, b_id2) -> t16 (id, id2)
+)
+SELECT
+    t18.id,
+    t18.id2
+FROM q1
+JOIN t18 KEY (c_id, c_id2) -> q1 (id, id2);

@@ -33,6 +33,13 @@
 #include "utils/rel.h"
 #include "utils/syscache.h"
 
+/* ----------
+ * Uncomment the following to enable compilation of dump_A_list()
+ * and dump_U_list() and to get a dump of A and U for each join.
+ * ----------
+#define FKJOINS_DEBUG
+ */
+
 static Node *build_fk_join_on_clause(ParseState *pstate, List *referencingVars,
 									 List *referencedVars);
 static Oid	find_foreign_key(Oid referencing_relid, Oid referenced_relid,
@@ -47,9 +54,28 @@ static Oid	validate_and_resolve_derived_rel(ParseState *pstate, Query *query,
 											 List **colnames_out,
 											 bool is_referenced, int location);
 static void validate_derived_rel_joins(ParseState *pstate, Query *query,
-									   JoinExpr *join, RangeTblEntry *trunk_rte,
-									   int location);
+									   RangeTblEntry *anchor_rte, int location);
+static void validate_join_node(ParseState *pstate, Query *query, Node *node,
+							   List **A, List **U, int location);
+static bool check_columns_not_nullable(ParseState *pstate, RangeTblEntry *rte,
+									   List *colaliases, int location);
+static bool check_columns_unique(ParseState *pstate, RangeTblEntry *rte,
+								 List *colaliases, int location);
+static List *map_union(List *oldA, List *A_inner);
+static const char *rte_aliasname(RangeTblEntry *rte);
 
+#ifdef FKJOINS_DEBUG
+static void dump_A_list(List *A, RangeTblEntry *new_rte);
+static void dump_U_list(List *U, RangeTblEntry *new_rte);
+#else
+#define dump_A_list(A, new_rte)
+#define dump_U_list(U, new_rte)
+#endif
+
+/*
+ * transformAndValidateForeignKeyJoin
+ *    Entry point for transforming a foreign key join
+ */
 void
 transformAndValidateForeignKeyJoin(ParseState *pstate, JoinExpr *join,
 								   ParseNamespaceItem *r_nsitem,
@@ -185,9 +211,10 @@ transformAndValidateForeignKeyJoin(ParseState *pstate, JoinExpr *join,
 	join->fkJoin = (Node *) fkjn_node;
 }
 
+
 /*
  * build_fk_join_on_clause
- *		Constructs the ON clause for the foreign key join
+ *    Constructs the ON clause for the foreign key join
  */
 static Node *
 build_fk_join_on_clause(ParseState *pstate, List *referencingVars,
@@ -225,9 +252,10 @@ build_fk_join_on_clause(ParseState *pstate, List *referencingVars,
 	return result;
 }
 
+
 /*
  * find_foreign_key
- *		Searches the system catalogs to locate the foreign key constraint
+ *    Searches the system catalogs to locate the foreign key constraint
  */
 static Oid
 find_foreign_key(Oid referencing_relid, Oid referenced_relid,
@@ -300,8 +328,10 @@ find_foreign_key(Oid referencing_relid, Oid referenced_relid,
 			bool		match = false;
 
 			for (j = 0; j < ncols && !match; j++)
+			{
 				if (ref_attnums[j] == conkey[i] && refd_attnums[j] == confkey[i])
 					match = true;
+			}
 
 			if (!match)
 				found = false;
@@ -325,7 +355,7 @@ find_foreign_key(Oid referencing_relid, Oid referenced_relid,
 
 /*
  * column_list_to_string
- *		Converts a list of column names to a comma-separated string
+ *    Converts a list of column names to a comma-separated string
  */
 static char *
 column_list_to_string(const List *columns)
@@ -351,9 +381,10 @@ column_list_to_string(const List *columns)
 	return string.data;
 }
 
+
 /*
  * drill_down_to_base_rel
- *		Resolves the base relation from a potentially derived relation
+ *    Resolves the base relation from a potentially derived relation
  */
 static Oid
 drill_down_to_base_rel(ParseState *pstate, RangeTblEntry *rte,
@@ -443,10 +474,6 @@ drill_down_to_base_rel(ParseState *pstate, RangeTblEntry *rte,
 					Var		   *aliasvar;
 					RangeTblEntry *aliasrte;
 
-					/*
-					 * Locate the requested column in the join's output
-					 * aliases
-					 */
 					foreach(lc_alias, rte->eref->colnames)
 					{
 						char	   *aliasname = strVal(lfirst(lc_alias));
@@ -476,7 +503,6 @@ drill_down_to_base_rel(ParseState *pstate, RangeTblEntry *rte,
 
 					aliasrte = rt_fetch(aliasvar->varno, pstate->p_rtable);
 
-					/* Check that all columns map to the same rte */
 					if (childrte == NULL)
 						childrte = aliasrte;
 					else if (childrte != aliasrte)
@@ -485,7 +511,9 @@ drill_down_to_base_rel(ParseState *pstate, RangeTblEntry *rte,
 								 errmsg("key columns must all come from the same table"),
 								 parser_errposition(pstate, location)));
 
-					child_colnames = lappend(child_colnames, makeString(get_rte_attribute_name(childrte, aliasvar->varattno)));
+					child_colnames = lappend(child_colnames,
+											 makeString(get_rte_attribute_name(childrte,
+																			   aliasvar->varattno)));
 				}
 
 				base_relid = drill_down_to_base_rel(pstate,
@@ -517,16 +545,17 @@ drill_down_to_base_rel(ParseState *pstate, RangeTblEntry *rte,
 	return base_relid;
 }
 
+
 /*
  * validate_and_resolve_derived_rel
- *		Ensures that derived tables uphold virtual foreign key integrity
+ *    Ensures that derived tables uphold virtual foreign key integrity
  */
 static Oid
 validate_and_resolve_derived_rel(ParseState *pstate, Query *query, RangeTblEntry *rte,
 								 List *colnames, List **colnames_out,
 								 bool is_referenced, int location)
 {
-	RangeTblEntry *trunk_rte = NULL;
+	RangeTblEntry *anchor_rte = NULL;
 	List	   *base_colnames = NIL;
 	Index		first_varno = InvalidOid;
 	ListCell   *lc_colname;
@@ -549,10 +578,6 @@ validate_and_resolve_derived_rel(ParseState *pstate, Query *query, RangeTblEntry
 				 errmsg("foreign key joins not supported for these relations"),
 				 parser_errposition(pstate, location)));
 
-	/*
-	 * Determine the trunk_rte, which is the relation in query->targetList the
-	 * colaliases refer to, which must be one and the same.
-	 */
 	foreach(lc_colname, colnames)
 	{
 		char	   *colname = strVal(lfirst(lc_colname));
@@ -606,7 +631,7 @@ validate_and_resolve_derived_rel(ParseState *pstate, Query *query, RangeTblEntry
 		if (first_varno == InvalidOid)
 		{
 			first_varno = var->varno;
-			trunk_rte = rt_fetch(first_varno, query->rtable);
+			anchor_rte = rt_fetch(first_varno, query->rtable);
 		}
 		else if (first_varno != var->varno)
 			ereport(ERROR,
@@ -615,18 +640,12 @@ validate_and_resolve_derived_rel(ParseState *pstate, Query *query, RangeTblEntry
 					 parser_errposition(pstate,
 										exprLocation((Node *) matching_tle->expr))));
 
-		base_colname = get_rte_attribute_name(trunk_rte, var->varattno);
+		base_colname = get_rte_attribute_name(anchor_rte, var->varattno);
 		base_colnames = lappend(base_colnames, makeString(base_colname));
 	}
 
-	Assert(trunk_rte != NULL);
+	Assert(anchor_rte != NULL);
 
-	/*
-	 * If this is the referenced side, we need to ensure it's not filtered,
-	 * and if there are any joins, they must all use the trunk_rte as their
-	 * referencing table, and the referencing columns must not be nullable,
-	 * since otherwise the virtual foreign key integrity would not be upheld.
-	 */
 	if (is_referenced)
 	{
 		if (query->jointree->quals != NULL ||
@@ -641,85 +660,359 @@ validate_and_resolve_derived_rel(ParseState *pstate, Query *query, RangeTblEntry
 		if (list_length(query->rtable) > 1 &&
 			IsA(query->jointree->fromlist, List))
 		{
-			ListCell   *lc;
-
-			foreach(lc, query->jointree->fromlist)
-			{
-				Node	   *node = lfirst(lc);
-				JoinExpr   *join;
-
-				if (!IsA(node, JoinExpr))
-					ereport(ERROR,
-							(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-							 errmsg("unsupported query structure in referenced table"),
-							 parser_errposition(pstate, location)));
-
-				join = castNode(JoinExpr, node);
-				validate_derived_rel_joins(pstate, query, join, trunk_rte, location);
-			}
+			validate_derived_rel_joins(pstate, query, anchor_rte, location);
 		}
 	}
 
-	/*
-	 * Once the trunk_rte is determined, we drill down to the base relation,
-	 * which is then returned.
-	 */
-	return drill_down_to_base_rel(pstate, trunk_rte, colnames_out,
+	return drill_down_to_base_rel(pstate, anchor_rte, colnames_out,
 								  base_colnames, is_referenced, location);
 }
 
+
 /*
  * validate_derived_rel_joins
- *		Ensures that all joins uphold virtual foreign key integrity
+ *     Ensures that all joins uphold virtual foreign key integrity
  */
 static void
-validate_derived_rel_joins(ParseState *pstate, Query *query, JoinExpr *join,
-						   RangeTblEntry *trunk_rte, int location)
+validate_derived_rel_joins(ParseState *pstate, Query *query,
+						   RangeTblEntry *anchor_rte, int location)
 {
+	List	   *A = NIL;		/* Set of relations that preserve all rows */
+	List	   *U = NIL;		/* Set of relations that preserve uniqueness */
+	List	   *fromlist;
+	Node	   *jtnode;
+	RangeTblEntry *first_rte;
+	bool		anchor_self_preserving;
+	ListCell   *lc;
+
+	/* Initialize A and U with the first RTE */
+	Assert(query->rtable != NIL);
+
+	fromlist = castNode(List, query->jointree->fromlist);
+	if (list_length(fromlist) == 0)
+		return;
+
+	jtnode = (Node *) linitial(fromlist);
+
+	if (IsA(jtnode, RangeTblRef))
+	{
+		first_rte = rt_fetch(((RangeTblRef *) jtnode)->rtindex,
+							 query->rtable);
+	}
+	else if (IsA(jtnode, JoinExpr))
+	{
+		Node	   *larg = ((JoinExpr *) jtnode)->larg;
+
+		while (IsA(larg, JoinExpr))
+		{
+			larg = ((JoinExpr *) larg)->larg;
+		}
+
+		if (!IsA(larg, RangeTblRef))
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("unsupported join structure in referenced table"),
+					 parser_errposition(pstate, location)));
+
+		first_rte = rt_fetch(((RangeTblRef *) larg)->rtindex,
+							 query->rtable);
+	}
+	else
+	{
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("unsupported join structure in referenced table"),
+				 parser_errposition(pstate, location)));
+	}
+
+	/*
+	 * Initialize A as a map where first_rte maps to {first_rte}. i.e. A = [
+	 * [first_rte, [first_rte]] ] in list form
+	 */
+	A = list_make1(list_make2(first_rte, list_make1(first_rte)));
+	U = list_make1(first_rte);
+
+	validate_join_node(pstate, query, jtnode, &A, &U, location);
+
+	anchor_self_preserving = false;
+	foreach(lc, A)
+	{
+		List	   *entry = (List *) lfirst(lc);
+		RangeTblEntry *key_rte = (RangeTblEntry *) linitial(entry);
+		List	   *preserved_set = (List *) lsecond(entry);
+
+		if (key_rte == anchor_rte && list_member_ptr(preserved_set, anchor_rte))
+		{
+			anchor_self_preserving = true;
+			break;
+		}
+	}
+
+	if (!anchor_self_preserving)
+		ereport(ERROR,
+				(errcode(ERRCODE_INTEGRITY_CONSTRAINT_VIOLATION),
+				 errmsg("virtual foreign key constraint violation"),
+				 errdetail("The derived table does not preserve all rows from the referenced relation."),
+				 parser_errposition(pstate, location)));
+
+	if (!list_member_ptr(U, anchor_rte))
+		ereport(ERROR,
+				(errcode(ERRCODE_INTEGRITY_CONSTRAINT_VIOLATION),
+				 errmsg("virtual foreign key constraint violation"),
+				 errdetail("The derived table does not preserve uniqueness of the referenced relation's key."),
+				 parser_errposition(pstate, location)));
+}
+
+
+/*
+ * validate_join_node
+ *     Recursively process join nodes and update the A and U sets
+ */
+static void
+validate_join_node(ParseState *pstate, Query *query, Node *node,
+				   List **A, List **U, int location)
+{
+	JoinExpr   *join;
 	ForeignKeyJoinNode *fkjn;
 	RangeTblEntry *referencing_rte;
-	List	   *referencing_attnums;
+	RangeTblEntry *referenced_rte;
+	List	   *referencing_colaliases = NIL;
+	List	   *referenced_colaliases = NIL;
 	ListCell   *lc;
-	List	   *base_colnames = NIL;
-	List	   *colaliases = NIL;
-	Oid			base_relid;
+	RangeTblEntry *existing_rte;
+	RangeTblEntry *new_rte;
+	bool		fk_cols_not_null;
+	bool		fk_cols_unique;
+	List	   *A_inner = NIL;
+	bool		preserves_rows = false;
+	bool		self_preserving = false;
+
+	if (node == NULL || IsA(node, RangeTblRef))
+		return;
+
+	if (!IsA(node, JoinExpr))
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("unsupported join structure in referenced table"),
+				 parser_errposition(pstate, location)));
+
+	join = (JoinExpr *) node;
+
+	validate_join_node(pstate, query, join->larg, A, U, location);
+	validate_join_node(pstate, query, join->rarg, A, U, location);
 
 	if (join->fkJoin == NULL)
+	{
 		ereport(ERROR,
 				(errcode(ERRCODE_INTEGRITY_CONSTRAINT_VIOLATION),
 				 errmsg("virtual foreign key constraint violation"),
 				 errdetail("The derived table contains a join that is not a foreign key join"),
 				 parser_errposition(pstate, location)));
+	}
 
 	fkjn = castNode(ForeignKeyJoinNode, join->fkJoin);
 
-	Assert(query->rtable != NIL);
-	Assert(fkjn->referencingVarno > 0 &&
-		   fkjn->referencingVarno <= list_length(query->rtable) &&
-		   fkjn->referencedVarno > 0 &&
-		   fkjn->referencedVarno <= list_length(query->rtable));
-
 	referencing_rte = rt_fetch(fkjn->referencingVarno, query->rtable);
-	Assert(referencing_rte != NULL);
+	referenced_rte = rt_fetch(fkjn->referencedVarno, query->rtable);
 
-	if (trunk_rte != referencing_rte)
-		ereport(ERROR,
-				(errcode(ERRCODE_INTEGRITY_CONSTRAINT_VIOLATION),
-				 errmsg("virtual foreign key constraint violation"),
-				 errdetail("Referenced columns target a non-referencing table in derived table, violating uniqueness"),
-				 parser_errposition(pstate, location)));
-
-	referencing_attnums = fkjn->referencingAttnums;
-
-	foreach(lc, referencing_attnums)
+	foreach(lc, fkjn->referencingAttnums)
 	{
 		int			attnum = lfirst_int(lc);
 		char	   *colname = get_rte_attribute_name(referencing_rte, attnum);
 
-		colaliases = lappend(colaliases, makeString(colname));
+		referencing_colaliases = lappend(referencing_colaliases, makeString(colname));
 	}
 
-	base_relid = drill_down_to_base_rel(pstate, referencing_rte,
+	foreach(lc, fkjn->referencedAttnums)
+	{
+		int			attnum = lfirst_int(lc);
+		char	   *colname = get_rte_attribute_name(referenced_rte, attnum);
+
+		referenced_colaliases = lappend(referenced_colaliases, makeString(colname));
+	}
+
+	fk_cols_not_null = check_columns_not_nullable(pstate, referencing_rte,
+												  referencing_colaliases, location);
+	fk_cols_unique = check_columns_unique(pstate, referencing_rte,
+										  referencing_colaliases, location);
+
+	if (fkjn->fkdir == FKDIR_FROM)
+	{
+		existing_rte = referencing_rte;
+		new_rte = referenced_rte;
+	}
+	else
+	{
+		existing_rte = referenced_rte;
+		new_rte = referencing_rte;
+	}
+
+	/*
+	 * See if existing_rte is present in A at all, and if it is
+	 * self-preserving.
+	 */
+	foreach(lc, *A)
+	{
+		List	   *entry = (List *) lfirst(lc);
+		RangeTblEntry *key_rte = (RangeTblEntry *) linitial(entry);
+		List	   *preserved_set = (List *) lsecond(entry);
+
+		if (key_rte == existing_rte)
+		{
+			preserves_rows = true;
+			if (list_member_ptr(preserved_set, existing_rte))
+				self_preserving = true;
+			break;
+		}
+	}
+
+	/* Build A_inner only if fk_cols_not_null is true */
+	if (fk_cols_not_null)
+	{
+		if (fkjn->fkdir == FKDIR_TO && self_preserving)
+		{
+			/*
+			 * For each key in A, if existing_rte is in that key's
+			 * preserved_set, we add new_rte to that new set.
+			 */
+			foreach(lc, *A)
+			{
+				List	   *entry = (List *) lfirst(lc);
+				RangeTblEntry *key_rte = (RangeTblEntry *) linitial(entry);
+				List	   *preserved_set = (List *) lsecond(entry);
+
+				if (list_member_ptr(preserved_set, existing_rte))
+				{
+					A_inner = lappend(A_inner,
+									  list_make2(key_rte, list_make1(new_rte)));
+				}
+			}
+			/* Also add new_rte => [new_rte] */
+			A_inner = lappend(A_inner,
+							  list_make2(new_rte, list_make1(new_rte)));
+		}
+		else if (fkjn->fkdir == FKDIR_FROM && preserves_rows)
+		{
+			/*
+			 * For each key in A, new preserved = old preserved ∩
+			 * existing_rte's preserved_set
+			 */
+			List	   *existing_preserved = NIL;
+
+			/* Gather existing_rte's preserved set. */
+			foreach(lc, *A)
+			{
+				List	   *entry = (List *) lfirst(lc);
+				RangeTblEntry *key_rte = (RangeTblEntry *) linitial(entry);
+
+				if (key_rte == existing_rte)
+				{
+					existing_preserved = (List *) lsecond(entry);
+					break;
+				}
+			}
+
+			foreach(lc, *A)
+			{
+				List	   *entry = (List *) lfirst(lc);
+				RangeTblEntry *key_rte = (RangeTblEntry *) linitial(entry);
+				List	   *preserved_set = (List *) lsecond(entry);
+				List	   *new_preserved = NIL;
+				ListCell   *lc2;
+
+				foreach(lc2, preserved_set)
+				{
+					RangeTblEntry *preserved_rte = lfirst(lc2);
+
+					if (list_member_ptr(existing_preserved, preserved_rte))
+						new_preserved = lappend(new_preserved, preserved_rte);
+				}
+
+				A_inner = lappend(A_inner,
+								  list_make2(key_rte, new_preserved));
+			}
+
+			/* new_rte => copy of existing_preserved */
+			A_inner = lappend(A_inner,
+							  list_make2(new_rte, list_copy(existing_preserved)));
+		}
+	}
+
+	/*
+	 * Now we do the final merges into *A* based on join type.
+	 */
+	if (join->jointype == JOIN_INNER)
+	{
+		*A = A_inner;
+	}
+	else if (join->jointype == JOIN_LEFT)
+	{
+		*A = map_union(*A, A_inner);
+	}
+	else if (join->jointype == JOIN_RIGHT)
+	{
+		List	   *extra = list_make1(list_make2(new_rte, list_make1(new_rte)));
+		List	   *temp = map_union(A_inner, extra);
+
+		*A = temp;
+	}
+	else if (join->jointype == JOIN_FULL)
+	{
+		/*
+		 * We'll do *A = map_union(*A, A_inner), then *A = map_union(*A, {
+		 * new_rte: [new_rte] })
+		 */
+		List	   *temp = map_union(*A, A_inner);
+		List	   *extra = list_make1(list_make2(new_rte, list_make1(new_rte)));
+
+		*A = map_union(temp, extra);
+
+	}
+
+	/*
+	 * Now update *U* based on direction & uniqueness, matching the Python
+	 * logic.
+	 */
+	if (fkjn->fkdir == FKDIR_FROM)
+	{
+		if (list_member_ptr(*U, existing_rte) && fk_cols_unique)
+		{
+			*U = lappend(*U, new_rte);
+		}
+	}
+	else
+	{
+		if (list_member_ptr(*U, existing_rte))
+		{
+			if (fk_cols_unique)
+				*U = lappend(*U, new_rte);
+			else
+				*U = list_make1(new_rte);
+		}
+		else if (!fk_cols_unique)
+		{
+			*U = NIL;
+		}
+	}
+
+	dump_A_list(*A, new_rte);
+	dump_U_list(*U, new_rte);
+}
+
+
+/*
+ * check_columns_not_nullable
+ *    Check that all specified columns in the relation are NOT NULL
+ */
+static bool
+check_columns_not_nullable(ParseState *pstate, RangeTblEntry *rte,
+						   List *colaliases, int location)
+{
+	List	   *base_colnames = NIL;
+	Oid			base_relid;
+	ListCell   *lc;
+
+	base_relid = drill_down_to_base_rel(pstate, rte,
 										&base_colnames, colaliases, false,
 										location);
 
@@ -746,12 +1039,311 @@ validate_derived_rel_joins(ParseState *pstate, Query *query, JoinExpr *join,
 		attr = (Form_pg_attribute) GETSTRUCT(tuple);
 
 		if (!attr->attnotnull)
-			ereport(ERROR,
-					(errcode(ERRCODE_INTEGRITY_CONSTRAINT_VIOLATION),
-					 errmsg("virtual foreign key constraint violation"),
-					 errdetail("Nullable columns in derived table's referencing relation violate referential integrity"),
-					 parser_errposition(pstate, location)));
+		{
+			ReleaseSysCache(tuple);
+			return false;
+		}
 
 		ReleaseSysCache(tuple);
 	}
+
+	return true;
 }
+
+
+/*
+ * check_columns_unique
+ *    Check if there is a UNIQUE constraint on the specified columns
+ */
+static bool
+check_columns_unique(ParseState *pstate, RangeTblEntry *rte,
+					 List *colaliases, int location)
+{
+	List	   *base_colnames = NIL;
+	Oid			base_relid;
+	Relation	rel;
+	SysScanDesc scan;
+	ScanKeyData skey[1];
+	HeapTuple	htup;
+	bool		found = false;
+
+	base_relid = drill_down_to_base_rel(pstate, rte,
+										&base_colnames, colaliases, false,
+										location);
+
+	rel = table_open(ConstraintRelationId, AccessShareLock);
+
+	ScanKeyInit(&skey[0],
+				Anum_pg_constraint_conrelid,
+				BTEqualStrategyNumber, F_OIDEQ,
+				ObjectIdGetDatum(base_relid));
+
+	scan = systable_beginscan(rel, ConstraintRelidTypidNameIndexId, true,
+							  NULL, 1, skey);
+
+	while (HeapTupleIsValid(htup = systable_getnext(scan)))
+	{
+		Form_pg_constraint con = (Form_pg_constraint) GETSTRUCT(htup);
+		Datum		conkey_datum;
+		bool		conkey_isnull;
+		ArrayType  *conkey_arr;
+		int16	   *conkey;
+		int			nkeys;
+		List	   *unique_colnames = NIL;
+		ListCell   *lc;
+		bool		all_cols_match = true;
+		int			i;
+
+		if (con->contype != CONSTRAINT_PRIMARY &&
+			con->contype != CONSTRAINT_UNIQUE)
+			continue;
+
+		conkey_datum = SysCacheGetAttr(CONSTROID, htup,
+									   Anum_pg_constraint_conkey,
+									   &conkey_isnull);
+		if (conkey_isnull)
+			continue;
+
+		conkey_arr = DatumGetArrayTypeP(conkey_datum);
+		conkey = (int16 *) ARR_DATA_PTR(conkey_arr);
+		nkeys = ArrayGetNItems(ARR_NDIM(conkey_arr), ARR_DIMS(conkey_arr));
+
+		if (nkeys != list_length(base_colnames))
+			continue;
+
+		for (i = 0; i < nkeys; i++)
+		{
+			char	   *colname = get_attname(base_relid, conkey[i], false);
+
+			unique_colnames = lappend(unique_colnames, makeString(colname));
+		}
+
+		foreach(lc, base_colnames)
+		{
+			char	   *colname = strVal(lfirst(lc));
+			ListCell   *lc2;
+			bool		col_found = false;
+
+			foreach(lc2, unique_colnames)
+			{
+				if (strcmp(colname, strVal(lfirst(lc2))) == 0)
+				{
+					col_found = true;
+					break;
+				}
+			}
+
+			if (!col_found)
+			{
+				all_cols_match = false;
+				break;
+			}
+		}
+
+		if (all_cols_match)
+		{
+			found = true;
+			list_free_deep(unique_colnames);
+			break;
+		}
+
+		list_free_deep(unique_colnames);
+	}
+
+	systable_endscan(scan);
+	table_close(rel, AccessShareLock);
+
+	return found;
+}
+
+
+/* ------------------------------------------------------------------------
+ *  Dictionary-union helper routines for merges of A
+ * ------------------------------------------------------------------------
+ */
+
+/*
+ * map_union
+ *
+ * Perform a "dictionary union" of oldA and A_inner, but for each key that
+ * appears in both, we do a *set union* of the second element (the preserved
+ * list), instead of overwriting. This ensures that if oldA had t3 : { t1, t3 }
+ * and A_inner has t3 : { t1 }, final t3 remains { t1, t3 } ∪ { t1 } = { t1, t3 }.
+ */
+static List *
+map_union(List *oldA, List *A_inner)
+{
+	List	   *result = NIL;
+	ListCell   *lc;
+
+	/* 1) Copy all entries from oldA into result (shallow copy of lists). */
+	foreach(lc, oldA)
+	{
+		List	   *entry = (List *) lfirst(lc);
+		RangeTblEntry *key_rte = (RangeTblEntry *) linitial(entry);
+		List	   *old_vals = (List *) lsecond(entry);
+
+		/* Copy old_vals so we can modify it if needed. */
+		result = lappend(result,
+						 list_make2(key_rte, list_copy(old_vals)));
+	}
+
+	/*
+	 * 2) For each (key, new_vals) in A_inner, union it into result if key
+	 * exists.
+	 */
+	foreach(lc, A_inner)
+	{
+		List	   *entry = (List *) lfirst(lc);
+		RangeTblEntry *key_rte = (RangeTblEntry *) linitial(entry);
+		List	   *new_vals = (List *) lsecond(entry);
+		bool		found_key = false;
+
+		for (ListCell *lc2 = list_head(result); lc2; lc2 = lnext(result, lc2))
+		{
+			List	   *res_entry = (List *) lfirst(lc2);
+			RangeTblEntry *res_key = (RangeTblEntry *) linitial(res_entry);
+			List	   *res_vals = (List *) lsecond(res_entry);
+
+			if (res_key == key_rte)
+			{
+				/*
+				 * Merge sets: res_vals = res_vals ∪ new_vals by appending
+				 * only those new_vals not in res_vals.
+				 */
+				ListCell   *lcv;
+
+				foreach(lcv, new_vals)
+				{
+					RangeTblEntry *nv = (RangeTblEntry *) lfirst(lcv);
+
+					if (!list_member_ptr(res_vals, nv))
+						res_vals = lappend(res_vals, nv);
+				}
+				lsecond(res_entry) = res_vals;
+				found_key = true;
+				break;
+			}
+		}
+
+		if (!found_key)
+		{
+			/*
+			 * key_rte not in result, so just append [key_rte, copy(new_vals)]
+			 */
+			result = lappend(result,
+							 list_make2(key_rte, list_copy(new_vals)));
+		}
+	}
+
+	return result;
+}
+
+/* ------------------------------------------------------------------------
+ *  Helper routines to show A and U using relation aliases
+ * ------------------------------------------------------------------------
+ */
+
+/*
+ * rte_aliasname
+ *    Returns the best textual name for an RTE: alias if present, else
+ *    the base rel name, else "<unknown>".
+ */
+static const char *
+rte_aliasname(RangeTblEntry *rte)
+{
+	if (rte->eref && rte->eref->aliasname)
+		return rte->eref->aliasname;
+	else if (rte->alias && rte->alias->aliasname)
+		return rte->alias->aliasname;
+	else if (rte->relid != InvalidOid)
+	{
+		const char *relname = get_rel_name(rte->relid);
+
+		if (relname)
+			return relname;
+	}
+	return "<unknown>";
+}
+
+#ifdef FKJOINS_DEBUG
+/*
+ * dump_A_list
+ *    Print A in dictionary style, e.g.:
+ *    { t1: { t2 }, t2: { t2 }, t3: { t3, t2 } }
+ *
+ *    Each entry in A is [ key_rte, preserved_list ].
+ */
+static void
+dump_A_list(List *A, RangeTblEntry *new_rte)
+{
+	StringInfoData buf;
+	char	   *result;
+
+	initStringInfo(&buf);
+
+	appendStringInfoChar(&buf, '{');
+
+	for (int i = 0; i < list_length(A); i++)
+	{
+		List	   *entry = (List *) list_nth(A, i);
+		RangeTblEntry *key_rte = (RangeTblEntry *) linitial(entry);
+		List	   *preservedSet = (List *) lsecond(entry);
+
+		if (i > 0)
+			appendStringInfoString(&buf, ", ");
+
+		appendStringInfo(&buf, "%s: {", rte_aliasname(key_rte));
+
+		for (int j = 0; j < list_length(preservedSet); j++)
+		{
+			RangeTblEntry *elt = list_nth(preservedSet, j);
+
+			if (j > 0)
+				appendStringInfoString(&buf, ", ");
+			appendStringInfoString(&buf, rte_aliasname(elt));
+		}
+
+		appendStringInfoChar(&buf, '}');
+	}
+
+	appendStringInfoChar(&buf, '}');
+	result = pstrdup(buf.data);
+	pfree(buf.data);
+
+	elog(NOTICE, "%s A => %s", rte_aliasname(new_rte), result);
+	pfree(result);
+}
+
+/*
+ * dump_U_list
+ *    Print U as a set, e.g.:
+ *    { t1, t2, t3 }
+ */
+static void
+dump_U_list(List *U, RangeTblEntry *new_rte)
+{
+	StringInfoData buf;
+	char	   *result;
+
+	initStringInfo(&buf);
+
+	appendStringInfoChar(&buf, '{');
+
+	for (int i = 0; i < list_length(U); i++)
+	{
+		RangeTblEntry *elt = (RangeTblEntry *) list_nth(U, i);
+
+		if (i > 0)
+			appendStringInfoString(&buf, ", ");
+		appendStringInfoString(&buf, rte_aliasname(elt));
+	}
+
+	appendStringInfoChar(&buf, '}');
+	result = pstrdup(buf.data);
+	pfree(buf.data);
+
+	elog(NOTICE, "%s U => %s", rte_aliasname(new_rte), result);
+	pfree(result);
+}
+#endif
