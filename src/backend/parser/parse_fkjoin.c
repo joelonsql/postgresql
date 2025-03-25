@@ -41,12 +41,6 @@ static char *column_list_to_string(const List *columns);
 static Oid	drill_down_to_base_rel(ParseState *pstate, RangeTblEntry *rte,
 								   List **colnames_out, List *colnames,
 								   int location);
-static Oid	validate_and_resolve_derived_rel(ParseState *pstate, Query *query,
-											 RangeTblEntry *rte,
-											 List *colnames,
-											 List **colnames_out,
-											 int location);
-
 void
 transformAndValidateForeignKeyJoin(ParseState *pstate, JoinExpr *join,
 								   ParseNamespaceItem *r_nsitem,
@@ -428,14 +422,14 @@ drill_down_to_base_rel(ParseState *pstate, RangeTblEntry *rte,
 				{
 					char	   *colname = strVal(lfirst(lc_col));
 					int			colpos = 0;
-					bool		found = false;
+					int			matches = 0;
 					ListCell   *lc_alias;
 					Var		   *aliasvar;
 					RangeTblEntry *aliasrte;
 
 					/*
 					 * Locate the requested column in the join's output
-					 * aliases
+					 * aliases and check for ambiguity at the same time
 					 */
 					foreach(lc_alias, rte->eref->colnames)
 					{
@@ -443,16 +437,22 @@ drill_down_to_base_rel(ParseState *pstate, RangeTblEntry *rte,
 
 						if (strcmp(aliasname, colname) == 0)
 						{
-							found = true;
-							break;
+							if (matches == 0)	/* First match */
+								colpos = foreach_current_index(lc_alias);
+							matches++;
 						}
-						colpos++;
 					}
 
-					if (!found)
+					if (matches == 0)
 						ereport(ERROR,
 								(errcode(ERRCODE_UNDEFINED_COLUMN),
 								 errmsg("column reference \"%s\" not found", colname),
+								 parser_errposition(pstate, location)));
+
+					if (matches > 1)
+						ereport(ERROR,
+								(errcode(ERRCODE_AMBIGUOUS_COLUMN),
+								 errmsg("column reference \"%s\" is ambiguous", colname),
 								 parser_errposition(pstate, location)));
 
 					aliasnode = list_nth(rte->joinaliasvars, colpos);
@@ -496,123 +496,110 @@ drill_down_to_base_rel(ParseState *pstate, RangeTblEntry *rte,
 	}
 
 	if (query)
-		base_relid = validate_and_resolve_derived_rel(pstate, query,
-													  rte,
-													  colnames,
-													  colnames_out,
-													  location);
-
-	return base_relid;
-}
-
-/*
- * validate_and_resolve_derived_rel
- *		Ensures that derived tables uphold virtual foreign key integrity
- */
-static Oid
-validate_and_resolve_derived_rel(ParseState *pstate, Query *query, RangeTblEntry *rte,
-								 List *colnames, List **colnames_out,
-								 int location)
-{
-	RangeTblEntry *trunk_rte = NULL;
-	List	   *base_colnames = NIL;
-	Index		first_varno = InvalidOid;
-	ListCell   *lc_colname;
-
-	if (query->setOperations != NULL)
-		ereport(ERROR,
-				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-				 errmsg("foreign key joins involving set operations are not supported"),
-				 parser_errposition(pstate, location)));
-
-	/* XXX: Overly aggressive disallowing */
-	if (query->commandType != CMD_SELECT ||
-		query->groupClause ||
-		query->distinctClause ||
-		query->groupingSets ||
-		query->hasTargetSRFs ||
-		query->havingQual)
-		ereport(ERROR,
-				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-				 errmsg("foreign key joins not supported for these relations"),
-				 parser_errposition(pstate, location)));
-
-	/*
-	 * Determine the trunk_rte, which is the relation in query->targetList the
-	 * colaliases refer to, which must be one and the same.
-	 */
-	foreach(lc_colname, colnames)
 	{
-		char	   *colname = strVal(lfirst(lc_colname));
-		TargetEntry *matching_tle = NULL;
-		int			matches = 0;
-		Var		   *var;
-		char	   *base_colname;
-		ListCell   *lc_tle,
-				   *lc_alias;
+		RangeTblEntry *trunk_rte = NULL;
+		List	   *base_colnames = NIL;
+		Index		first_varno = InvalidOid;
+		ListCell   *lc_colname;
 
-		lc_alias = list_head(rte->eref->colnames);
-
-		foreach(lc_tle, query->targetList)
-		{
-			TargetEntry *tle = (TargetEntry *) lfirst(lc_tle);
-
-			if (tle->resjunk)
-				continue;
-
-			if (strcmp(strVal(lfirst(lc_alias)), colname) == 0)
-			{
-				matches++;
-				matching_tle = tle;
-			}
-
-			lc_alias = lnext(rte->eref->colnames, lc_alias);
-		}
-
-		if (matches == 0)
-			ereport(ERROR,
-					(errcode(ERRCODE_UNDEFINED_COLUMN),
-					 errmsg("column reference \"%s\" not found", colname),
-					 parser_errposition(pstate, location)));
-		else if (matches > 1)
-			ereport(ERROR,
-					(errcode(ERRCODE_AMBIGUOUS_COLUMN),
-					 errmsg("column reference \"%s\" is ambiguous", colname),
-					 parser_errposition(pstate, location)));
-
-		Assert(matching_tle != NULL);
-
-		if (!IsA(matching_tle->expr, Var))
+		if (query->setOperations != NULL)
 			ereport(ERROR,
 					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-					 errmsg("target entry \"%s\" is an expression, not a direct column reference",
-							matching_tle->resname),
+					 errmsg("foreign key joins involving set operations are not supported"),
 					 parser_errposition(pstate, location)));
 
-		var = (Var *) matching_tle->expr;
-
-		if (first_varno == InvalidOid)
-		{
-			first_varno = var->varno;
-			trunk_rte = rt_fetch(first_varno, query->rtable);
-		}
-		else if (first_varno != var->varno)
+		/* XXX: Overly aggressive disallowing */
+		if (query->commandType != CMD_SELECT ||
+			query->groupClause ||
+			query->distinctClause ||
+			query->groupingSets ||
+			query->hasTargetSRFs ||
+			query->havingQual)
 			ereport(ERROR,
-					(errcode(ERRCODE_UNDEFINED_TABLE),
-					 errmsg("key columns must all come from the same table"),
-					 parser_errposition(pstate,
-										exprLocation((Node *) matching_tle->expr))));
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("foreign key joins not supported for these relations"),
+					 parser_errposition(pstate, location)));
 
-		base_colname = get_rte_attribute_name(trunk_rte, var->varattno);
-		base_colnames = lappend(base_colnames, makeString(base_colname));
+		/*
+		 * Determine the trunk_rte, which is the relation in query->targetList
+		 * the colaliases refer to, which must be one and the same.
+		 */
+		foreach(lc_colname, colnames)
+		{
+			char	   *colname = strVal(lfirst(lc_colname));
+			TargetEntry *matching_tle = NULL;
+			int			matches = 0;
+			Var		   *var;
+			char	   *base_colname;
+			ListCell   *lc_tle,
+					   *lc_alias;
+
+			lc_alias = list_head(rte->eref->colnames);
+
+			foreach(lc_tle, query->targetList)
+			{
+				TargetEntry *tle = (TargetEntry *) lfirst(lc_tle);
+
+				if (tle->resjunk)
+					continue;
+
+				if (strcmp(strVal(lfirst(lc_alias)), colname) == 0)
+				{
+					matches++;
+					matching_tle = tle;
+				}
+
+				lc_alias = lnext(rte->eref->colnames, lc_alias);
+			}
+
+			if (matches == 0)
+				ereport(ERROR,
+						(errcode(ERRCODE_UNDEFINED_COLUMN),
+						 errmsg("column reference \"%s\" not found", colname),
+						 parser_errposition(pstate, location)));
+			else if (matches > 1)
+				ereport(ERROR,
+						(errcode(ERRCODE_AMBIGUOUS_COLUMN),
+						 errmsg("column reference \"%s\" is ambiguous", colname),
+						 parser_errposition(pstate, location)));
+
+			Assert(matching_tle != NULL);
+
+			if (!IsA(matching_tle->expr, Var))
+				ereport(ERROR,
+						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+						 errmsg("target entry \"%s\" is an expression, not a direct column reference",
+								matching_tle->resname),
+						 parser_errposition(pstate, location)));
+
+			var = (Var *) matching_tle->expr;
+
+			if (first_varno == InvalidOid)
+			{
+				first_varno = var->varno;
+				trunk_rte = rt_fetch(first_varno, query->rtable);
+			}
+			else if (first_varno != var->varno)
+				ereport(ERROR,
+						(errcode(ERRCODE_UNDEFINED_TABLE),
+						 errmsg("key columns must all come from the same table"),
+						 parser_errposition(pstate,
+											exprLocation((Node *) matching_tle->expr))));
+
+			base_colname = get_rte_attribute_name(trunk_rte, var->varattno);
+			base_colnames = lappend(base_colnames, makeString(base_colname));
+		}
+
+		Assert(trunk_rte != NULL);
+
+		/*
+		 * Once the trunk_rte is determined, we drill down to the base
+		 * relation, which is then returned.
+		 */
+		base_relid = drill_down_to_base_rel(pstate, trunk_rte, colnames_out,
+											base_colnames, location);
+
 	}
 
-	Assert(trunk_rte != NULL);
-
-	/*
-	 * Once the trunk_rte is determined, we drill down to the base relation,
-	 * which is then returned.
-	 */
-	return drill_down_to_base_rel(pstate, trunk_rte, colnames_out,
-								  base_colnames, location);
+	return base_relid;
 }
