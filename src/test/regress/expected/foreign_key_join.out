@@ -160,7 +160,7 @@ ERROR:  there is no foreign key constraint on table "t1" (c1) referencing table 
 LINE 1: SELECT * FROM t1 JOIN t2 KEY (c3) <- t1 (c1);
                                  ^
 SELECT * FROM t1 JOIN t2 KEY (c1) <- t1 (c3); -- error
-ERROR:  there is no foreign key constraint on table "t1" (c3) referencing table "t2" (c1)
+ERROR:  column "c3" does not exist in referencing table
 LINE 1: SELECT * FROM t1 JOIN t2 KEY (c1) <- t1 (c3);
                                  ^
 SELECT * FROM t1 JOIN t2 KEY (c3) <- t1 (c2); -- error
@@ -1089,7 +1089,7 @@ ERROR:  foreign key joins involving this type of relation are not supported
 LINE 1: SELECT * FROM t1 JOIN t2() KEY (c3, c4) -> t1 (c1, c2);
                                    ^
 SELECT * FROM t1 JOIN t2 KEY (c3, c4) -> t1 (c1, c5);
-ERROR:  there is no foreign key constraint on table "t2" (c3, c4) referencing table "t1" (c1, c5)
+ERROR:  column "c5" does not exist in referenced table
 LINE 1: SELECT * FROM t1 JOIN t2 KEY (c3, c4) -> t1 (c1, c5);
                                  ^
 DROP VIEW v1, v2;
@@ -1107,7 +1107,7 @@ ERROR:  there is no foreign key constraint on table "t2" (c3, c4) referencing ta
 LINE 1: SELECT * FROM v1 JOIN t2 KEY (c3, c4) -> v1 (c1_1, c1_2);
                                  ^
 SELECT * FROM v1 JOIN t2 KEY (c3, c4) -> v1 (c1_1, nonexistent);
-ERROR:  column reference "nonexistent" not found
+ERROR:  column "nonexistent" does not exist in referenced table
 LINE 1: SELECT * FROM v1 JOIN t2 KEY (c3, c4) -> v1 (c1_1, nonexiste...
                                  ^
 /*
@@ -1149,7 +1149,7 @@ JOIN
     SELECT * FROM t10
     JOIN t10 AS t10_2 KEY (c23, c24) <- t10 (c25, c26)
 ) AS q1 KEY (c23, c24) -> t1 (c1, c2);
-ERROR:  column reference "c23" is ambiguous
+ERROR:  common column name "c23" appears more than once in referencing table
 LINE 7: ) AS q1 KEY (c23, c24) -> t1 (c1, c2);
                 ^
 SELECT *
@@ -1164,7 +1164,7 @@ JOIN
     FROM t10
     JOIN t10 AS t10_2 KEY (c23, c24) <- t10 (c25, c26)
 ) AS q1 KEY (nonexistent, c24) -> t1 (c1, c2);
-ERROR:  column reference "nonexistent" not found
+ERROR:  column "nonexistent" does not exist in referencing table
 LINE 12: ) AS q1 KEY (nonexistent, c24) -> t1 (c1, c2);
                  ^
 SELECT *
@@ -1186,9 +1186,10 @@ LINE 7:         t10_2.c24
 CREATE MATERIALIZED VIEW mv1 AS
 SELECT c1, c2 FROM t1;
 SELECT * FROM mv1 JOIN t2 KEY (c3, c4) -> mv1 (c1, c2);
-ERROR:  foreign key joins involving relation of type 'm' are not supported
+ERROR:  foreign key joins involving this type of relation are not supported
 LINE 1: SELECT * FROM mv1 JOIN t2 KEY (c3, c4) -> mv1 (c1, c2);
                                   ^
+DETAIL:  This operation is not supported for materialized views.
 DROP MATERIALIZED VIEW mv1;
 --
 -- Test nested foreign keyjoins
@@ -1306,3 +1307,43 @@ JOIN
 ERROR:  there is no foreign key constraint on table "t17" (b_id, b_id2) referencing table "t16" (id2, id)
 LINE 5:     t16 JOIN t17 KEY (b_id, b_id2) -> t16 (id2, id)
                          ^
+--
+-- Test partitioned tables
+--
+CREATE TABLE pt2
+(
+    c3 int not null,
+    c4 int not null,
+    CONSTRAINT pt2_pkey PRIMARY KEY (c3),
+    CONSTRAINT pt2_c3_fkey FOREIGN KEY (c3) REFERENCES t1 (c1)
+) PARTITION BY RANGE (c3);
+CREATE TABLE pt2_1 PARTITION OF pt2 FOR VALUES FROM (1) TO (3);
+CREATE TABLE pt2_2 PARTITION OF pt2 FOR VALUES FROM (3) TO (4);
+CREATE TABLE pt3
+(
+    c5 int not null,
+    c6 int not null,
+    CONSTRAINT pt3_pkey PRIMARY KEY (c5),
+    CONSTRAINT pt3_c5_fkey FOREIGN KEY (c5) REFERENCES pt2 (c3)
+) PARTITION BY RANGE (c5);
+CREATE TABLE pt3_1 PARTITION OF pt3 FOR VALUES FROM (1) TO (3);
+CREATE TABLE pt3_2 PARTITION OF pt3 FOR VALUES FROM (3) TO (4);
+INSERT INTO pt2 (c3, c4) VALUES (1, 100);
+INSERT INTO pt2 (c3, c4) VALUES (3, 300);
+INSERT INTO pt3 (c5, c6) VALUES (1, 1000);
+INSERT INTO pt3 (c5, c6) VALUES (3, 3000);
+SELECT * FROM t1 JOIN pt2 KEY (c3) -> t1 (c1) JOIN pt3 KEY (c5) -> pt2 (c3);
+ c1 | c2 | c3 | c4  | c5 |  c6  
+----+----+----+-----+----+------
+  1 | 10 |  1 | 100 |  1 | 1000
+  3 | 30 |  3 | 300 |  3 | 3000
+(2 rows)
+
+SELECT * FROM t1 JOIN pt2_1 KEY (c3) -> t1 (c1);
+ c1 | c2 | c3 | c4  
+----+----+----+-----
+  1 | 10 |  1 | 100
+(1 row)
+
+DROP TABLE pt3;
+DROP TABLE pt2;

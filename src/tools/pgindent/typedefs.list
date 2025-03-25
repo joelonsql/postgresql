@@ -2373,6 +2373,7 @@ RI_CompareKey
 RI_ConstraintInfo
 RI_QueryHashEntry
 RI_QueryKey
+RTEId
 RTEKind
 RTEPermissionInfo
 RWConflict

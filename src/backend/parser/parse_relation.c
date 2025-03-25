@@ -1551,7 +1551,7 @@ addRangeTableEntry(ParseState *pstate,
 	 */
 	pstate->p_rtable = lappend(pstate->p_rtable, rte);
 
-	if (rte->relkind == 'r')
+	if (rte->relkind == RELKIND_RELATION || rte->relkind == RELKIND_PARTITIONED_TABLE)
 	{
 		/* Create default RTEId for any relation type */
 		RTEId	   *rteid = makeNode(RTEId);
@@ -1570,7 +1570,7 @@ addRangeTableEntry(ParseState *pstate,
 		if (!rel->rd_rel->relrowsecurity)
 			rte->functional_dependencies = list_make2(rteid, rteid);
 	}
-	else if (rte->relkind == 'v')
+	else if (rte->relkind == RELKIND_VIEW)
 	{
 		Query	   *viewquery = get_view_query(rel);
 

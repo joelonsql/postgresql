@@ -1042,10 +1042,10 @@ typedef enum RTEKind
  */
 typedef struct RTEId
 {
-	NodeTag				type;	/* tag identifying this as a node */
-	uint64				fxid;	/* transaction ID when created */
-	Index				baserelindex;	/* base range table index */
-	int					procnumber; /* process ID */
+	NodeTag		type;			/* tag identifying this as a node */
+	uint64		fxid;			/* transaction ID when created */
+	Index		baserelindex;	/* base range table index */
+	int			procnumber;		/* process ID */
 } RTEId;
 
 typedef struct RangeTblEntry
