@@ -33,41 +33,40 @@
 #include "utils/rel.h"
 #include "utils/syscache.h"
 
-static Node *build_fk_join_on_clause(ParseState *pstate, List *referencingVars,
-									 List *referencedVars);
+static Node *build_fk_join_on_clause(ParseState *pstate,
+									 ParseNamespaceColumn *l_nscols, List *l_attnums,
+									 ParseNamespaceColumn *r_nscols, List *r_attnums);
 static Oid	find_foreign_key(Oid referencing_relid, Oid referenced_relid,
 							 List *referencing_cols, List *referenced_cols);
 static char *column_list_to_string(const List *columns);
 static Oid	drill_down_to_base_rel(ParseState *pstate, RangeTblEntry *rte,
-								   List **colnames_out, List *colnames,
+								   List *attnos, List **base_attnums,
 								   int location);
+static Oid	drill_down_to_base_rel_query(ParseState *pstate, Query *query,
+										 List *attnos, List **base_attnums,
+										 int location);
 void
 transformAndValidateForeignKeyJoin(ParseState *pstate, JoinExpr *join,
 								   ParseNamespaceItem *r_nsitem,
 								   List *l_namespace)
 {
 	ForeignKeyClause *fkjn = castNode(ForeignKeyClause, join->fkJoin);
-	List	   *referencingVars = NIL;
-	List	   *referencedVars = NIL;
-	ListCell   *lc,
-			   *rc;
+	ListCell   *lc;
 	RangeTblEntry *referencing_rte,
 			   *referenced_rte;
 	ParseNamespaceItem *referencing_rel,
 			   *referenced_rel,
-			   *other_rel;
+			   *other_rel = NULL;
 	List	   *referencing_cols,
 			   *referenced_cols;
-	List	   *referencing_base_cols = NIL;
-	List	   *referenced_base_cols = NIL;
+	List	   *referencing_base_cols;
+	List	   *referenced_base_cols;
 	Oid			fkoid;
 	ForeignKeyJoinNode *fkjn_node;
 	List	   *referencing_attnums = NIL;
 	List	   *referenced_attnums = NIL;
 	Oid			referencing_relid;
 	Oid			referenced_relid;
-
-	other_rel = NULL;
 
 	foreach(lc, l_namespace)
 	{
@@ -114,13 +113,79 @@ transformAndValidateForeignKeyJoin(ParseState *pstate, JoinExpr *join,
 	referencing_rte = rt_fetch(referencing_rel->p_rtindex, pstate->p_rtable);
 	referenced_rte = rt_fetch(referenced_rel->p_rtindex, pstate->p_rtable);
 
+	foreach(lc, referencing_cols)
+	{
+		char	   *ref_colname = strVal(lfirst(lc));
+		List 	   *colnames = referencing_rel->p_names->colnames;
+		ListCell   *col;
+		int			ndx = 0,
+					col_index = -1;
+
+		foreach(col, colnames)
+		{
+			char	   *colname = strVal(lfirst(col));
+
+			if (strcmp(colname, ref_colname) == 0)
+			{
+				if (col_index >= 0)
+					ereport(ERROR,
+							(errcode(ERRCODE_AMBIGUOUS_COLUMN),
+							 errmsg("common column name \"%s\" appears more than once in referencing table",
+									ref_colname),
+							 parser_errposition(pstate, fkjn->location)));
+				col_index = ndx;
+			}
+			ndx++;
+		}
+		if (col_index < 0)
+			ereport(ERROR,
+					(errcode(ERRCODE_UNDEFINED_COLUMN),
+					 errmsg("column \"%s\" does not exist in referencing table",
+							ref_colname),
+					 parser_errposition(pstate, fkjn->location)));
+		referencing_attnums = lappend_int(referencing_attnums, col_index + 1);
+	}
+
+	foreach(lc, referenced_cols)
+	{
+		char	   *ref_colname = strVal(lfirst(lc));
+		List 	   *colnames = referenced_rel->p_names->colnames;
+		ListCell   *col;
+		int			ndx = 0,
+					col_index = -1;
+
+		foreach(col, colnames)
+		{
+			char	   *colname = strVal(lfirst(col));
+
+			if (strcmp(colname, ref_colname) == 0)
+			{
+				if (col_index >= 0)
+					ereport(ERROR,
+							(errcode(ERRCODE_AMBIGUOUS_COLUMN),
+							 errmsg("common column name \"%s\" appears more than once in referenced table",
+									ref_colname),
+							 parser_errposition(pstate, fkjn->location)));
+				col_index = ndx;
+			}
+			ndx++;
+		}
+		if (col_index < 0)
+			ereport(ERROR,
+					(errcode(ERRCODE_UNDEFINED_COLUMN),
+					 errmsg("column \"%s\" does not exist in referenced table",
+							ref_colname),
+							parser_errposition(pstate, fkjn->location)));
+		referenced_attnums = lappend_int(referenced_attnums, col_index + 1);
+	}
+
 	referencing_relid = drill_down_to_base_rel(pstate, referencing_rte,
+											   referencing_attnums,
 											   &referencing_base_cols,
-											   referencing_cols,
 											   fkjn->location);
 	referenced_relid = drill_down_to_base_rel(pstate, referenced_rte,
+											  referenced_attnums,
 											  &referenced_base_cols,
-											  referenced_cols,
 											  fkjn->location);
 
 	Assert(referencing_relid != InvalidOid && referenced_relid != InvalidOid);
@@ -142,28 +207,7 @@ transformAndValidateForeignKeyJoin(ParseState *pstate, JoinExpr *join,
 						column_list_to_string(referenced_cols)),
 				 parser_errposition(pstate, fkjn->location)));
 
-	forboth(lc, referencing_cols, rc, referenced_cols)
-	{
-		char	   *referencing_col = strVal(lfirst(lc));
-		char	   *referenced_col = strVal(lfirst(rc));
-		Var		   *referencing_var;
-		Var		   *referenced_var;
-
-		referencing_var = (Var *) scanNSItemForColumn(pstate, referencing_rel, 0,
-													  referencing_col, fkjn->location);
-		referenced_var = (Var *) scanNSItemForColumn(pstate, referenced_rel, 0,
-													 referenced_col, fkjn->location);
-
-		referencingVars = lappend(referencingVars, referencing_var);
-		referencedVars = lappend(referencedVars, referenced_var);
-
-		referencing_attnums = lappend_int(referencing_attnums,
-										  referencing_var->varattno);
-		referenced_attnums = lappend_int(referenced_attnums,
-										 referenced_var->varattno);
-	}
-
-	join->quals = build_fk_join_on_clause(pstate, referencingVars, referencedVars);
+	join->quals = build_fk_join_on_clause(pstate, referencing_rel->p_nscolumns, referencing_attnums, referenced_rel->p_nscolumns, referenced_attnums);
 
 	fkjn_node = makeNode(ForeignKeyJoinNode);
 	fkjn_node->fkdir = fkjn->fkdir;
@@ -181,25 +225,40 @@ transformAndValidateForeignKeyJoin(ParseState *pstate, JoinExpr *join,
  *		Constructs the ON clause for the foreign key join
  */
 static Node *
-build_fk_join_on_clause(ParseState *pstate, List *referencingVars,
-						List *referencedVars)
+build_fk_join_on_clause(ParseState *pstate, ParseNamespaceColumn *l_nscols, List *l_attnums,
+						ParseNamespaceColumn *r_nscols, List *r_attnums)
 {
 	Node	   *result;
 	List	   *andargs = NIL;
-	ListCell   *referencingvar,
-			   *referencedvar;
+	ListCell   *lc,
+			   *rc;
 
-	Assert(list_length(referencingVars) == list_length(referencedVars));
+	Assert(list_length(l_attnums) == list_length(r_attnums));
 
-	forboth(referencingvar, referencingVars, referencedvar, referencedVars)
+	forboth(lc, l_attnums, rc, r_attnums)
 	{
-		Var		   *referencing_var = (Var *) lfirst(referencingvar);
-		Var		   *referenced_var = (Var *) lfirst(referencedvar);
+		ParseNamespaceColumn *l_col = &l_nscols[lfirst_int(lc) - 1];
+		ParseNamespaceColumn *r_col = &r_nscols[lfirst_int(rc) - 1];
+		Var		   *l_var,
+				   *r_var;
 		A_Expr	   *e;
 
+		l_var = makeVar(l_col->p_varno,
+						l_col->p_varattno,
+						l_col->p_vartype,
+						l_col->p_vartypmod,
+						l_col->p_varcollid,
+						0);
+		r_var = makeVar(r_col->p_varno,
+						r_col->p_varattno,
+						r_col->p_vartype,
+						r_col->p_vartypmod,
+						r_col->p_varcollid,
+						0);
+
 		e = makeSimpleA_Expr(AEXPR_OP, "=",
-							 (Node *) copyObject(referencing_var),
-							 (Node *) copyObject(referenced_var),
+							 (Node *) copyObject(l_var),
+							 (Node *) copyObject(r_var),
 							 -1);
 
 		andargs = lappend(andargs, e);
@@ -224,25 +283,11 @@ static Oid
 find_foreign_key(Oid referencing_relid, Oid referenced_relid,
 				 List *referencing_cols, List *referenced_cols)
 {
-	int			ncols = list_length(referencing_cols);
 	Relation	rel = table_open(ConstraintRelationId, AccessShareLock);
 	SysScanDesc scan;
 	ScanKeyData skey[1];
 	HeapTuple	tup;
 	Oid			fkoid = InvalidOid;
-	int			i,
-				j;
-	AttrNumber *ref_attnums = palloc(sizeof(AttrNumber) * ncols);
-	AttrNumber *refd_attnums = palloc(sizeof(AttrNumber) * ncols);
-	ListCell   *lc;
-	int			pos = 0;
-
-	/* Convert referencing and referenced column lists to arrays of attnums */
-	foreach(lc, referencing_cols)
-		ref_attnums[pos++] = get_attnum(referencing_relid, strVal(lfirst(lc)));
-	pos = 0;
-	foreach(lc, referenced_cols)
-		refd_attnums[pos++] = get_attnum(referenced_relid, strVal(lfirst(lc)));
 
 	ScanKeyInit(&skey[0],
 				Anum_pg_constraint_conrelid,
@@ -276,7 +321,7 @@ find_foreign_key(Oid referencing_relid, Oid referenced_relid,
 		confkey_arr = DatumGetArrayTypeP(confkey_datum);
 		nkeys = ArrayGetNItems(ARR_NDIM(conkey_arr), ARR_DIMS(conkey_arr));
 		if (nkeys != ArrayGetNItems(ARR_NDIM(confkey_arr), ARR_DIMS(confkey_arr)) ||
-			nkeys != ncols)
+			nkeys != list_length(referencing_cols))
 			continue;
 
 		conkey = (int16 *) ARR_DATA_PTR(conkey_arr);
@@ -284,14 +329,16 @@ find_foreign_key(Oid referencing_relid, Oid referenced_relid,
 
 		/*
 		 * Check if each fk pair (conkey[i], confkey[i]) matches some
-		 * (ref_attnums[j], refd_attnums[j])
+		 * (referencing_cols[j], referenced_cols[j])
 		 */
-		for (i = 0; i < nkeys && found; i++)
+		for (int i = 0; i < nkeys && found; i++)
 		{
 			bool		match = false;
+			ListCell   *lc1,
+					   *lc2;
 
-			for (j = 0; j < ncols && !match; j++)
-				if (ref_attnums[j] == conkey[i] && refd_attnums[j] == confkey[i])
+			forboth(lc1, referencing_cols, lc2, referenced_cols)
+				if (lfirst_int(lc1) == conkey[i] && lfirst_int(lc2) == confkey[i])
 					match = true;
 
 			if (!match)
@@ -307,8 +354,6 @@ find_foreign_key(Oid referencing_relid, Oid referenced_relid,
 
 	systable_endscan(scan);
 	table_close(rel, AccessShareLock);
-	pfree(ref_attnums);
-	pfree(refd_attnums);
 
 	return fkoid;
 }
@@ -348,11 +393,10 @@ column_list_to_string(const List *columns)
  */
 static Oid
 drill_down_to_base_rel(ParseState *pstate, RangeTblEntry *rte,
-					   List **colnames_out, List *colnames,
+					   List *attnums, List **base_attnums,
 					   int location)
 {
 	Oid			base_relid;
-	Query	   *query = NULL;
 
 	switch (rte->rtekind)
 	{
@@ -363,19 +407,24 @@ drill_down_to_base_rel(ParseState *pstate, RangeTblEntry *rte,
 				switch (rel->rd_rel->relkind)
 				{
 					case RELKIND_VIEW:
-						query = get_view_query(rel);
+						base_relid = drill_down_to_base_rel_query(pstate,
+																  get_view_query(rel),
+																  attnums,
+																  base_attnums,
+																  location);
 						break;
 
 					case RELKIND_RELATION:
-						*colnames_out = colnames;
+					case RELKIND_PARTITIONED_TABLE:
 						base_relid = rte->relid;
+						*base_attnums = attnums;
 						break;
 
 					default:
 						ereport(ERROR,
 								(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-								 errmsg("foreign key joins involving relation of type '%c' are not supported",
-										rel->rd_rel->relkind),
+								 errmsg("foreign key joins involving this type of relation are not supported"),
+								 errdetail_relkind_not_supported(rel->rd_rel->relkind),
 								 parser_errposition(pstate, location)));
 				}
 
@@ -384,7 +433,9 @@ drill_down_to_base_rel(ParseState *pstate, RangeTblEntry *rte,
 			break;
 
 		case RTE_SUBQUERY:
-			query = rte->subquery;
+			base_relid = drill_down_to_base_rel_query(pstate, rte->subquery,
+													  attnums, base_attnums,
+													  location);
 			break;
 
 		case RTE_CTE:
@@ -400,91 +451,54 @@ drill_down_to_base_rel(ParseState *pstate, RangeTblEntry *rte,
 							 errmsg("foreign key joins involving this type of relation are not supported"),
 							 parser_errposition(pstate, location)));
 
-				query = castNode(Query, cte->ctequery);
+				base_relid = drill_down_to_base_rel_query(pstate,
+														  castNode(Query, cte->ctequery),
+														  attnums,
+														  base_attnums,
+														  location);
 			}
 			break;
 
 		case RTE_JOIN:
 			{
-				ListCell   *lc_col;
-				Node	   *aliasnode;
-				RangeTblEntry *childrte = NULL;
-				List	   *child_colnames = NIL;
+				int			next_rtindex = 0;
+				List	   *next_attnums = NIL;
+				ListCell   *lc;
 
-				/*
-				 * For each requested column, find its position in the join
-				 * RTE's output (erefname), then locate the corresponding Var
-				 * in joinaliasvars. This Var references one of the input
-				 * relations of the join. We then recursively resolve that
-				 * down to a base rel.
-				 */
-				foreach(lc_col, colnames)
+				foreach(lc, attnums)
 				{
-					char	   *colname = strVal(lfirst(lc_col));
-					int			colpos = 0;
-					int			matches = 0;
-					ListCell   *lc_alias;
-					Var		   *aliasvar;
-					RangeTblEntry *aliasrte;
+					int			attno = lfirst_int(lc);
+					Node	   *node;
+					Var 	   *var;
 
-					/*
-					 * Locate the requested column in the join's output
-					 * aliases and check for ambiguity at the same time
-					 */
-					foreach(lc_alias, rte->eref->colnames)
-					{
-						char	   *aliasname = strVal(lfirst(lc_alias));
-
-						if (strcmp(aliasname, colname) == 0)
-						{
-							if (matches == 0)	/* First match */
-								colpos = foreach_current_index(lc_alias);
-							matches++;
-						}
-					}
-
-					if (matches == 0)
-						ereport(ERROR,
-								(errcode(ERRCODE_UNDEFINED_COLUMN),
-								 errmsg("column reference \"%s\" not found", colname),
-								 parser_errposition(pstate, location)));
-
-					if (matches > 1)
-						ereport(ERROR,
-								(errcode(ERRCODE_AMBIGUOUS_COLUMN),
-								 errmsg("column reference \"%s\" is ambiguous", colname),
-								 parser_errposition(pstate, location)));
-
-					aliasnode = list_nth(rte->joinaliasvars, colpos);
-					if (!IsA(aliasnode, Var))
+					node = list_nth(rte->joinaliasvars, attno - 1);
+					if (!IsA(node, Var))
 						ereport(ERROR,
 								(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 								 errmsg("foreign key joins require direct column references, found expression"),
 								 parser_errposition(pstate, location)));
 
-					aliasvar = castNode(Var, aliasnode);
-
-					aliasrte = rt_fetch(aliasvar->varno, pstate->p_rtable);
+					var = castNode(Var, node);
 
 					/* Check that all columns map to the same rte */
-					if (childrte == NULL)
-						childrte = aliasrte;
-					else if (childrte != aliasrte)
+					if (next_rtindex == 0)
+						next_rtindex = var->varno;
+					else if (next_rtindex != var->varno)
 						ereport(ERROR,
 								(errcode(ERRCODE_UNDEFINED_TABLE),
 								 errmsg("key columns must all come from the same table"),
 								 parser_errposition(pstate, location)));
 
-					child_colnames = lappend(child_colnames, makeString(get_rte_attribute_name(childrte, aliasvar->varattno)));
+					next_attnums = lappend_int(next_attnums, var->varattno);
 				}
 
-				base_relid = drill_down_to_base_rel(pstate,
-													childrte,
-													colnames_out,
-													child_colnames,
-													location);
+				Assert(next_rtindex != 0);
 
-				return base_relid;
+				base_relid = drill_down_to_base_rel(pstate,
+													rt_fetch(next_rtindex, pstate->p_rtable),
+													next_attnums,
+													base_attnums,
+													location);
 			}
 			break;
 
@@ -495,111 +509,72 @@ drill_down_to_base_rel(ParseState *pstate, RangeTblEntry *rte,
 					 parser_errposition(pstate, location)));
 	}
 
-	if (query)
+	return base_relid;
+}
+
+/*
+ * drill_down_to_base_rel_query
+ *		Resolves the base relation from a query
+ */
+static Oid
+drill_down_to_base_rel_query(ParseState *pstate, Query *query,
+							 List *attnums, List **base_attnums,
+							 int location)
+{
+	int			next_rtindex = 0;
+	List	   *next_attnums = NIL;
+	ListCell   *lc;
+
+	if (query->setOperations != NULL)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("foreign key joins involving set operations are not supported"),
+				 parser_errposition(pstate, location)));
+
+	/* XXX: Overly aggressive disallowing */
+	if (query->commandType != CMD_SELECT ||
+		query->groupClause ||
+		query->distinctClause ||
+		query->groupingSets ||
+		query->hasTargetSRFs ||
+		query->havingQual)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("foreign key joins not supported for these relations"),
+				 parser_errposition(pstate, location)));
+
+	foreach(lc, attnums)
 	{
-		RangeTblEntry *trunk_rte = NULL;
-		List	   *base_colnames = NIL;
-		Index		first_varno = InvalidOid;
-		ListCell   *lc_colname;
+		int			attno = lfirst_int(lc);
+		TargetEntry *matching_tle;
+		Var		   *var;
 
-		if (query->setOperations != NULL)
+		matching_tle = list_nth(query->targetList, attno - 1);
+
+		if (!IsA(matching_tle->expr, Var))
 			ereport(ERROR,
 					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-					 errmsg("foreign key joins involving set operations are not supported"),
+					 errmsg("target entry \"%s\" is an expression, not a direct column reference",
+							matching_tle->resname),
 					 parser_errposition(pstate, location)));
 
-		/* XXX: Overly aggressive disallowing */
-		if (query->commandType != CMD_SELECT ||
-			query->groupClause ||
-			query->distinctClause ||
-			query->groupingSets ||
-			query->hasTargetSRFs ||
-			query->havingQual)
+		var = castNode(Var, matching_tle->expr);
+
+		/* Check that all columns map to the same rte */
+		if (next_rtindex == 0)
+			next_rtindex = var->varno;
+		else if (next_rtindex != var->varno)
 			ereport(ERROR,
-					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-					 errmsg("foreign key joins not supported for these relations"),
-					 parser_errposition(pstate, location)));
+					(errcode(ERRCODE_UNDEFINED_TABLE),
+					 errmsg("key columns must all come from the same table"),
+					 parser_errposition(pstate,
+										exprLocation((Node *) matching_tle->expr))));
 
-		/*
-		 * Determine the trunk_rte, which is the relation in query->targetList
-		 * the colaliases refer to, which must be one and the same.
-		 */
-		foreach(lc_colname, colnames)
-		{
-			char	   *colname = strVal(lfirst(lc_colname));
-			TargetEntry *matching_tle = NULL;
-			int			matches = 0;
-			Var		   *var;
-			char	   *base_colname;
-			ListCell   *lc_tle,
-					   *lc_alias;
-
-			lc_alias = list_head(rte->eref->colnames);
-
-			foreach(lc_tle, query->targetList)
-			{
-				TargetEntry *tle = (TargetEntry *) lfirst(lc_tle);
-
-				if (tle->resjunk)
-					continue;
-
-				if (strcmp(strVal(lfirst(lc_alias)), colname) == 0)
-				{
-					matches++;
-					matching_tle = tle;
-				}
-
-				lc_alias = lnext(rte->eref->colnames, lc_alias);
-			}
-
-			if (matches == 0)
-				ereport(ERROR,
-						(errcode(ERRCODE_UNDEFINED_COLUMN),
-						 errmsg("column reference \"%s\" not found", colname),
-						 parser_errposition(pstate, location)));
-			else if (matches > 1)
-				ereport(ERROR,
-						(errcode(ERRCODE_AMBIGUOUS_COLUMN),
-						 errmsg("column reference \"%s\" is ambiguous", colname),
-						 parser_errposition(pstate, location)));
-
-			Assert(matching_tle != NULL);
-
-			if (!IsA(matching_tle->expr, Var))
-				ereport(ERROR,
-						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-						 errmsg("target entry \"%s\" is an expression, not a direct column reference",
-								matching_tle->resname),
-						 parser_errposition(pstate, location)));
-
-			var = (Var *) matching_tle->expr;
-
-			if (first_varno == InvalidOid)
-			{
-				first_varno = var->varno;
-				trunk_rte = rt_fetch(first_varno, query->rtable);
-			}
-			else if (first_varno != var->varno)
-				ereport(ERROR,
-						(errcode(ERRCODE_UNDEFINED_TABLE),
-						 errmsg("key columns must all come from the same table"),
-						 parser_errposition(pstate,
-											exprLocation((Node *) matching_tle->expr))));
-
-			base_colname = get_rte_attribute_name(trunk_rte, var->varattno);
-			base_colnames = lappend(base_colnames, makeString(base_colname));
-		}
-
-		Assert(trunk_rte != NULL);
-
-		/*
-		 * Once the trunk_rte is determined, we drill down to the base
-		 * relation, which is then returned.
-		 */
-		base_relid = drill_down_to_base_rel(pstate, trunk_rte, colnames_out,
-											base_colnames, location);
-
+		next_attnums = lappend_int(next_attnums, var->varattno);
 	}
 
-	return base_relid;
+	Assert(next_rtindex != 0);
+
+	return drill_down_to_base_rel(pstate, rt_fetch(next_rtindex, query->rtable), next_attnums,
+								  base_attnums, location);
 }

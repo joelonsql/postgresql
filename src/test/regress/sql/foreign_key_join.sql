@@ -676,6 +676,43 @@ JOIN
 ) AS q1 KEY (c23, c24) -> t1 (c1, c2);
 
 --
+-- Test partitioned tables
+--
+
+CREATE TABLE pt2
+(
+    c3 int not null,
+    c4 int not null,
+    CONSTRAINT pt2_pkey PRIMARY KEY (c3),
+    CONSTRAINT pt2_c3_fkey FOREIGN KEY (c3) REFERENCES t1 (c1)
+) PARTITION BY RANGE (c3);
+
+CREATE TABLE pt2_1 PARTITION OF pt2 FOR VALUES FROM (1) TO (3);
+CREATE TABLE pt2_2 PARTITION OF pt2 FOR VALUES FROM (3) TO (4);
+
+CREATE TABLE pt3
+(
+    c5 int not null,
+    c6 int not null,
+    CONSTRAINT pt3_pkey PRIMARY KEY (c5),
+    CONSTRAINT pt3_c5_fkey FOREIGN KEY (c5) REFERENCES pt2 (c3)
+) PARTITION BY RANGE (c5);
+
+CREATE TABLE pt3_1 PARTITION OF pt3 FOR VALUES FROM (1) TO (3);
+CREATE TABLE pt3_2 PARTITION OF pt3 FOR VALUES FROM (3) TO (4);
+
+INSERT INTO pt2 (c3, c4) VALUES (1, 100);
+INSERT INTO pt2 (c3, c4) VALUES (3, 300);
+INSERT INTO pt3 (c5, c6) VALUES (1, 1000);
+INSERT INTO pt3 (c5, c6) VALUES (3, 3000);
+
+SELECT * FROM t1 JOIN pt2 KEY (c3) -> t1 (c1) JOIN pt3 KEY (c5) -> pt2 (c3);
+SELECT * FROM t1 JOIN pt2_1 KEY (c3) -> t1 (c1);
+
+DROP TABLE pt3;
+DROP TABLE pt2;
+
+--
 -- Test materialized views (not supported)
 --
 
