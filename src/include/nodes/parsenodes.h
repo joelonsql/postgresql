@@ -1037,6 +1037,17 @@ typedef enum RTEKind
 	RTE_GROUP,					/* the grouping step */
 } RTEKind;
 
+/*
+ * RTEId - Identifier for range table entries
+ */
+typedef struct RTEId
+{
+	NodeTag				type;	/* tag identifying this as a node */
+	uint64				fxid;	/* transaction ID when created */
+	Index				baserelindex;	/* base range table index */
+	int					procnumber; /* process ID */
+} RTEId;
+
 typedef struct RangeTblEntry
 {
 	pg_node_attr(custom_read_write)
@@ -1257,8 +1268,11 @@ typedef struct RangeTblEntry
 	/* security barrier quals to apply, if any */
 	List	   *securityQuals pg_node_attr(query_jumble_ignore);
 
-	List	   *baseRels pg_node_attr(query_jumble_ignore);
-	List	   *baseAttrs pg_node_attr(query_jumble_ignore);
+	/* rtindex lists used by foreign key joins */
+	List	   *uniqueness_preservation pg_node_attr(query_jumble_ignore);
+	List	   *functional_dependencies pg_node_attr(query_jumble_ignore);
+	/* globally unique identifier assigned to RTE instances of base relations */
+	RTEId	   *rteid pg_node_attr(query_jumble_ignore);
 } RangeTblEntry;
 
 /*

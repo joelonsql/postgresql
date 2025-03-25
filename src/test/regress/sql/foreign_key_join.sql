@@ -417,12 +417,15 @@ SELECT c3 AS v3_c3, c4 AS v3_c4 FROM t2;
 CREATE VIEW v4 AS
 SELECT v3_c3 AS v4_c3, v3_c4 AS v4_c4 FROM v3;
 
+CREATE VIEW v5 AS
 SELECT
     v2_c1,
     v2_c2,
     v4_c3,
     v4_c4
 FROM v2 JOIN v4 KEY (v4_c3, v4_c4) -> v2 (v2_c1, v2_c2);
+
+SELECT * FROM v5;
 
 --
 -- Test subqueries, CTEs, and views
@@ -445,7 +448,7 @@ SELECT
     v4_c4
 FROM q2 JOIN v4 KEY (v4_c3, v4_c4) -> q2 (q2_c1, q2_c2);
 
-DROP VIEW v1, v2, v3, v4;
+DROP VIEW v1, v2, v3, v4, v5;
 
 --
 -- Test subqueries, CTEs and VIEWs containing joins
@@ -513,6 +516,73 @@ JOIN t6 KEY (c13, c14) -> v1 (c9, c10);
 DROP VIEW v1;
 
 --
+-- Test disallowed filtering of referenced table
+--
+
+CREATE VIEW v1 AS
+SELECT * FROM t1 WHERE c1 > 0;
+
+CREATE VIEW v2 AS
+SELECT * FROM t2 WHERE c3 > 0;
+
+-- invalid since v1 is filtered and is the referenced table
+SELECT * FROM v1 JOIN t2 KEY (c3) -> v1 (c1);
+
+-- OK, filtering allowed since v2 is the referencing table
+SELECT * FROM t1 JOIN v2 KEY (c3) -> t1 (c1);
+
+-- also invalid, since v1 is filtered and is the referenced table
+SELECT * FROM v1 JOIN v2 KEY (c3) -> v1 (c1);
+
+-- also invalid, filters uisng a having clause
+SELECT * FROM
+(
+    SELECT c1, count(*) FROM t1 GROUP BY c1 HAVING c2 > 100
+) AS u
+JOIN t2 KEY (c3) -> u (c1);
+
+-- invalid, since u is filtered and is the referenced table
+SELECT * FROM (SELECT c1 FROM t1 LIMIT 1) AS u
+JOIN t2 KEY (c3) -> u (c1);
+
+-- invalid, since u is filtered and is the referenced table
+SELECT * FROM (SELECT c1 FROM t1 OFFSET 1) AS u
+JOIN t2 KEY (c3) -> u (c1);
+
+-- invalid, since referenced table has RLS enabled
+ALTER TABLE t1 ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY t1_policy ON t1 USING (false);
+
+SELECT * FROM (SELECT c1 FROM t1) AS u
+JOIN t2 KEY (c3) -> u (c1);
+
+SELECT * FROM t1 JOIN t2 KEY (c3) -> t1 (c1);
+
+ALTER TABLE t1 DISABLE ROW LEVEL SECURITY;
+
+WITH q2 AS
+(
+    SELECT * FROM t5 WHERE t5.c11 > 0
+)
+SELECT
+    q1.c11,
+    q1.c12,
+    t7.c15,
+    t7.c16
+FROM
+(
+    SELECT
+        q2.c9,
+        q2.c10,
+        q2.c11,
+        q2.c12
+    FROM q2
+    JOIN t1 KEY (c1, c2) <- q2 (c11, c12)
+) AS q1
+JOIN t7 KEY (c15, c16) -> q1 (c9, c10);
+
+--
 -- Test allowed joins not affecting uniqueness
 --
 
@@ -532,6 +602,45 @@ FROM
     JOIN t1 KEY (c1, c2) <- t5 (c11, c12)
 ) AS q1
 JOIN t6 KEY (c13, c14) -> q1 (c9, c10);
+
+--
+-- Test disallowed non-unique referenced table
+--
+
+SELECT
+    q1.c11,
+    q1.c12,
+    t7.c15,
+    t7.c16
+FROM
+(
+    SELECT
+        t5.c9,
+        t5.c10,
+        t5.c11,
+        t5.c12
+    FROM t5
+    JOIN t1 KEY (c1, c2) <- t5 (c11, c12)
+    JOIN t6 KEY (c13, c14) -> t5 (c9, c10)
+) AS q1
+JOIN t7 KEY (c15, c16) -> q1 (c9, c10);
+
+SELECT
+    q1.c19,
+    q1.c20,
+    t9.c21,
+    t9.c22
+FROM
+(
+    SELECT
+        t8.c17,
+        t8.c18,
+        t8.c19,
+        t8.c20
+    FROM t8
+    JOIN t1 KEY (c1, c2) <- t8 (c19, c20)
+) AS q1
+JOIN t9 KEY (c21, c22) -> q1 (c17, c18);
 
 --
 -- Test revalidation of views
@@ -597,6 +706,21 @@ CREATE TABLE customer_addresses
     CONSTRAINT customer_addresses_address_id_fkey  FOREIGN KEY (address_id) REFERENCES addresses (id)
 );
 
+-- error, since it would invalidate foreign key join in orders_by_country
+-- that uses customer_details
+CREATE OR REPLACE VIEW customer_details AS
+SELECT
+    c.id AS customer_id,
+    c.name AS customer_name,
+    a.street,
+    a.city,
+    a.state,
+    a.country_code,
+    a.zip_code
+FROM customers AS c
+JOIN customer_addresses AS ca KEY (customer_id) -> c (id)
+JOIN addresses AS a KEY (id) <- ca (address_id);
+
 --
 -- Test various error conditions
 --
@@ -617,6 +741,7 @@ SELECT * FROM t1 JOIN t2() KEY (c3, c4) -> t1 (c1, c2);
 
 SELECT * FROM t1 JOIN t2 KEY (c3, c4) -> t1 (c1, c5);
 
+DROP VIEW v1, v2;
 CREATE VIEW v1 AS SELECT c1 AS c1_1, c1 AS c1_2, c2 AS c2_1, c2 AS c2_2 FROM t1;
 CREATE VIEW v2 AS SELECT c3 AS c3_1, c3 AS c3_2, c4 AS c4_1, c4 AS c4_2 FROM t2;
 
@@ -642,6 +767,12 @@ SELECT * FROM t1 JOIN
     UNION ALL
     SELECT c3, c4 FROM t2
 ) AS u KEY (c3, c4) -> t1 (c1, c2);
+
+SELECT * FROM
+(
+    SELECT c1, c2 FROM t1 WHERE c2 > 0
+) AS u
+JOIN t2 KEY (c3, c4) -> u (c1, c2);
 
 SELECT *
 FROM t1
