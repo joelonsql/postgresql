@@ -1496,8 +1496,11 @@ addRangeTableEntry(ParseState *pstate,
 	LOCKMODE	lockmode;
 	Relation	rel;
 	ParseNamespaceItem *nsitem;
+	Index		rtindex;
 
 	Assert(pstate != NULL);
+
+	printf("refname = %s\n", refname);
 
 	rte->rtekind = RTE_RELATION;
 	rte->alias = alias;
@@ -1546,6 +1549,108 @@ addRangeTableEntry(ParseState *pstate,
 	 * appropriate.
 	 */
 	pstate->p_rtable = lappend(pstate->p_rtable, rte);
+
+	/* 
+	 * Set uniqueness_preserved and functional_dependency to a list
+	 * containing just this RTE's index.
+	 */
+	rtindex = list_length(pstate->p_rtable);
+	rte->uniqueness_preserved = list_make1_int(rtindex);
+	rte->functional_dependency = list_make1_int(rtindex);
+
+	/* 
+	 * Set baseRels to a list containing just this relation's OID or,
+	 * for views, resolve the base relations by tracing through the target list
+	 */
+	if (rte->relkind == RELKIND_VIEW || rte->relkind == RELKIND_MATVIEW)
+	{
+		/* For views, get the view query and trace through target list to find base tables */
+		Query *viewquery;
+		
+		/* Get the view definition */
+		viewquery = get_view_query(rel);
+		
+		/* Clear the lists first */
+		rte->baseRels = NIL;
+		rte->baseAttrs = NIL;
+		
+		/* Trace through the target list to find base relations and attributes */
+		if (viewquery && viewquery->targetList)
+		{
+			ListCell *tlc;
+			int attnum = 0;
+			
+			foreach(tlc, viewquery->targetList)
+			{
+				TargetEntry *te = (TargetEntry *) lfirst(tlc);
+				Oid baserelid = InvalidOid;
+				AttrNumber baseattno = InvalidAttrNumber;
+				
+				/* Skip resjunk columns */
+				if (te->resjunk)
+					continue;
+					
+				attnum++;
+				
+				/* 
+				 * If the expression is a simple Var, we can directly identify 
+				 * the base relation and attribute 
+				 */
+				if (IsA(te->expr, Var))
+				{
+					Var *var = (Var *) te->expr;
+					RangeTblEntry *base_rte;
+					
+					/* Find the referenced RTE */
+					if (var->varno > 0 && var->varno <= list_length(viewquery->rtable))
+					{
+						base_rte = rt_fetch(var->varno, viewquery->rtable);
+						
+						if (base_rte->rtekind == RTE_RELATION)
+						{
+							baserelid = base_rte->relid;
+							baseattno = var->varattno;
+						}
+						else if (base_rte->baseRels != NIL && var->varattno > 0 && 
+								 var->varattno <= list_length(base_rte->baseRels))
+						{
+							/* Use the baseRels entry for this column's position */
+							baserelid = list_nth_oid(base_rte->baseRels, var->varattno - 1);
+							
+							/* Similarly for baseAttrs if available */
+							if (base_rte->baseAttrs != NIL && 
+								var->varattno <= list_length(base_rte->baseAttrs))
+							{
+								baseattno = list_nth_int(base_rte->baseAttrs, var->varattno - 1);
+							}
+						}
+					}
+				}
+				
+				/* Add the base relation ID and attribute number to our lists */
+				rte->baseRels = lappend_oid(rte->baseRels, baserelid);
+				rte->baseAttrs = lappend_int(rte->baseAttrs, baseattno);
+			}
+		}
+	}
+	else
+	{
+		/* For regular tables, just use the relation ID */
+		rte->baseRels = list_make1_oid(rte->relid);
+		
+		/* 
+		 * Set baseAttrs to list of column attribute numbers
+		 */
+		rte->baseAttrs = NIL;
+		for (int i = 1; i <= rel->rd_att->natts; i++) 
+		{
+			Form_pg_attribute attr = TupleDescAttr(rel->rd_att, i - 1);
+			if (!attr->attisdropped) 
+			{
+				rte->baseAttrs = lappend_int(rte->baseAttrs, i);
+			}
+		}
+	}
 
 	/*
 	 * Build a ParseNamespaceItem, but don't add it to the pstate's namespace
@@ -1606,6 +1711,8 @@ addRangeTableEntryForRelation(ParseState *pstate,
 	rte->relkind = rel->rd_rel->relkind;
 	rte->rellockmode = lockmode;
 
+	printf("refname = %s (addRangeTableEntryForRelation)\n", refname);
+
 	/*
 	 * Build the list of effective column names using user-supplied aliases
 	 * and/or actual column names.
@@ -1658,87 +1765,144 @@ addRangeTableEntryForSubquery(ParseState *pstate,
 							  bool lateral,
 							  bool inFromCl)
 {
-	RangeTblEntry *rte = makeNode(RangeTblEntry);
-	Alias	   *eref;
-	int			numaliases;
-	List	   *coltypes,
-			   *coltypmods,
-			   *colcollations;
-	int			varattno;
-	ListCell   *tlistitem;
-	ParseNamespaceItem *nsitem;
+    RangeTblEntry *rte = makeNode(RangeTblEntry);
+    Alias       *eref;
+    int         numaliases;
+    List       *coltypes,
+               *coltypmods,
+               *colcollations;
+    int         varattno;
+    ListCell   *tlistitem;
+    ParseNamespaceItem *nsitem;
 
-	Assert(pstate != NULL);
+    Assert(pstate != NULL);
 
-	rte->rtekind = RTE_SUBQUERY;
-	rte->subquery = subquery;
-	rte->alias = alias;
+    rte->rtekind = RTE_SUBQUERY;
+    rte->subquery = subquery;
+    rte->alias = alias;
 
-	eref = alias ? copyObject(alias) : makeAlias("unnamed_subquery", NIL);
-	numaliases = list_length(eref->colnames);
+    eref = alias ? copyObject(alias) : makeAlias("unnamed_subquery", NIL);
+    numaliases = list_length(eref->colnames);
 
-	/* fill in any unspecified alias columns, and extract column type info */
-	coltypes = coltypmods = colcollations = NIL;
-	varattno = 0;
-	foreach(tlistitem, subquery->targetList)
-	{
-		TargetEntry *te = (TargetEntry *) lfirst(tlistitem);
+    /* fill in any unspecified alias columns, and extract column type info */
+    coltypes = coltypmods = colcollations = NIL;
+    varattno = 0;
+    foreach(tlistitem, subquery->targetList)
+    {
+        TargetEntry *te = (TargetEntry *) lfirst(tlistitem);
 
-		if (te->resjunk)
-			continue;
-		varattno++;
-		Assert(varattno == te->resno);
-		if (varattno > numaliases)
-		{
-			char	   *attrname;
+        if (te->resjunk)
+            continue;
+        varattno++;
+        Assert(varattno == te->resno);
+        if (varattno > numaliases)
+        {
+            char       *attrname;
 
-			attrname = pstrdup(te->resname);
-			eref->colnames = lappend(eref->colnames, makeString(attrname));
-		}
-		coltypes = lappend_oid(coltypes,
-							   exprType((Node *) te->expr));
-		coltypmods = lappend_int(coltypmods,
-								 exprTypmod((Node *) te->expr));
-		colcollations = lappend_oid(colcollations,
-									exprCollation((Node *) te->expr));
-	}
-	if (varattno < numaliases)
-		ereport(ERROR,
-				(errcode(ERRCODE_INVALID_COLUMN_REFERENCE),
-				 errmsg("table \"%s\" has %d columns available but %d columns specified",
-						eref->aliasname, varattno, numaliases)));
+            attrname = pstrdup(te->resname);
+            eref->colnames = lappend(eref->colnames, makeString(attrname));
+        }
+        coltypes = lappend_oid(coltypes,
+                               exprType((Node *) te->expr));
+        coltypmods = lappend_int(coltypmods,
+                                 exprTypmod((Node *) te->expr));
+        colcollations = lappend_oid(colcollations,
+                                    exprCollation((Node *) te->expr));
+    }
+    if (varattno < numaliases)
+        ereport(ERROR,
+                (errcode(ERRCODE_INVALID_COLUMN_REFERENCE),
+                 errmsg("table \"%s\" has %d columns available but %d columns specified",
+                        eref->aliasname, varattno, numaliases)));
 
-	rte->eref = eref;
+    rte->eref = eref;
 
-	/*
-	 * Set flags.
-	 *
-	 * Subqueries are never checked for access rights, so no need to perform
-	 * addRTEPermissionInfo().
-	 */
-	rte->lateral = lateral;
-	rte->inFromCl = inFromCl;
+    /* 
+     * Derive baseRels and baseAttrs by examining the targetlist expressions
+     */
+    rte->baseRels = NIL;
+    rte->baseAttrs = NIL;
+    
+    /* Process the targetlist to collect base relation info */
+    varattno = 0;
+    foreach(tlistitem, subquery->targetList)
+    {
+        TargetEntry *te = (TargetEntry *) lfirst(tlistitem);
+        Oid baserelid = InvalidOid;
+        AttrNumber baseattno = InvalidAttrNumber;
+        
+        if (te->resjunk)
+            continue;
+        
+        varattno++;
+        
+        /* If it's a Var, we can trace to base relation */
+        if (IsA(te->expr, Var))
+        {
+            Var *var = (Var *) te->expr;
+            RangeTblEntry *base_rte;
+            
+            /* Find the referenced RTE */
+            if (var->varno > 0 && var->varno <= list_length(subquery->rtable))
+            {
+                base_rte = rt_fetch(var->varno, subquery->rtable);
+                
+                if (base_rte->rtekind == RTE_RELATION)
+                {
+                    /* Direct relation reference */
+                    baserelid = base_rte->relid;
+                    baseattno = var->varattno;
+                }
+                else if (base_rte->baseRels != NIL && var->varattno > 0 && 
+                         var->varattno <= list_length(base_rte->baseRels))
+                {
+                    /* Use the baseRels entry for this column's position */
+                    baserelid = list_nth_oid(base_rte->baseRels, var->varattno - 1);
+                    
+                    /* Similarly for baseAttrs if available */
+                    if (base_rte->baseAttrs != NIL && 
+                        var->varattno <= list_length(base_rte->baseAttrs))
+                    {
+                        baseattno = list_nth_int(base_rte->baseAttrs, var->varattno - 1);
+                    }
+                }
+            }
+        }
+        
+        /* Add the base relation ID and attribute number to our lists */
+        rte->baseRels = lappend_oid(rte->baseRels, baserelid);
+        rte->baseAttrs = lappend_int(rte->baseAttrs, baseattno);
+    }
 
-	/*
-	 * Add completed RTE to pstate's range table list, so that we know its
-	 * index.  But we don't add it to the join list --- caller must do that if
-	 * appropriate.
-	 */
-	pstate->p_rtable = lappend(pstate->p_rtable, rte);
+    /*
+     * Set flags.
+     *
+     * Subqueries are never checked for access rights, so no need to perform
+     * addRTEPermissionInfo().
+     */
+    rte->lateral = lateral;
+    rte->inFromCl = inFromCl;
 
-	/*
-	 * Build a ParseNamespaceItem, but don't add it to the pstate's namespace
-	 * list --- caller must do that if appropriate.
-	 */
-	nsitem = buildNSItemFromLists(rte, list_length(pstate->p_rtable),
-								  coltypes, coltypmods, colcollations);
+    /*
+     * Add completed RTE to pstate's range table list, so that we know its
+     * index.  But we don't add it to the join list --- caller must do that if
+     * appropriate.
+     */
+    pstate->p_rtable = lappend(pstate->p_rtable, rte);
 
-	/*
-	 * Mark it visible as a relation name only if it had a user-written alias.
-	 */
-	nsitem->p_rel_visible = (alias != NULL);
+    /*
+     * Build a ParseNamespaceItem, but don't add it to the pstate's namespace
+     * list --- caller must do that if appropriate.
+     */
+    nsitem = buildNSItemFromLists(rte, list_length(pstate->p_rtable),
+                                 coltypes, coltypmods, colcollations);
 
-	return nsitem;
+    /*
+     * Mark it visible as a relation name only if it had a user-written alias.
+     */
+    nsitem->p_rel_visible = (alias != NULL);
+
+    return nsitem;
 }
 
 /*
@@ -2242,84 +2406,134 @@ addRangeTableEntryForJoin(ParseState *pstate,
 						  Alias *alias,
 						  bool inFromCl)
 {
-	RangeTblEntry *rte = makeNode(RangeTblEntry);
-	Alias	   *eref;
-	int			numaliases;
-	ParseNamespaceItem *nsitem;
+    RangeTblEntry *rte = makeNode(RangeTblEntry);
+    Alias       *eref;
+    int         numaliases;
+    ParseNamespaceItem *nsitem;
+    ListCell    *lc;
 
-	Assert(pstate != NULL);
+    Assert(pstate != NULL);
 
-	/*
-	 * Fail if join has too many columns --- we must be able to reference any
-	 * of the columns with an AttrNumber.
-	 */
-	if (list_length(aliasvars) > MaxAttrNumber)
-		ereport(ERROR,
-				(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
-				 errmsg("joins can have at most %d columns",
-						MaxAttrNumber)));
+    /*
+     * Fail if join has too many columns --- we must be able to reference any
+     * of the columns with an AttrNumber.
+     */
+    if (list_length(aliasvars) > MaxAttrNumber)
+        ereport(ERROR,
+                (errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+                 errmsg("joins can have at most %d columns",
+                        MaxAttrNumber)));
 
-	rte->rtekind = RTE_JOIN;
-	rte->relid = InvalidOid;
-	rte->subquery = NULL;
-	rte->jointype = jointype;
-	rte->joinmergedcols = nummergedcols;
-	rte->joinaliasvars = aliasvars;
-	rte->joinleftcols = leftcols;
-	rte->joinrightcols = rightcols;
-	rte->join_using_alias = join_using_alias;
-	rte->alias = alias;
+    rte->rtekind = RTE_JOIN;
+    rte->relid = InvalidOid;
+    rte->subquery = NULL;
+    rte->jointype = jointype;
+    rte->joinmergedcols = nummergedcols;
+    rte->joinaliasvars = aliasvars;
+    rte->joinleftcols = leftcols;
+    rte->joinrightcols = rightcols;
+    rte->join_using_alias = join_using_alias;
+    rte->alias = alias;
 
-	eref = alias ? copyObject(alias) : makeAlias("unnamed_join", NIL);
-	numaliases = list_length(eref->colnames);
+    /* 
+     * Initialize baseRels by tracing each aliasvar to its base relation
+     */
+    rte->baseRels = NIL;
+    foreach(lc, aliasvars)
+    {
+        Node *node = (Node *) lfirst(lc);
+        
+        if (IsA(node, Var))
+        {
+            Var *var = (Var *) node;
+            RangeTblEntry *aliasrte = rt_fetch(var->varno, pstate->p_rtable);
+            
+            /* 
+             * For Var nodes, get the underlying relation OID
+             * If it's another join RTE with baseRels already set,
+             * we can just take the relid directly for this column
+             */
+            if (aliasrte->rtekind == RTE_JOIN && 
+                aliasrte->baseRels != NIL &&
+                var->varattno > 0 &&
+                var->varattno <= list_length(aliasrte->baseRels))
+            {
+                /* Get the relid from the join column */
+                Oid colrelid = list_nth_oid(aliasrte->baseRels, var->varattno - 1);
+                rte->baseRels = lappend_oid(rte->baseRels, colrelid);
+            }
+            else if (aliasrte->rtekind == RTE_RELATION)
+            {
+                /* Simple relation - store its OID */
+                rte->baseRels = lappend_oid(rte->baseRels, aliasrte->relid);
+            }
+            else
+            {
+                /* 
+                 * For other RTE types, or if the join doesn't have relids set yet,
+                 * we use InvalidOid for now. The FOREIGN KEY join processing will
+                 * compute it later when needed.
+                 */
+                rte->baseRels = lappend_oid(rte->baseRels, InvalidOid);
+            }
+        }
+        else
+        {
+            /* For non-Var nodes (like expressions), use InvalidOid */
+            rte->baseRels = lappend_oid(rte->baseRels, InvalidOid);
+        }
+    }
 
-	/* fill in any unspecified alias columns */
-	if (numaliases < list_length(colnames))
-		eref->colnames = list_concat(eref->colnames,
-									 list_copy_tail(colnames, numaliases));
+    eref = alias ? copyObject(alias) : makeAlias("unnamed_join", NIL);
+    numaliases = list_length(eref->colnames);
 
-	if (numaliases > list_length(colnames))
-		ereport(ERROR,
-				(errcode(ERRCODE_INVALID_COLUMN_REFERENCE),
-				 errmsg("join expression \"%s\" has %d columns available but %d columns specified",
-						eref->aliasname, list_length(colnames), numaliases)));
+    /* fill in any unspecified alias columns */
+    if (numaliases < list_length(colnames))
+        eref->colnames = list_concat(eref->colnames,
+                                     list_copy_tail(colnames, numaliases));
 
-	rte->eref = eref;
+    if (numaliases > list_length(colnames))
+        ereport(ERROR,
+                (errcode(ERRCODE_INVALID_COLUMN_REFERENCE),
+                 errmsg("join expression \"%s\" has %d columns available but %d columns specified",
+                        eref->aliasname, list_length(colnames), numaliases)));
 
-	/*
-	 * Set flags and access permissions.
-	 *
-	 * Joins are never checked for access rights, so no need to perform
-	 * addRTEPermissionInfo().
-	 */
-	rte->lateral = false;
-	rte->inFromCl = inFromCl;
+    rte->eref = eref;
 
-	/*
-	 * Add completed RTE to pstate's range table list, so that we know its
-	 * index.  But we don't add it to the join list --- caller must do that if
-	 * appropriate.
-	 */
-	pstate->p_rtable = lappend(pstate->p_rtable, rte);
+    /*
+     * Set flags and access permissions.
+     *
+     * Joins are never checked for access rights, so no need to perform
+     * addRTEPermissionInfo().
+     */
+    rte->lateral = false;
+    rte->inFromCl = inFromCl;
 
-	/*
-	 * Build a ParseNamespaceItem, but don't add it to the pstate's namespace
-	 * list --- caller must do that if appropriate.
-	 */
-	nsitem = (ParseNamespaceItem *) palloc(sizeof(ParseNamespaceItem));
-	nsitem->p_names = rte->eref;
-	nsitem->p_rte = rte;
-	nsitem->p_perminfo = NULL;
-	nsitem->p_rtindex = list_length(pstate->p_rtable);
-	nsitem->p_nscolumns = nscolumns;
-	/* set default visibility flags; might get changed later */
-	nsitem->p_rel_visible = true;
-	nsitem->p_cols_visible = true;
-	nsitem->p_lateral_only = false;
-	nsitem->p_lateral_ok = true;
-	nsitem->p_returning_type = VAR_RETURNING_DEFAULT;
+    /*
+     * Add completed RTE to pstate's range table list, so that we know its
+     * index.  But we don't add it to the join list --- caller must do that if
+     * appropriate.
+     */
+    pstate->p_rtable = lappend(pstate->p_rtable, rte);
 
-	return nsitem;
+    /*
+     * Build a ParseNamespaceItem, but don't add it to the pstate's namespace
+     * list --- caller must do that if appropriate.
+     */
+    nsitem = (ParseNamespaceItem *) palloc(sizeof(ParseNamespaceItem));
+    nsitem->p_names = rte->eref;
+    nsitem->p_rte = rte;
+    nsitem->p_perminfo = NULL;
+    nsitem->p_rtindex = list_length(pstate->p_rtable);
+    nsitem->p_nscolumns = nscolumns;
+    /* set default visibility flags; might get changed later */
+    nsitem->p_rel_visible = true;
+    nsitem->p_cols_visible = true;
+    nsitem->p_lateral_only = false;
+    nsitem->p_lateral_ok = true;
+    nsitem->p_returning_type = VAR_RETURNING_DEFAULT;
+
+    return nsitem;
 }
 
 /*
@@ -2330,141 +2544,207 @@ addRangeTableEntryForJoin(ParseState *pstate,
  */
 ParseNamespaceItem *
 addRangeTableEntryForCTE(ParseState *pstate,
-						 CommonTableExpr *cte,
-						 Index levelsup,
-						 RangeVar *rv,
-						 bool inFromCl)
+                         CommonTableExpr *cte,
+                         Index levelsup,
+                         RangeVar *rv,
+                         bool inFromCl)
 {
-	RangeTblEntry *rte = makeNode(RangeTblEntry);
-	Alias	   *alias = rv->alias;
-	char	   *refname = alias ? alias->aliasname : cte->ctename;
-	Alias	   *eref;
-	int			numaliases;
-	int			varattno;
-	ListCell   *lc;
-	int			n_dontexpand_columns = 0;
-	ParseNamespaceItem *psi;
+    RangeTblEntry *rte = makeNode(RangeTblEntry);
+    Alias       *alias = rv->alias;
+    char       *refname = alias ? alias->aliasname : cte->ctename;
+    Alias       *eref;
+    int         numaliases;
+    int         varattno;
+    ListCell   *lc;
+    int         n_dontexpand_columns = 0;
+    ParseNamespaceItem *psi;
+    Query      *ctequery = NULL;
 
-	Assert(pstate != NULL);
+    Assert(pstate != NULL);
 
-	rte->rtekind = RTE_CTE;
-	rte->ctename = cte->ctename;
-	rte->ctelevelsup = levelsup;
+    rte->rtekind = RTE_CTE;
+    rte->ctename = cte->ctename;
+    rte->ctelevelsup = levelsup;
 
-	/* Self-reference if and only if CTE's parse analysis isn't completed */
-	rte->self_reference = !IsA(cte->ctequery, Query);
-	Assert(cte->cterecursive || !rte->self_reference);
-	/* Bump the CTE's refcount if this isn't a self-reference */
-	if (!rte->self_reference)
-		cte->cterefcount++;
+    /* Self-reference if and only if CTE's parse analysis isn't completed */
+    rte->self_reference = !IsA(cte->ctequery, Query);
+    Assert(cte->cterecursive || !rte->self_reference);
+    /* Bump the CTE's refcount if this isn't a self-reference */
+    if (!rte->self_reference)
+        cte->cterefcount++;
 
-	/*
-	 * We throw error if the CTE is INSERT/UPDATE/DELETE/MERGE without
-	 * RETURNING.  This won't get checked in case of a self-reference, but
-	 * that's OK because data-modifying CTEs aren't allowed to be recursive
-	 * anyhow.
-	 */
-	if (IsA(cte->ctequery, Query))
-	{
-		Query	   *ctequery = (Query *) cte->ctequery;
+    /*
+     * We throw error if the CTE is INSERT/UPDATE/DELETE/MERGE without
+     * RETURNING.  This won't get checked in case of a self-reference, but
+     * that's OK because data-modifying CTEs aren't allowed to be recursive
+     * anyhow.
+     */
+    if (IsA(cte->ctequery, Query))
+    {
+        ctequery = (Query *) cte->ctequery;
 
-		if (ctequery->commandType != CMD_SELECT &&
-			ctequery->returningList == NIL)
-			ereport(ERROR,
-					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-					 errmsg("WITH query \"%s\" does not have a RETURNING clause",
-							cte->ctename),
-					 parser_errposition(pstate, rv->location)));
-	}
+        if (ctequery->commandType != CMD_SELECT &&
+            ctequery->returningList == NIL)
+            ereport(ERROR,
+                    (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+                     errmsg("WITH query \"%s\" does not have a RETURNING clause",
+                            cte->ctename),
+                     parser_errposition(pstate, rv->location)));
+    }
 
-	rte->coltypes = list_copy(cte->ctecoltypes);
-	rte->coltypmods = list_copy(cte->ctecoltypmods);
-	rte->colcollations = list_copy(cte->ctecolcollations);
+    rte->coltypes = list_copy(cte->ctecoltypes);
+    rte->coltypmods = list_copy(cte->ctecoltypmods);
+    rte->colcollations = list_copy(cte->ctecolcollations);
 
-	rte->alias = alias;
-	if (alias)
-		eref = copyObject(alias);
-	else
-		eref = makeAlias(refname, NIL);
-	numaliases = list_length(eref->colnames);
+    rte->alias = alias;
+    if (alias)
+        eref = copyObject(alias);
+    else
+        eref = makeAlias(refname, NIL);
+    numaliases = list_length(eref->colnames);
 
-	/* fill in any unspecified alias columns */
-	varattno = 0;
-	foreach(lc, cte->ctecolnames)
-	{
-		varattno++;
-		if (varattno > numaliases)
-			eref->colnames = lappend(eref->colnames, lfirst(lc));
-	}
-	if (varattno < numaliases)
-		ereport(ERROR,
-				(errcode(ERRCODE_INVALID_COLUMN_REFERENCE),
-				 errmsg("table \"%s\" has %d columns available but %d columns specified",
-						refname, varattno, numaliases)));
+    /* fill in any unspecified alias columns */
+    varattno = 0;
+    foreach(lc, cte->ctecolnames)
+    {
+        varattno++;
+        if (varattno > numaliases)
+            eref->colnames = lappend(eref->colnames, lfirst(lc));
+    }
+    if (varattno < numaliases)
+        ereport(ERROR,
+                (errcode(ERRCODE_INVALID_COLUMN_REFERENCE),
+                 errmsg("table \"%s\" has %d columns available but %d columns specified",
+                        refname, varattno, numaliases)));
 
-	rte->eref = eref;
+    rte->eref = eref;
+    
+    /*
+     * Derive baseRels and baseAttrs by examining the CTE query's targetlist
+     */
+    rte->baseRels = NIL;
+    rte->baseAttrs = NIL;
+    
+    if (ctequery && ctequery->targetList)
+    {
+        ListCell *tlc;
+        int attnum = 0;
+        
+        foreach(tlc, ctequery->targetList)
+        {
+            TargetEntry *te = (TargetEntry *) lfirst(tlc);
+            Oid baserelid = InvalidOid;
+            AttrNumber baseattno = InvalidAttrNumber;
+            
+            /* Skip resjunk columns */
+            if (te->resjunk)
+                continue;
+                
+            attnum++;
+            
+            /* 
+             * If the expression is a simple Var, we can directly identify 
+             * the base relation and attribute 
+             */
+            if (IsA(te->expr, Var))
+            {
+                Var *var = (Var *) te->expr;
+                RangeTblEntry *base_rte;
+                
+                /* Find the referenced RTE */
+                if (var->varno > 0 && var->varno <= list_length(ctequery->rtable))
+                {
+                    base_rte = rt_fetch(var->varno, ctequery->rtable);
+                    
+                    if (base_rte->rtekind == RTE_RELATION)
+                    {
+                        /* Direct relation reference */
+                        baserelid = base_rte->relid;
+                        baseattno = var->varattno;
+                    }
+                    else if (base_rte->baseRels != NIL && var->varattno > 0 && 
+                             var->varattno <= list_length(base_rte->baseRels))
+                    {
+                        /* Use the baseRels entry for this column's position */
+                        baserelid = list_nth_oid(base_rte->baseRels, var->varattno - 1);
+                        
+                        /* Similarly for baseAttrs if available */
+                        if (base_rte->baseAttrs != NIL && 
+                            var->varattno <= list_length(base_rte->baseAttrs))
+                        {
+                            baseattno = list_nth_int(base_rte->baseAttrs, var->varattno - 1);
+                        }
+                    }
+                }
+            }
+            
+            /* Add the base relation ID and attribute number to our lists */
+            rte->baseRels = lappend_oid(rte->baseRels, baserelid);
+            rte->baseAttrs = lappend_int(rte->baseAttrs, baseattno);
+        }
+    }
 
-	if (cte->search_clause)
-	{
-		rte->eref->colnames = lappend(rte->eref->colnames, makeString(cte->search_clause->search_seq_column));
-		if (cte->search_clause->search_breadth_first)
-			rte->coltypes = lappend_oid(rte->coltypes, RECORDOID);
-		else
-			rte->coltypes = lappend_oid(rte->coltypes, RECORDARRAYOID);
-		rte->coltypmods = lappend_int(rte->coltypmods, -1);
-		rte->colcollations = lappend_oid(rte->colcollations, InvalidOid);
+    if (cte->search_clause)
+    {
+        rte->eref->colnames = lappend(rte->eref->colnames, makeString(cte->search_clause->search_seq_column));
+        if (cte->search_clause->search_breadth_first)
+            rte->coltypes = lappend_oid(rte->coltypes, RECORDOID);
+        else
+            rte->coltypes = lappend_oid(rte->coltypes, RECORDARRAYOID);
+        rte->coltypmods = lappend_int(rte->coltypmods, -1);
+        rte->colcollations = lappend_oid(rte->colcollations, InvalidOid);
+        
+        n_dontexpand_columns += 1;
+    }
 
-		n_dontexpand_columns += 1;
-	}
+    if (cte->cycle_clause)
+    {
+        rte->eref->colnames = lappend(rte->eref->colnames, makeString(cte->cycle_clause->cycle_mark_column));
+        rte->coltypes = lappend_oid(rte->coltypes, cte->cycle_clause->cycle_mark_type);
+        rte->coltypmods = lappend_int(rte->coltypmods, cte->cycle_clause->cycle_mark_typmod);
+        rte->colcollations = lappend_oid(rte->colcollations, cte->cycle_clause->cycle_mark_collation);
 
-	if (cte->cycle_clause)
-	{
-		rte->eref->colnames = lappend(rte->eref->colnames, makeString(cte->cycle_clause->cycle_mark_column));
-		rte->coltypes = lappend_oid(rte->coltypes, cte->cycle_clause->cycle_mark_type);
-		rte->coltypmods = lappend_int(rte->coltypmods, cte->cycle_clause->cycle_mark_typmod);
-		rte->colcollations = lappend_oid(rte->colcollations, cte->cycle_clause->cycle_mark_collation);
+        rte->eref->colnames = lappend(rte->eref->colnames, makeString(cte->cycle_clause->cycle_path_column));
+        rte->coltypes = lappend_oid(rte->coltypes, RECORDARRAYOID);
+        rte->coltypmods = lappend_int(rte->coltypmods, -1);
+        rte->colcollations = lappend_oid(rte->colcollations, InvalidOid);
 
-		rte->eref->colnames = lappend(rte->eref->colnames, makeString(cte->cycle_clause->cycle_path_column));
-		rte->coltypes = lappend_oid(rte->coltypes, RECORDARRAYOID);
-		rte->coltypmods = lappend_int(rte->coltypmods, -1);
-		rte->colcollations = lappend_oid(rte->colcollations, InvalidOid);
+        n_dontexpand_columns += 2;
+    }
 
-		n_dontexpand_columns += 2;
-	}
+    /*
+     * Set flags and access permissions.
+     *
+     * Subqueries are never checked for access rights, so no need to perform
+     * addRTEPermissionInfo().
+     */
+    rte->lateral = false;
+    rte->inFromCl = inFromCl;
 
-	/*
-	 * Set flags and access permissions.
-	 *
-	 * Subqueries are never checked for access rights, so no need to perform
-	 * addRTEPermissionInfo().
-	 */
-	rte->lateral = false;
-	rte->inFromCl = inFromCl;
+    /*
+     * Add completed RTE to pstate's range table list, so that we know its
+     * index.  But we don't add it to the join list --- caller must do that if
+     * appropriate.
+     */
+    pstate->p_rtable = lappend(pstate->p_rtable, rte);
 
-	/*
-	 * Add completed RTE to pstate's range table list, so that we know its
-	 * index.  But we don't add it to the join list --- caller must do that if
-	 * appropriate.
-	 */
-	pstate->p_rtable = lappend(pstate->p_rtable, rte);
+    /*
+     * Build a ParseNamespaceItem, but don't add it to the pstate's namespace
+     * list --- caller must do that if appropriate.
+     */
+    psi = buildNSItemFromLists(rte, list_length(pstate->p_rtable),
+                              rte->coltypes, rte->coltypmods,
+                              rte->colcollations);
 
-	/*
-	 * Build a ParseNamespaceItem, but don't add it to the pstate's namespace
-	 * list --- caller must do that if appropriate.
-	 */
-	psi = buildNSItemFromLists(rte, list_length(pstate->p_rtable),
-							   rte->coltypes, rte->coltypmods,
-							   rte->colcollations);
+    /*
+     * The columns added by search and cycle clauses are not included in star
+     * expansion in queries contained in the CTE.
+     */
+    if (rte->ctelevelsup > 0)
+        for (int i = 0; i < n_dontexpand_columns; i++)
+            psi->p_nscolumns[list_length(psi->p_names->colnames) - 1 - i].p_dontexpand = true;
 
-	/*
-	 * The columns added by search and cycle clauses are not included in star
-	 * expansion in queries contained in the CTE.
-	 */
-	if (rte->ctelevelsup > 0)
-		for (int i = 0; i < n_dontexpand_columns; i++)
-			psi->p_nscolumns[list_length(psi->p_names->colnames) - 1 - i].p_dontexpand = true;
-
-	return psi;
+    return psi;
 }
 
 /*

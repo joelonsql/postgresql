@@ -427,6 +427,34 @@ drill_down_to_base_rel(ParseState *pstate, RangeTblEntry *rte,
 				RangeTblEntry *childrte = NULL;
 				List	   *child_colnames = NIL;
 
+				/* 
+				 * For debugging purposes, print the relid of the join RTE
+				 */
+				printf("join relid = %u\n", rte->relid);
+				/* 
+				 * Print the baseRels list for debugging
+				 */
+				if (rte->baseRels != NIL)
+				{
+					ListCell *lc;
+					int i = 0;
+					
+					printf("baseRels = [");
+					foreach(lc, rte->baseRels)
+					{
+						Oid colrelid = lfirst_oid(lc);
+						if (i > 0)
+							printf(", ");
+						printf("%u", colrelid);
+						i++;
+					}
+					printf("]\n");
+				}
+				else
+				{
+					printf("baseRels is empty\n");
+				}
+
 				/*
 				 * For each requested column, find its position in the join
 				 * RTE's output (erefname), then locate the corresponding Var

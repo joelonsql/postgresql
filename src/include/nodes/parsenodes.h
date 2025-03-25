@@ -1256,6 +1256,14 @@ typedef struct RangeTblEntry
 	bool		inFromCl pg_node_attr(query_jumble_ignore);
 	/* security barrier quals to apply, if any */
 	List	   *securityQuals pg_node_attr(query_jumble_ignore);
+
+	/* relids for columns, used by FOREIGN KEY joins */
+	List	   *baseRels pg_node_attr(query_jumble_ignore);
+	List	   *baseAttrs pg_node_attr(query_jumble_ignore);
+	/* rtindex list for uniqueness preservation tracking */
+	List	   *uniqueness_preserved pg_node_attr(query_jumble_ignore);
+	/* rtindex list for functional dependency tracking */
+	List	   *functional_dependency pg_node_attr(query_jumble_ignore);
 } RangeTblEntry;
 
 /*
