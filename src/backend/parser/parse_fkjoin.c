@@ -40,15 +40,12 @@ static Oid	find_foreign_key(Oid referencing_relid, Oid referenced_relid,
 static char *column_list_to_string(const List *columns);
 static Oid	drill_down_to_base_rel(ParseState *pstate, RangeTblEntry *rte,
 								   List **colnames_out, List *colnames,
-								   bool is_referenced, int location);
+								   int location);
 static Oid	validate_and_resolve_derived_rel(ParseState *pstate, Query *query,
 											 RangeTblEntry *rte,
 											 List *colnames,
 											 List **colnames_out,
-											 bool is_referenced, int location);
-static void validate_derived_rel_joins(ParseState *pstate, Query *query,
-									   JoinExpr *join, RangeTblEntry *trunk_rte,
-									   int location);
+											 int location);
 
 void
 transformAndValidateForeignKeyJoin(ParseState *pstate, JoinExpr *join,
@@ -125,11 +122,11 @@ transformAndValidateForeignKeyJoin(ParseState *pstate, JoinExpr *join,
 
 	referencing_relid = drill_down_to_base_rel(pstate, referencing_rte,
 											   &referencing_base_cols,
-											   referencing_cols, false,
+											   referencing_cols,
 											   fkjn->location);
 	referenced_relid = drill_down_to_base_rel(pstate, referenced_rte,
 											  &referenced_base_cols,
-											  referenced_cols, true,
+											  referenced_cols,
 											  fkjn->location);
 
 	Assert(referencing_relid != InvalidOid && referenced_relid != InvalidOid);
@@ -358,7 +355,7 @@ column_list_to_string(const List *columns)
 static Oid
 drill_down_to_base_rel(ParseState *pstate, RangeTblEntry *rte,
 					   List **colnames_out, List *colnames,
-					   bool is_referenced, int location)
+					   int location)
 {
 	Oid			base_relid;
 	Query	   *query = NULL;
@@ -376,13 +373,6 @@ drill_down_to_base_rel(ParseState *pstate, RangeTblEntry *rte,
 						break;
 
 					case RELKIND_RELATION:
-						if (is_referenced && rel->rd_rel->relrowsecurity)
-							ereport(ERROR,
-									(errcode(ERRCODE_SYNTAX_ERROR),
-									 errmsg("cannot use table \"%s\" with row level security enabled as referenced table in foreign key join",
-											get_rel_name(rel->rd_id)),
-									 errdetail("Using a table with row level security as the referenced table would violate referential integrity."),
-									 parser_errposition(pstate, location)));
 						*colnames_out = colnames;
 						base_relid = rte->relid;
 						break;
@@ -492,7 +482,6 @@ drill_down_to_base_rel(ParseState *pstate, RangeTblEntry *rte,
 													childrte,
 													colnames_out,
 													child_colnames,
-													is_referenced,
 													location);
 
 				return base_relid;
@@ -511,7 +500,6 @@ drill_down_to_base_rel(ParseState *pstate, RangeTblEntry *rte,
 													  rte,
 													  colnames,
 													  colnames_out,
-													  is_referenced,
 													  location);
 
 	return base_relid;
@@ -524,7 +512,7 @@ drill_down_to_base_rel(ParseState *pstate, RangeTblEntry *rte,
 static Oid
 validate_and_resolve_derived_rel(ParseState *pstate, Query *query, RangeTblEntry *rte,
 								 List *colnames, List **colnames_out,
-								 bool is_referenced, int location)
+								 int location)
 {
 	RangeTblEntry *trunk_rte = NULL;
 	List	   *base_colnames = NIL;
@@ -622,136 +610,9 @@ validate_and_resolve_derived_rel(ParseState *pstate, Query *query, RangeTblEntry
 	Assert(trunk_rte != NULL);
 
 	/*
-	 * If this is the referenced side, we need to ensure it's not filtered,
-	 * and if there are any joins, they must all use the trunk_rte as their
-	 * referencing table, and the referencing columns must not be nullable,
-	 * since otherwise the virtual foreign key integrity would not be upheld.
-	 */
-	if (is_referenced)
-	{
-		if (query->jointree->quals != NULL ||
-			query->limitOffset != NULL ||
-			query->limitCount != NULL)
-			ereport(ERROR,
-					(errcode(ERRCODE_SYNTAX_ERROR),
-					 errmsg("cannot use filtered query as referenced table in foreign key join"),
-					 errdetail("Using a filtered query as the referenced table would violate referential integrity."),
-					 parser_errposition(pstate, location)));
-
-		if (list_length(query->rtable) > 1 &&
-			IsA(query->jointree->fromlist, List))
-		{
-			ListCell   *lc;
-
-			foreach(lc, query->jointree->fromlist)
-			{
-				Node	   *node = lfirst(lc);
-				JoinExpr   *join;
-
-				if (!IsA(node, JoinExpr))
-					ereport(ERROR,
-							(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-							 errmsg("unsupported query structure in referenced table"),
-							 parser_errposition(pstate, location)));
-
-				join = castNode(JoinExpr, node);
-				validate_derived_rel_joins(pstate, query, join, trunk_rte, location);
-			}
-		}
-	}
-
-	/*
 	 * Once the trunk_rte is determined, we drill down to the base relation,
 	 * which is then returned.
 	 */
 	return drill_down_to_base_rel(pstate, trunk_rte, colnames_out,
-								  base_colnames, is_referenced, location);
-}
-
-/*
- * validate_derived_rel_joins
- *		Ensures that all joins uphold virtual foreign key integrity
- */
-static void
-validate_derived_rel_joins(ParseState *pstate, Query *query, JoinExpr *join,
-						   RangeTblEntry *trunk_rte, int location)
-{
-	ForeignKeyJoinNode *fkjn;
-	RangeTblEntry *referencing_rte;
-	List	   *referencing_attnums;
-	ListCell   *lc;
-	List	   *base_colnames = NIL;
-	List	   *colaliases = NIL;
-	Oid			base_relid;
-
-	if (join->fkJoin == NULL)
-		ereport(ERROR,
-				(errcode(ERRCODE_INTEGRITY_CONSTRAINT_VIOLATION),
-				 errmsg("virtual foreign key constraint violation"),
-				 errdetail("The derived table contains a join that is not a foreign key join"),
-				 parser_errposition(pstate, location)));
-
-	fkjn = castNode(ForeignKeyJoinNode, join->fkJoin);
-
-	Assert(query->rtable != NIL);
-	Assert(fkjn->referencingVarno > 0 &&
-		   fkjn->referencingVarno <= list_length(query->rtable) &&
-		   fkjn->referencedVarno > 0 &&
-		   fkjn->referencedVarno <= list_length(query->rtable));
-
-	referencing_rte = rt_fetch(fkjn->referencingVarno, query->rtable);
-	Assert(referencing_rte != NULL);
-
-	if (trunk_rte != referencing_rte)
-		ereport(ERROR,
-				(errcode(ERRCODE_INTEGRITY_CONSTRAINT_VIOLATION),
-				 errmsg("virtual foreign key constraint violation"),
-				 errdetail("Referenced columns target a non-referencing table in derived table, violating uniqueness"),
-				 parser_errposition(pstate, location)));
-
-	referencing_attnums = fkjn->referencingAttnums;
-
-	foreach(lc, referencing_attnums)
-	{
-		int			attnum = lfirst_int(lc);
-		char	   *colname = get_rte_attribute_name(referencing_rte, attnum);
-
-		colaliases = lappend(colaliases, makeString(colname));
-	}
-
-	base_relid = drill_down_to_base_rel(pstate, referencing_rte,
-										&base_colnames, colaliases, false,
-										location);
-
-	foreach(lc, base_colnames)
-	{
-		char	   *colname = strVal(lfirst(lc));
-		AttrNumber	attnum;
-		HeapTuple	tuple;
-		Form_pg_attribute attr;
-
-		attnum = get_attnum(base_relid, colname);
-		if (attnum == InvalidAttrNumber)
-			elog(ERROR, "cache lookup failed for column \"%s\" of relation %u",
-				 colname, base_relid);
-
-		tuple = SearchSysCache2(ATTNUM,
-								ObjectIdGetDatum(base_relid),
-								Int16GetDatum(attnum));
-
-		if (!HeapTupleIsValid(tuple))
-			elog(ERROR, "cache lookup failed for attribute %d of relation %u",
-				 attnum, base_relid);
-
-		attr = (Form_pg_attribute) GETSTRUCT(tuple);
-
-		if (!attr->attnotnull)
-			ereport(ERROR,
-					(errcode(ERRCODE_INTEGRITY_CONSTRAINT_VIOLATION),
-					 errmsg("virtual foreign key constraint violation"),
-					 errdetail("Nullable columns in derived table's referencing relation violate referential integrity"),
-					 parser_errposition(pstate, location)));
-
-		ReleaseSysCache(tuple);
-	}
+								  base_colnames, location);
 }

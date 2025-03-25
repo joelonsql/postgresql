@@ -1256,6 +1256,9 @@ typedef struct RangeTblEntry
 	bool		inFromCl pg_node_attr(query_jumble_ignore);
 	/* security barrier quals to apply, if any */
 	List	   *securityQuals pg_node_attr(query_jumble_ignore);
+
+	List	   *baseRels pg_node_attr(query_jumble_ignore);
+	List	   *baseAttrs pg_node_attr(query_jumble_ignore);
 } RangeTblEntry;
 
 /*
