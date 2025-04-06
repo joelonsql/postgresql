@@ -837,8 +837,7 @@ update_uniqueness_preservation(List *referencing_uniqueness_preservation,
 	 */
 	if (fk_cols_unique && referenced_uniqueness_preservation)
 	{
-		result = list_concat(result,
-							 list_copy(referenced_uniqueness_preservation));
+		result = list_concat(result, referenced_uniqueness_preservation);
 	}
 
 	return result;
