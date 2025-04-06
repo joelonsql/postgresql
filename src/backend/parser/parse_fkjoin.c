@@ -856,47 +856,111 @@ update_functional_dependencies(List *referencing_fds,
 							   ForeignKeyDirection fk_dir)
 {
 	List	   *result = NIL;
+	bool		referenced_has_self_dep = false;
+	bool		referencing_preserved_due_to_outer_join = false;
 
-	if (fk_cols_not_null)
+	/*
+	 * Step 1:
+	 * Add functional dependencies from referencing relation
+	 * when an outer join preserves the referencing relation.
+	 */
+	if ((fk_dir == FKDIR_FROM && join_type == JOIN_LEFT) ||
+		(fk_dir == FKDIR_TO && join_type == JOIN_RIGHT) ||
+		join_type == JOIN_FULL)
 	{
-		bool		referenced_has_self_dep = false;
+		result = list_concat(result, referencing_fds);
+		referencing_preserved_due_to_outer_join = true;
+	}
 
-		for (int i = 0; i < list_length(referenced_fds); i += 2)
+	/*
+	 * Step 2:
+	 * Add functional dependencies from referenced relation
+	 * when an outer join preserves the referenced relation.
+	 */
+	if ((fk_dir == FKDIR_TO && join_type == JOIN_LEFT) ||
+		(fk_dir == FKDIR_FROM && join_type == JOIN_RIGHT) ||
+		join_type == JOIN_FULL)
+	{
+		result = list_concat(result, referenced_fds);
+	}
+
+	/*
+	 * In the following steps we handle functional dependencies
+	 * due to inner joins which are covered also by outer joins
+	 * but even if it's an outer join, we must still compute
+	 * the functional depdencies since we must compute the
+	 * effect of subsequent inner joins of the result.
+	 */
+
+	/*
+	 * Step 3:
+	 * If not all foreign key columns have a NOT NULL constraint,
+	 * we can't know compile time if all rows will be preserved
+	 * due to an inner foreign key join, in which case we are done. 
+	 */
+	if (!fk_cols_not_null)
+		return result;
+
+	/*
+	 * Step 4:
+	 * Determine if the relation that the referenced columns refer to
+	 * preserve all its rows, that is, if it has a self dependency.
+	 * Otherwise, we're done.
+	 */
+	for (int i = 0; i < list_length(referenced_fds); i += 2)
+	{
+		RTEId	   *dep = list_nth(referenced_fds, i);
+		RTEId	   *dcy = list_nth(referenced_fds, i + 1);
+
+		if (equal(dep, referenced_id) && equal(dcy, referenced_id))
 		{
-			RTEId	   *dep = list_nth(referenced_fds, i);
-			RTEId	   *dcy = list_nth(referenced_fds, i + 1);
-
-			if (equal(dep, referenced_id) && equal(dcy, referenced_id))
-			{
-				referenced_has_self_dep = true;
-				break;
-			}
+			referenced_has_self_dep = true;
+			break;
 		}
+	}
 
-		if (referenced_has_self_dep)
-		{
-			for (int i = 0; i < list_length(referencing_fds); i += 2)
-			{
-				RTEId	   *referencing_dep = list_nth(referencing_fds, i);
-				RTEId	   *referencing_dcy = list_nth(referencing_fds, i + 1);
+	if (!referenced_has_self_dep)
+		return result;
 
-				if (equal(referencing_dcy, referencing_id))
-				{
-					for (int j = 0; j < list_length(referencing_fds); j += 2)
-					{
-						RTEId	   *source_dep = list_nth(referencing_fds, j);
-						RTEId	   *source_dcy = list_nth(referencing_fds, j + 1);
-
-						if (equal(source_dep, referencing_dep))
-						{
-							result = lappend(result, source_dep);
-							result = lappend(result, source_dcy);
-						}
-					}
-				}
-			}
-		}
-
+	/*
+	 * Step 5a:
+	 * Skip computing if we should preserve any functional dependencies
+	 * from the referencing side, if all of them have all ready been
+	 * preserved due to an outer join.
+	 */
+	if (!referencing_preserved_due_to_outer_join)
+	{
+		/*
+		 * Step 5b:
+		 * This step is about possibly preserving some functional dependencies
+		 * intact from the referencing side of the current foreign key join
+		 * we consider.
+		 *
+		 * It is the functional dependencies from the referencing side that
+		 * we know will be preserved due to an inner join, which we track
+		 * even for outer joins, since we need to track transitive
+		 * functional dependencies to be able to determine the effect of
+		 * subsequent inner joins with the result of this join.
+		 *
+		 * We now know that the foreign key join we consider will preserve
+		 * all rows of its referencing relation, but it's noteworth that
+		 * it's not certain that the referencing relation itself actually
+		 * preserve all its rows. We only know that whatever rows it had
+		 * up until this join, such rows will be preserved after the join.
+		 * 
+		 * The point of this step is to see if there are any relations
+		 * on the referencing side that *do* preserve all their rows,
+		 * that depend on the specific referencing relation that the
+		 * referencing columns of this foreign key join refer to.
+		 *
+		 * We preserve all functional dependencies from such relations intact.
+		 * 
+		 *                      referencing_id
+		 *                            =
+		 * referencing_dep ---> referencing_dcy
+		 *        =
+		 *     source_dep ----> source_dcy
+		 */
 		for (int i = 0; i < list_length(referencing_fds); i += 2)
 		{
 			RTEId	   *referencing_dep = list_nth(referencing_fds, i);
@@ -904,33 +968,51 @@ update_functional_dependencies(List *referencing_fds,
 
 			if (equal(referencing_dcy, referencing_id))
 			{
-				for (int j = 0; j < list_length(referenced_fds); j += 2)
+				for (int j = 0; j < list_length(referencing_fds); j += 2)
 				{
-					RTEId	   *referenced_dep = list_nth(referenced_fds, j);
-					RTEId	   *referenced_dcy = list_nth(referenced_fds, j + 1);
+					RTEId	   *source_dep = list_nth(referencing_fds, j);
+					RTEId	   *source_dcy = list_nth(referencing_fds, j + 1);
 
-					if (equal(referenced_dep, referenced_id))
+					if (equal(source_dep, referencing_dep))
 					{
-						result = lappend(result, referencing_dep);
-						result = lappend(result, referenced_dcy);
+						result = lappend(result, source_dep);
+						result = lappend(result, source_dcy);
 					}
 				}
 			}
 		}
 	}
 
-	if ((fk_dir == FKDIR_FROM && join_type == JOIN_LEFT) ||
-		(fk_dir == FKDIR_TO && join_type == JOIN_RIGHT) ||
-		join_type == JOIN_FULL)
+	/*
+	 * Step 6:
+	 * This step is about adding new functional dependencies where dep comes
+	 * from the referencing side, and dcy from the referenced side.
+	 * 
+	 *	                     referencing_id    referenced_id
+	 *	                           =                 =
+	 *	referencing_dep ---> referencing_dcy   referenced_dep ---> referenced_dcy
+	 *	       =                                                         =
+	 *	   result_dep ---------------------------------------------> result_dcy
+	 */
+	for (int i = 0; i < list_length(referencing_fds); i += 2)
 	{
-		result = list_concat(result, referencing_fds);
-	}
+		RTEId	   *referencing_dep = list_nth(referencing_fds, i);
+		RTEId	   *referencing_dcy = list_nth(referencing_fds, i + 1);
 
-	if ((fk_dir == FKDIR_TO && join_type == JOIN_LEFT) ||
-		(fk_dir == FKDIR_FROM && join_type == JOIN_RIGHT) ||
-		join_type == JOIN_FULL)
-	{
-		result = list_concat(result, referenced_fds);
+		if (equal(referencing_dcy, referencing_id))
+		{
+			for (int j = 0; j < list_length(referenced_fds); j += 2)
+			{
+				RTEId	   *referenced_dep = list_nth(referenced_fds, j);
+				RTEId	   *referenced_dcy = list_nth(referenced_fds, j + 1);
+
+				if (equal(referenced_dep, referenced_id))
+				{
+					result = lappend(result, referencing_dep);
+					result = lappend(result, referenced_dcy);
+				}
+			}
+		}
 	}
 
 	return result;
