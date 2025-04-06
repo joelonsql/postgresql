@@ -847,9 +847,9 @@ update_uniqueness_preservation(List *referencing_uniqueness_preservation,
  *      Updates the functional dependencies for a foreign key join
  */
 static List *
-update_functional_dependencies(List *referencing_functional_dependencies,
+update_functional_dependencies(List *referencing_fds,
 							   RTEId *referencing_id,
-							   List *referenced_functional_dependencies,
+							   List *referenced_fds,
 							   RTEId *referenced_id,
 							   bool fk_cols_not_null,
 							   JoinType join_type,
@@ -859,61 +859,60 @@ update_functional_dependencies(List *referencing_functional_dependencies,
 
 	if (fk_cols_not_null)
 	{
-		bool		referenced_self_dep_exists = false;
+		bool		referenced_has_self_dep = false;
 
-		for (int i = 0; i < list_length(referenced_functional_dependencies); i += 2)
+		for (int i = 0; i < list_length(referenced_fds); i += 2)
 		{
-			RTEId	   *ref_dep = (RTEId *) list_nth(referenced_functional_dependencies, i);
-			RTEId	   *ref_dcy = (RTEId *) list_nth(referenced_functional_dependencies, i + 1);
+			RTEId	   *dep = list_nth(referenced_fds, i);
+			RTEId	   *dcy = list_nth(referenced_fds, i + 1);
 
-			if (equal(ref_dep, referenced_id) && equal(ref_dcy, referenced_id))
+			if (equal(dep, referenced_id) && equal(dcy, referenced_id))
 			{
-				referenced_self_dep_exists = true;
+				referenced_has_self_dep = true;
 				break;
 			}
 		}
 
-		if (referenced_self_dep_exists)
+		if (referenced_has_self_dep)
 		{
-			for (int i = 0; i < list_length(referencing_functional_dependencies); i += 2)
+			for (int i = 0; i < list_length(referencing_fds); i += 2)
 			{
-				RTEId	   *ref_dep = (RTEId *) list_nth(referencing_functional_dependencies, i);
-				RTEId	   *ref_dcy = (RTEId *) list_nth(referencing_functional_dependencies, i + 1);
+				RTEId	   *referencing_dep = list_nth(referencing_fds, i);
+				RTEId	   *referencing_dcy = list_nth(referencing_fds, i + 1);
 
-				if (equal(ref_dcy, referencing_id))
+				if (equal(referencing_dcy, referencing_id))
 				{
-					for (int j = 0; j < list_length(referencing_functional_dependencies); j += 2)
+					for (int j = 0; j < list_length(referencing_fds); j += 2)
 					{
-						RTEId	   *source_dep = (RTEId *) list_nth(referencing_functional_dependencies, j);
-						RTEId	   *source_dcy = (RTEId *) list_nth(referencing_functional_dependencies, j + 1);
+						RTEId	   *source_dep = list_nth(referencing_fds, j);
+						RTEId	   *source_dcy = list_nth(referencing_fds, j + 1);
 
-						if (equal(source_dep, ref_dep))
+						if (equal(source_dep, referencing_dep))
 						{
-							result = lappend(result, copyObject(source_dep));
-							result = lappend(result, copyObject(source_dcy));
+							result = lappend(result, source_dep);
+							result = lappend(result, source_dcy);
 						}
 					}
 				}
 			}
 		}
 
-		for (int i = 0; i < list_length(referencing_functional_dependencies); i += 2)
+		for (int i = 0; i < list_length(referencing_fds); i += 2)
 		{
-			RTEId	   *ref_dcy = (RTEId *) list_nth(referencing_functional_dependencies, i + 1);
+			RTEId	   *referencing_dep = list_nth(referencing_fds, i);
+			RTEId	   *referencing_dcy = list_nth(referencing_fds, i + 1);
 
-			if (equal(ref_dcy, referencing_id))
+			if (equal(referencing_dcy, referencing_id))
 			{
-				RTEId	   *ref_dep = (RTEId *) list_nth(referencing_functional_dependencies, i);
-
-				for (int j = 0; j < list_length(referenced_functional_dependencies); j += 2)
+				for (int j = 0; j < list_length(referenced_fds); j += 2)
 				{
-					RTEId	   *refed_dep = (RTEId *) list_nth(referenced_functional_dependencies, j);
-					RTEId	   *refed_dcy = (RTEId *) list_nth(referenced_functional_dependencies, j + 1);
+					RTEId	   *referenced_dep = list_nth(referenced_fds, j);
+					RTEId	   *referenced_dcy = list_nth(referenced_fds, j + 1);
 
-					if (equal(refed_dep, referenced_id))
+					if (equal(referenced_dep, referenced_id))
 					{
-						result = lappend(result, copyObject(ref_dep));
-						result = lappend(result, copyObject(refed_dcy));
+						result = lappend(result, referencing_dep);
+						result = lappend(result, referenced_dcy);
 					}
 				}
 			}
@@ -924,28 +923,14 @@ update_functional_dependencies(List *referencing_functional_dependencies,
 		(fk_dir == FKDIR_TO && join_type == JOIN_RIGHT) ||
 		join_type == JOIN_FULL)
 	{
-		for (int i = 0; i < list_length(referencing_functional_dependencies); i += 2)
-		{
-			RTEId	   *dep = (RTEId *) list_nth(referencing_functional_dependencies, i);
-			RTEId	   *dcy = (RTEId *) list_nth(referencing_functional_dependencies, i + 1);
-
-			result = lappend(result, copyObject(dep));
-			result = lappend(result, copyObject(dcy));
-		}
+		result = list_concat(result, referencing_fds);
 	}
 
 	if ((fk_dir == FKDIR_TO && join_type == JOIN_LEFT) ||
 		(fk_dir == FKDIR_FROM && join_type == JOIN_RIGHT) ||
 		join_type == JOIN_FULL)
 	{
-		for (int i = 0; i < list_length(referenced_functional_dependencies); i += 2)
-		{
-			RTEId	   *dep = (RTEId *) list_nth(referenced_functional_dependencies, i);
-			RTEId	   *dcy = (RTEId *) list_nth(referenced_functional_dependencies, i + 1);
-
-			result = lappend(result, copyObject(dep));
-			result = lappend(result, copyObject(dcy));
-		}
+		result = list_concat(result, referenced_fds);
 	}
 
 	return result;
