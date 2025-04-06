@@ -857,13 +857,8 @@ update_functional_dependencies(List *referencing_functional_dependencies,
 {
 	List	   *result = NIL;
 
-	/* Part 1: Chain dependencies through the join if FK cols are NOT NULL */
 	if (fk_cols_not_null)
 	{
-		/*
-		 * First check if (referenced_id, referenced_id) is in
-		 * referenced_functional_dependencies
-		 */
 		bool		referenced_self_dep_exists = false;
 
 		for (int i = 0; i < list_length(referenced_functional_dependencies); i += 2)
@@ -878,10 +873,8 @@ update_functional_dependencies(List *referencing_functional_dependencies,
 			}
 		}
 
-		/* If self-dependency exists, process the dependencies */
 		if (referenced_self_dep_exists)
 		{
-			/* Loop 1: Find all items where dcy_id matches referencing_id */
 			for (int i = 0; i < list_length(referencing_functional_dependencies); i += 2)
 			{
 				RTEId	   *ref_dep = (RTEId *) list_nth(referencing_functional_dependencies, i);
@@ -889,10 +882,6 @@ update_functional_dependencies(List *referencing_functional_dependencies,
 
 				if (equal(ref_dcy, referencing_id))
 				{
-					/*
-					 * Loop 2: Find all items where dep_id matches Loop 1's
-					 * dep_id and add them to the result
-					 */
 					for (int j = 0; j < list_length(referencing_functional_dependencies); j += 2)
 					{
 						RTEId	   *source_dep = (RTEId *) list_nth(referencing_functional_dependencies, j);
@@ -908,7 +897,6 @@ update_functional_dependencies(List *referencing_functional_dependencies,
 			}
 		}
 
-		/* Part 2: Create transitive dependencies */
 		for (int i = 0; i < list_length(referencing_functional_dependencies); i += 2)
 		{
 			RTEId	   *ref_dcy = (RTEId *) list_nth(referencing_functional_dependencies, i + 1);
@@ -917,7 +905,6 @@ update_functional_dependencies(List *referencing_functional_dependencies,
 			{
 				RTEId	   *ref_dep = (RTEId *) list_nth(referencing_functional_dependencies, i);
 
-				/* Create transitive dependencies */
 				for (int j = 0; j < list_length(referenced_functional_dependencies); j += 2)
 				{
 					RTEId	   *refed_dep = (RTEId *) list_nth(referenced_functional_dependencies, j);
@@ -925,10 +912,6 @@ update_functional_dependencies(List *referencing_functional_dependencies,
 
 					if (equal(refed_dep, referenced_id))
 					{
-						/*
-						 * Add a new transitive dependency: ref_dep ->
-						 * refed_dcy
-						 */
 						result = lappend(result, copyObject(ref_dep));
 						result = lappend(result, copyObject(refed_dcy));
 					}
@@ -937,11 +920,6 @@ update_functional_dependencies(List *referencing_functional_dependencies,
 		}
 	}
 
-	/*
-	 * Part 3: Add all dependencies from referencing side if it's preserved in
-	 * an outer join (LEFT join with fk_dir = FKDIR_FROM, RIGHT join with
-	 * fk_dir = FKDIR_TO, or FULL join)
-	 */
 	if ((fk_dir == FKDIR_FROM && join_type == JOIN_LEFT) ||
 		(fk_dir == FKDIR_TO && join_type == JOIN_RIGHT) ||
 		join_type == JOIN_FULL)
@@ -956,11 +934,6 @@ update_functional_dependencies(List *referencing_functional_dependencies,
 		}
 	}
 
-	/*
-	 * Part 4: Add all dependencies from referenced side if it's preserved in
-	 * an outer join (LEFT join with fk_dir = FKDIR_TO, RIGHT join with fk_dir
-	 * = FKDIR_FROM, or FULL join)
-	 */
 	if ((fk_dir == FKDIR_TO && join_type == JOIN_LEFT) ||
 		(fk_dir == FKDIR_FROM && join_type == JOIN_RIGHT) ||
 		join_type == JOIN_FULL)
