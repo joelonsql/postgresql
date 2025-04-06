@@ -234,8 +234,7 @@ transformAndValidateForeignKeyJoin(ParseState *pstate, JoinExpr *join,
 				 parser_errposition(pstate, fkjn->location)));
 
 	/* Check uniqueness preservation */
-	if (referenced_rte->uniqueness_preservation == NIL ||
-		!list_member(referenced_rte->uniqueness_preservation, referenced_id))
+	if (!list_member(referenced_rte->uniqueness_preservation, referenced_id))
 	{
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_FOREIGN_KEY),
