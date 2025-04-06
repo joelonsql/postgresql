@@ -1269,10 +1269,10 @@ typedef struct RangeTblEntry
 	List	   *securityQuals pg_node_attr(query_jumble_ignore);
 
 	/* rtindex lists used by foreign key joins */
-	List	   *uniqueness_preservation pg_node_attr(query_jumble_ignore);
-	List	   *functional_dependencies pg_node_attr(query_jumble_ignore);
+	List	   *uniqueness_preservation pg_node_attr(equal_ignore, query_jumble_ignore);
+	List	   *functional_dependencies pg_node_attr(equal_ignore, query_jumble_ignore);
 	/* globally unique identifier assigned to RTE instances of base relations */
-	RTEId	   *rteid pg_node_attr(query_jumble_ignore);
+	RTEId	   *rteid pg_node_attr(equal_ignore, query_jumble_ignore);
 } RangeTblEntry;
 
 /*

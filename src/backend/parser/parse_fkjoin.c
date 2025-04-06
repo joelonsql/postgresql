@@ -58,7 +58,6 @@ static List *update_functional_dependencies(List *referencing_functional_depende
 											bool fk_cols_not_null,
 											JoinType join_type,
 											ForeignKeyDirection fk_dir);
-static bool rteid_equal(RTEId *a, RTEId *b);
 
 void
 transformAndValidateForeignKeyJoin(ParseState *pstate, JoinExpr *join,
@@ -254,7 +253,7 @@ transformAndValidateForeignKeyJoin(ParseState *pstate, JoinExpr *join,
 		RTEId	   *fd_dep = (RTEId *) list_nth(referenced_rte->functional_dependencies, i);
 		RTEId	   *fd_dcy = (RTEId *) list_nth(referenced_rte->functional_dependencies, i + 1);
 
-		if (rteid_equal(fd_dep, referenced_id) && rteid_equal(fd_dcy, referenced_id))
+		if (equal(fd_dep, referenced_id) && equal(fd_dcy, referenced_id))
 		{
 			found_fd = true;
 			break;
@@ -876,7 +875,7 @@ update_functional_dependencies(List *referencing_functional_dependencies,
 			RTEId	   *ref_dep = (RTEId *) list_nth(referenced_functional_dependencies, i);
 			RTEId	   *ref_dcy = (RTEId *) list_nth(referenced_functional_dependencies, i + 1);
 
-			if (rteid_equal(ref_dep, referenced_id) && rteid_equal(ref_dcy, referenced_id))
+			if (equal(ref_dep, referenced_id) && equal(ref_dcy, referenced_id))
 			{
 				referenced_self_dep_exists = true;
 				break;
@@ -892,7 +891,7 @@ update_functional_dependencies(List *referencing_functional_dependencies,
 				RTEId	   *ref_dep = (RTEId *) list_nth(referencing_functional_dependencies, i);
 				RTEId	   *ref_dcy = (RTEId *) list_nth(referencing_functional_dependencies, i + 1);
 
-				if (rteid_equal(ref_dcy, referencing_id))
+				if (equal(ref_dcy, referencing_id))
 				{
 					/*
 					 * Loop 2: Find all items where dep_id matches Loop 1's
@@ -903,7 +902,7 @@ update_functional_dependencies(List *referencing_functional_dependencies,
 						RTEId	   *source_dep = (RTEId *) list_nth(referencing_functional_dependencies, j);
 						RTEId	   *source_dcy = (RTEId *) list_nth(referencing_functional_dependencies, j + 1);
 
-						if (rteid_equal(source_dep, ref_dep))
+						if (equal(source_dep, ref_dep))
 						{
 							RTEId	   *dep_copy = makeNode(RTEId);
 							RTEId	   *dcy_copy = makeNode(RTEId);
@@ -929,7 +928,7 @@ update_functional_dependencies(List *referencing_functional_dependencies,
 		{
 			RTEId	   *ref_dcy = (RTEId *) list_nth(referencing_functional_dependencies, i + 1);
 
-			if (rteid_equal(ref_dcy, referencing_id))
+			if (equal(ref_dcy, referencing_id))
 			{
 				RTEId	   *ref_dep = (RTEId *) list_nth(referencing_functional_dependencies, i);
 
@@ -939,7 +938,7 @@ update_functional_dependencies(List *referencing_functional_dependencies,
 					RTEId	   *refed_dep = (RTEId *) list_nth(referenced_functional_dependencies, j);
 					RTEId	   *refed_dcy = (RTEId *) list_nth(referenced_functional_dependencies, j + 1);
 
-					if (rteid_equal(refed_dep, referenced_id))
+					if (equal(refed_dep, referenced_id))
 					{
 						/*
 						 * Add a new transitive dependency: ref_dep ->
@@ -1025,16 +1024,4 @@ update_functional_dependencies(List *referencing_functional_dependencies,
 	}
 
 	return result;
-}
-
-/* Returns true if RTEIds a and b are equal (comparing all fields) */
-static bool
-rteid_equal(RTEId *a, RTEId *b)
-{
-	if (!a || !b)
-		return false;
-
-	return a->baserelindex == b->baserelindex &&
-		a->fxid == b->fxid &&
-		a->procnumber == b->procnumber;
 }
