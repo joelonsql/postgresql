@@ -858,8 +858,6 @@ update_functional_dependencies(List *referencing_functional_dependencies,
 							   ForeignKeyDirection fk_dir)
 {
 	List	   *result = NIL;
-	int			i,
-				j;
 
 	/* Part 1: Chain dependencies through the join if FK cols are NOT NULL */
 	if (fk_cols_not_null)
@@ -870,7 +868,7 @@ update_functional_dependencies(List *referencing_functional_dependencies,
 		 */
 		bool		referenced_self_dep_exists = false;
 
-		for (i = 0; i < list_length(referenced_functional_dependencies); i += 2)
+		for (int i = 0; i < list_length(referenced_functional_dependencies); i += 2)
 		{
 			RTEId	   *ref_dep = (RTEId *) list_nth(referenced_functional_dependencies, i);
 			RTEId	   *ref_dcy = (RTEId *) list_nth(referenced_functional_dependencies, i + 1);
@@ -886,7 +884,7 @@ update_functional_dependencies(List *referencing_functional_dependencies,
 		if (referenced_self_dep_exists)
 		{
 			/* Loop 1: Find all items where dcy_id matches referencing_id */
-			for (i = 0; i < list_length(referencing_functional_dependencies); i += 2)
+			for (int i = 0; i < list_length(referencing_functional_dependencies); i += 2)
 			{
 				RTEId	   *ref_dep = (RTEId *) list_nth(referencing_functional_dependencies, i);
 				RTEId	   *ref_dcy = (RTEId *) list_nth(referencing_functional_dependencies, i + 1);
@@ -897,26 +895,15 @@ update_functional_dependencies(List *referencing_functional_dependencies,
 					 * Loop 2: Find all items where dep_id matches Loop 1's
 					 * dep_id and add them to the result
 					 */
-					for (j = 0; j < list_length(referencing_functional_dependencies); j += 2)
+					for (int j = 0; j < list_length(referencing_functional_dependencies); j += 2)
 					{
 						RTEId	   *source_dep = (RTEId *) list_nth(referencing_functional_dependencies, j);
 						RTEId	   *source_dcy = (RTEId *) list_nth(referencing_functional_dependencies, j + 1);
 
 						if (equal(source_dep, ref_dep))
 						{
-							RTEId	   *dep_copy = makeNode(RTEId);
-							RTEId	   *dcy_copy = makeNode(RTEId);
-
-							dep_copy->fxid = source_dep->fxid;
-							dep_copy->baserelindex = source_dep->baserelindex;
-							dep_copy->procnumber = source_dep->procnumber;
-
-							dcy_copy->fxid = source_dcy->fxid;
-							dcy_copy->baserelindex = source_dcy->baserelindex;
-							dcy_copy->procnumber = source_dcy->procnumber;
-
-							result = lappend(result, dep_copy);
-							result = lappend(result, dcy_copy);
+							result = lappend(result, copyObject(source_dep));
+							result = lappend(result, copyObject(source_dcy));
 						}
 					}
 				}
@@ -924,7 +911,7 @@ update_functional_dependencies(List *referencing_functional_dependencies,
 		}
 
 		/* Part 2: Create transitive dependencies */
-		for (i = 0; i < list_length(referencing_functional_dependencies); i += 2)
+		for (int i = 0; i < list_length(referencing_functional_dependencies); i += 2)
 		{
 			RTEId	   *ref_dcy = (RTEId *) list_nth(referencing_functional_dependencies, i + 1);
 
@@ -933,7 +920,7 @@ update_functional_dependencies(List *referencing_functional_dependencies,
 				RTEId	   *ref_dep = (RTEId *) list_nth(referencing_functional_dependencies, i);
 
 				/* Create transitive dependencies */
-				for (j = 0; j < list_length(referenced_functional_dependencies); j += 2)
+				for (int j = 0; j < list_length(referenced_functional_dependencies); j += 2)
 				{
 					RTEId	   *refed_dep = (RTEId *) list_nth(referenced_functional_dependencies, j);
 					RTEId	   *refed_dcy = (RTEId *) list_nth(referenced_functional_dependencies, j + 1);
@@ -944,19 +931,8 @@ update_functional_dependencies(List *referencing_functional_dependencies,
 						 * Add a new transitive dependency: ref_dep ->
 						 * refed_dcy
 						 */
-						RTEId	   *dep_copy = makeNode(RTEId);
-						RTEId	   *dcy_copy = makeNode(RTEId);
-
-						dep_copy->fxid = ref_dep->fxid;
-						dep_copy->baserelindex = ref_dep->baserelindex;
-						dep_copy->procnumber = ref_dep->procnumber;
-
-						dcy_copy->fxid = refed_dcy->fxid;
-						dcy_copy->baserelindex = refed_dcy->baserelindex;
-						dcy_copy->procnumber = refed_dcy->procnumber;
-
-						result = lappend(result, dep_copy);
-						result = lappend(result, dcy_copy);
+						result = lappend(result, copyObject(ref_dep));
+						result = lappend(result, copyObject(refed_dcy));
 					}
 				}
 			}
@@ -972,24 +948,13 @@ update_functional_dependencies(List *referencing_functional_dependencies,
 		(fk_dir == FKDIR_TO && join_type == JOIN_RIGHT) ||
 		join_type == JOIN_FULL)
 	{
-		for (i = 0; i < list_length(referencing_functional_dependencies); i += 2)
+		for (int i = 0; i < list_length(referencing_functional_dependencies); i += 2)
 		{
 			RTEId	   *dep = (RTEId *) list_nth(referencing_functional_dependencies, i);
 			RTEId	   *dcy = (RTEId *) list_nth(referencing_functional_dependencies, i + 1);
 
-			RTEId	   *dep_copy = makeNode(RTEId);
-			RTEId	   *dcy_copy = makeNode(RTEId);
-
-			dep_copy->fxid = dep->fxid;
-			dep_copy->baserelindex = dep->baserelindex;
-			dep_copy->procnumber = dep->procnumber;
-
-			dcy_copy->fxid = dcy->fxid;
-			dcy_copy->baserelindex = dcy->baserelindex;
-			dcy_copy->procnumber = dcy->procnumber;
-
-			result = lappend(result, dep_copy);
-			result = lappend(result, dcy_copy);
+			result = lappend(result, copyObject(dep));
+			result = lappend(result, copyObject(dcy));
 		}
 	}
 
@@ -1002,24 +967,13 @@ update_functional_dependencies(List *referencing_functional_dependencies,
 		(fk_dir == FKDIR_FROM && join_type == JOIN_RIGHT) ||
 		join_type == JOIN_FULL)
 	{
-		for (i = 0; i < list_length(referenced_functional_dependencies); i += 2)
+		for (int i = 0; i < list_length(referenced_functional_dependencies); i += 2)
 		{
 			RTEId	   *dep = (RTEId *) list_nth(referenced_functional_dependencies, i);
 			RTEId	   *dcy = (RTEId *) list_nth(referenced_functional_dependencies, i + 1);
 
-			RTEId	   *dep_copy = makeNode(RTEId);
-			RTEId	   *dcy_copy = makeNode(RTEId);
-
-			dep_copy->fxid = dep->fxid;
-			dep_copy->baserelindex = dep->baserelindex;
-			dep_copy->procnumber = dep->procnumber;
-
-			dcy_copy->fxid = dcy->fxid;
-			dcy_copy->baserelindex = dcy->baserelindex;
-			dcy_copy->procnumber = dcy->procnumber;
-
-			result = lappend(result, dep_copy);
-			result = lappend(result, dcy_copy);
+			result = lappend(result, copyObject(dep));
+			result = lappend(result, copyObject(dcy));
 		}
 	}
 
