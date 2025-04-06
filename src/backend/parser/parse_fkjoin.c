@@ -86,8 +86,8 @@ transformAndValidateForeignKeyJoin(ParseState *pstate, JoinExpr *join,
 	RTEId	   *referencing_id;
 	RTEId	   *referenced_id;
 	bool		found_fd = false;
-	bool		fk_cols_unique = false;
-	bool		fk_cols_not_null = false;
+	bool		fk_cols_unique;
+	bool		fk_cols_not_null;
 
 	foreach(lc, l_namespace)
 	{
