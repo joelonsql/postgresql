@@ -986,8 +986,8 @@ update_functional_dependencies(List *referencing_fds,
 	 * functional dependencies Let S = {(A, B)} be the set of referenced
 	 * functional dependencies Let r = referencing_id Let s = referenced_id
 	 *
-	 * The new transitive dependencies are defined as: T = {(X, B) | (X, r) ∈
-	 * R ∧ (s, B) ∈ S}
+	 * The new transitive dependencies are defined as:
+	 * T = {(X, B) | (X, r) ∈ R ∧ (s, B) ∈ S}
 	 *
 	 * The correctness of this derivation relies on the fact that
 	 * referenced_id is preserved in this join (as verified in previous
