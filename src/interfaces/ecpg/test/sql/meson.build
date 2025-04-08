@@ -16,6 +16,7 @@ pgc_files = [
   'dyntest',
   'execute',
   'fetch',
+  'foreign_key_join',
   'func',
   'indicators',
   'insupd',

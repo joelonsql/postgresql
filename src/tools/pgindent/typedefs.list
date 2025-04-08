@@ -860,6 +860,9 @@ ForeignAsyncNotify_function
 ForeignAsyncRequest_function
 ForeignDataWrapper
 ForeignKeyCacheInfo
+ForeignKeyClause
+ForeignKeyDirection
+ForeignKeyJoinNode
 ForeignKeyOptInfo
 ForeignPath
 ForeignScan
@@ -2448,6 +2451,7 @@ RI_CompareKey
 RI_ConstraintInfo
 RI_QueryHashEntry
 RI_QueryKey
+RTEId
 RTEKind
 RTEPermissionInfo
 RWConflict
