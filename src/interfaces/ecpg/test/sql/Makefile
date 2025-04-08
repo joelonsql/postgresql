@@ -17,6 +17,7 @@ TESTS = array array.c \
         dynalloc2 dynalloc2.c \
         execute execute.c \
         fetch fetch.c \
+        foreign_key_join foreign_key_join.c \
         func func.c \
         indicators indicators.c \
 	oldexec oldexec.c \
