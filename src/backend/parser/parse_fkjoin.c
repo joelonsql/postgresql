@@ -38,7 +38,7 @@ static Node *build_fk_join_on_clause(ParseState *pstate,
 									 ParseNamespaceColumn *l_nscols, List *l_attnums,
 									 ParseNamespaceColumn *r_nscols, List *r_attnums);
 static Oid	find_foreign_key(Oid referencing_relid, Oid referenced_relid,
-							 List *referencing_cols, List *referenced_cols);
+							 List *referencing_attnums, List *referenced_attnums);
 static char *column_list_to_string(const List *columns);
 static RangeTblEntry *drill_down_to_base_rel(ParseState *pstate, RangeTblEntry *rte,
 											 List *attnos, List **base_attnums,
@@ -75,8 +75,8 @@ transformAndValidateForeignKeyJoin(ParseState *pstate, JoinExpr *join,
 			   *other_rel = NULL;
 	List	   *referencing_cols,
 			   *referenced_cols;
-	List	   *referencing_base_cols;
-	List	   *referenced_base_cols;
+	List	   *referencing_base_attnums;
+	List	   *referenced_base_attnums;
 	Oid			fkoid;
 	ForeignKeyJoinNode *fkjn_node;
 	List	   *referencing_attnums = NIL;
@@ -202,11 +202,11 @@ transformAndValidateForeignKeyJoin(ParseState *pstate, JoinExpr *join,
 
 	base_referencing_rte = drill_down_to_base_rel(pstate, referencing_rte,
 												  referencing_attnums,
-												  &referencing_base_cols,
+												  &referencing_base_attnums,
 												  fkjn->location);
 	base_referenced_rte = drill_down_to_base_rel(pstate, referenced_rte,
 												 referenced_attnums,
-												 &referenced_base_cols,
+												 &referenced_base_attnums,
 												 fkjn->location);
 
 	referencing_relid = base_referencing_rte->relid;
@@ -217,7 +217,7 @@ transformAndValidateForeignKeyJoin(ParseState *pstate, JoinExpr *join,
 	Assert(referencing_relid != InvalidOid && referenced_relid != InvalidOid);
 
 	fkoid = find_foreign_key(referencing_relid, referenced_relid,
-							 referencing_base_cols, referenced_base_cols);
+							 referencing_base_attnums, referenced_base_attnums);
 
 	if (fkoid == InvalidOid)
 		ereport(ERROR,
@@ -276,8 +276,8 @@ transformAndValidateForeignKeyJoin(ParseState *pstate, JoinExpr *join,
 				 parser_errposition(pstate, fkjn->location)));
 	}
 
-	fk_cols_unique = is_referencing_cols_unique(referencing_relid, referencing_base_cols);
-	fk_cols_not_null = is_referencing_cols_not_null(referencing_relid, referencing_base_cols);
+	fk_cols_unique = is_referencing_cols_unique(referencing_relid, referencing_base_attnums);
+	fk_cols_not_null = is_referencing_cols_not_null(referencing_relid, referencing_base_attnums);
 
 	join->quals = build_fk_join_on_clause(pstate, referencing_rel->p_nscolumns, referencing_attnums, referenced_rel->p_nscolumns, referenced_attnums);
 
@@ -367,7 +367,7 @@ build_fk_join_on_clause(ParseState *pstate, ParseNamespaceColumn *l_nscols, List
  */
 static Oid
 find_foreign_key(Oid referencing_relid, Oid referenced_relid,
-				 List *referencing_cols, List *referenced_cols)
+				 List *referencing_attnums, List *referenced_attnums)
 {
 	Relation	rel = table_open(ConstraintRelationId, AccessShareLock);
 	SysScanDesc scan;
@@ -407,7 +407,7 @@ find_foreign_key(Oid referencing_relid, Oid referenced_relid,
 		confkey_arr = DatumGetArrayTypeP(confkey_datum);
 		nkeys = ArrayGetNItems(ARR_NDIM(conkey_arr), ARR_DIMS(conkey_arr));
 		if (nkeys != ArrayGetNItems(ARR_NDIM(confkey_arr), ARR_DIMS(confkey_arr)) ||
-			nkeys != list_length(referencing_cols))
+			nkeys != list_length(referencing_attnums))
 			continue;
 
 		conkey = (int16 *) ARR_DATA_PTR(conkey_arr);
@@ -423,7 +423,7 @@ find_foreign_key(Oid referencing_relid, Oid referenced_relid,
 			ListCell   *lc1,
 					   *lc2;
 
-			forboth(lc1, referencing_cols, lc2, referenced_cols)
+			forboth(lc1, referencing_attnums, lc2, referenced_attnums)
 				if (lfirst_int(lc1) == conkey[i] && lfirst_int(lc2) == confkey[i])
 				match = true;
 
