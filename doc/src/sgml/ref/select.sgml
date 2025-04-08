@@ -59,7 +59,7 @@ SELECT [ ALL | DISTINCT [ ON ( <replaceable class="parameter">expression</replac
     [ LATERAL ] <replaceable class="parameter">function_name</replaceable> ( [ <replaceable class="parameter">argument</replaceable> [, ...] ] ) AS ( <replaceable class="parameter">column_definition</replaceable> [, ...] )
     [ LATERAL ] ROWS FROM( <replaceable class="parameter">function_name</replaceable> ( [ <replaceable class="parameter">argument</replaceable> [, ...] ] ) [ AS ( <replaceable class="parameter">column_definition</replaceable> [, ...] ) ] [, ...] )
                 [ WITH ORDINALITY ] [ [ AS ] <replaceable class="parameter">alias</replaceable> [ ( <replaceable class="parameter">column_alias</replaceable> [, ...] ) ] ]
-    <replaceable class="parameter">from_item</replaceable> <replaceable class="parameter">join_type</replaceable> <replaceable class="parameter">from_item</replaceable> { ON <replaceable class="parameter">join_condition</replaceable> | USING ( <replaceable class="parameter">join_column</replaceable> [, ...] ) [ AS <replaceable class="parameter">join_using_alias</replaceable> ] }
+    <replaceable class="parameter">from_item</replaceable> <replaceable class="parameter">join_type</replaceable> <replaceable class="parameter">from_item</replaceable> { ON <replaceable class="parameter">join_condition</replaceable> | USING ( <replaceable class="parameter">join_column</replaceable> [, ...] ) [ AS <replaceable class="parameter">join_using_alias</replaceable> ] | KEY ( <replaceable class="parameter">column_name</replaceable> [, ...] ) { &lt;- | -&gt; } <replaceable class="parameter">from_reference</replaceable> ( <replaceable class="parameter">column_name</replaceable> [, ...] ) }
     <replaceable class="parameter">from_item</replaceable> NATURAL <replaceable class="parameter">join_type</replaceable> <replaceable class="parameter">from_item</replaceable>
     <replaceable class="parameter">from_item</replaceable> CROSS JOIN <replaceable class="parameter">from_item</replaceable>
 
@@ -613,6 +613,10 @@ TABLE [ ONLY ] <replaceable class="parameter">table_name</replaceable> [ * ]
         class="parameter">join_condition</replaceable></literal>,
         <literal>USING (<replaceable
         class="parameter">join_column</replaceable> [, ...])</literal>,
+        <literal>KEY ( <replaceable class="parameter">column_name</replaceable>
+        [, ...] ) { &lt;- | -&gt; } <replaceable
+        class="parameter">from_reference</replaceable> ( <replaceable
+        class="parameter">column_name</replaceable> [, ...] )</literal>,
         or <literal>NATURAL</literal>.  See below for the meaning.
        </para>
 
@@ -693,7 +697,59 @@ TABLE [ ONLY ] <replaceable class="parameter">table_name</replaceable> [ * ]
        </para>
       </listitem>
      </varlistentry>
+     <varlistentry>
+      <term><literal>KEY ( <replaceable class="parameter">column_name</replaceable> [, ...] ) { &lt;- | -&gt; } <replaceable class="parameter">from_reference</replaceable> ( <replaceable class="parameter">column_name</replaceable> [, ...] )</literal></term>
+      <listitem>
+       <para>
+        Foreign key joins allow specifying joins that follow declared
+        foreign key relationships. This makes queries more self-documenting, resilient
+        to schema changes, and clearly indicates the direction of the relationship.
+       </para>
 
+       <para>
+        Syntax:
+       </para>
+
+       <itemizedlist>
+        <listitem>
+         <para>
+          <literal>JOIN <replaceable class="parameter">referencing_rel</replaceable> KEY ( <replaceable class="parameter">referencing_col</replaceable> [, ...] ) -&gt; <replaceable class="parameter">referenced_rel</replaceable> ( <replaceable class="parameter">referenced_col</replaceable> [, ...] )</literal>
+         </para>
+        </listitem>
+        <listitem>
+         <para>
+          <literal>JOIN <replaceable class="parameter">referenced_rel</replaceable> KEY ( <replaceable class="parameter">referenced_col</replaceable> [, ...] ) &lt;- <replaceable class="parameter">referencing_rel</replaceable> ( <replaceable class="parameter">referencing_col</replaceable> [, ...] )</literal>
+         </para>
+        </listitem>
+       </itemizedlist>
+
+       <para>
+        Rules:
+       </para>
+
+       <itemizedlist>
+        <listitem>
+         <para>
+          <emphasis>Foreign Key Existence</emphasis>: The underlying base table corresponding to the referencing relation must have a foreign key constraint defined in the specified direction.
+         </para>
+        </listitem>
+        <listitem>
+         <para>
+          <emphasis>Set Containment</emphasis>:  The values in the referencing columns must be a subset of the values in the referenced columns. For derived tables, this property must hold through all query layers - the referenced side cannot be filtered in a way that would exclude referenced values.
+         </para>
+        </listitem>
+        <listitem>
+         <para>
+          <emphasis>Uniqueness</emphasis>: The values in the referenced columns must be unique. For derived tables, this uniqueness property must hold through all query layers - the referenced side cannot introduce duplicate values through joins or other operations.
+         </para>
+        </listitem>
+       </itemizedlist>
+
+       <para>
+        If these conditions are not satisfied—either because there is no matching foreign key constraint between the underlying base tables or because derived tables do not preserve these properties—an error will be raised during query planning.
+       </para>
+      </listitem>
+     </varlistentry>
      <varlistentry>
       <term><literal>NATURAL</literal></term>
       <listitem>
@@ -1764,6 +1820,23 @@ SELECT * FROM <replaceable class="parameter">name</replaceable>
 <programlisting>
 SELECT f.title, f.did, d.name, f.date_prod, f.kind
     FROM distributors d JOIN films f USING (did);
+
+       title       | did |     name     | date_prod  |   kind
+-------------------+-----+--------------+------------+----------
+ The Third Man     | 101 | British Lion | 1949-12-23 | Drama
+ The African Queen | 101 | British Lion | 1951-08-11 | Romantic
+ ...
+</programlisting>
+  </para>
+
+  <para>
+   To join the table <literal>films</literal> with the table
+   <literal>distributors</literal> using a foreign key join,
+   where <literal>films.did</literal> references <literal>distributors.did</literal>:
+
+<programlisting>
+SELECT f.title, f.did, d.name, f.date_prod, f.kind
+    FROM distributors d JOIN films f KEY (did) -&gt; d (did);
 
        title       | did |     name     | date_prod  |   kind
 -------------------+-----+--------------+------------+----------
