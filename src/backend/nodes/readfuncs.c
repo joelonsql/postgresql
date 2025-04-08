@@ -440,6 +440,7 @@ _readRangeTblEntry(void)
 	READ_BOOL_FIELD(lateral);
 	READ_BOOL_FIELD(inFromCl);
 	READ_NODE_FIELD(securityQuals);
+	READ_NODE_FIELD(rteid);
 
 	READ_DONE();
 }

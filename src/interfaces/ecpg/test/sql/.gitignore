@@ -28,6 +28,8 @@
 /execute.c
 /fetch
 /fetch.c
+/foreign_key_join
+/foreign_key_join.c
 /func
 /func.c
 /indicators

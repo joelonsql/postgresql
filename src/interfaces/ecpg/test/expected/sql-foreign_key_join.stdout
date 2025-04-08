@@ -1,0 +1,25 @@
+Testing foreign key join parser with <- and -> operators
+=========================================================
+
+SELECT (1<-2)::int: result = 0 (should be 0confdefs.h)
+
+Testing valid -> syntax variations:
+  SELECT * FROM t1 JOIN t2 KEY (c3) -> t1 (c1) -- ok (c2=10, c4=30)
+  SELECT * FROM t1 JOIN t2 KEY (c3) ->/*comment*/ t1 (c1) -- ok (c2=10, c4=30)
+  SELECT * FROM t1 JOIN t2 KEY (c3) /*comment*/-> t1 (c1) -- ok (c2=10, c4=30)
+  SELECT * FROM t1 JOIN t2 KEY (c3) /*comment*/->/*comment*/ t1 (c1) -- ok (c2=10, c4=30)
+
+Testing valid <- syntax variations:
+  SELECT * FROM t2 JOIN t1 KEY (c1) <- t2 (c3) -- ok (c2=10, c4=30)
+  SELECT * FROM t2 JOIN t1 KEY (c1) <-/*comment*/ t2 (c3) -- ok (c2=10, c4=30)
+  SELECT * FROM t2 JOIN t1 KEY (c1) /*comment*/<- t2 (c3) -- ok (c2=10, c4=30)
+  SELECT * FROM t2 JOIN t1 KEY (c1) /*comment*/<-/*comment*/ t2 (c3) -- ok (c2=10, c4=30)
+
+Testing that < and - with space are separate operators:
+  SELECT (1 < - 2)::int: result = 0 (should be 0)
+  SELECT (3 < -1)::int: result = 0 (should be 0)
+  SELECT (3<-2)::int: result = 0 (should be 0)
+  SELECT (-1 < 1)::int: result = 1 (should be 1)
+  SELECT (-3<-2)::int: result = 1 (should be 1)
+
+All parser tests completed successfully!

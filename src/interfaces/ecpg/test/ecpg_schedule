@@ -46,6 +46,7 @@ test: sql/dynalloc2
 test: sql/dyntest
 test: sql/execute
 test: sql/fetch
+test: sql/foreign_key_join
 test: sql/func
 test: sql/indicators
 test: sql/oldexec

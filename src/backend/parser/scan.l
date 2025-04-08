@@ -170,6 +170,7 @@ static void check_escape_warning(core_yyscan_t yyscanner);
  *  <xui> quoted identifier with Unicode escapes
  *  <xus> quoted string with Unicode escapes
  *  <xeu> Unicode surrogate pair in extended quoted string
+ *  <xleftarrow> left arrow in extended quoted strings
  *
  * Remember to add an <<EOF>> case whenever you add a new exclusive state!
  * The default one is probably not the right thing.
@@ -186,6 +187,7 @@ static void check_escape_warning(core_yyscan_t yyscanner);
 %x xui
 %x xus
 %x xeu
+%x xleftarrow
 
 /*
  * In order to make the world safe for Windows and Mac clients as well as
@@ -352,6 +354,7 @@ less_equals		"<="
 greater_equals	">="
 less_greater	"<>"
 not_equals		"!="
+right_arrow		"->"
 
 /*
  * "self" is the set of chars that should be returned as single-character
@@ -439,6 +442,29 @@ other			.
  */
 
 %%
+
+<xleftarrow>{
+"-"			{
+					SET_YYLLOC();
+					BEGIN(INITIAL);
+					return LEFT_ARROW_MINUS;
+				}
+.|\n		{
+					/*
+					 * This should not happen - we enter xleftarrow state only
+					 * after seeing "<" and pushing back "-". The first character
+					 * we see should be that "-". However, if we see something else,
+					 * push it back for rescanning in INITIAL state to avoid getting
+					 * stuck.
+					 */
+					yyless(0);
+					BEGIN(INITIAL);
+				}
+<<EOF>>		{
+					BEGIN(INITIAL);
+					yyterminate();
+				}
+}
 
 {whitespace}	{
 					/* ignore */
@@ -878,6 +904,11 @@ other			.
 					return NOT_EQUALS;
 				}
 
+{right_arrow}	{
+					SET_YYLLOC();
+					return RIGHT_ARROW;
+				}
+
 {self}			{
 					SET_YYLLOC();
 					return yytext[0];
@@ -904,6 +935,14 @@ other			.
 						slashstar = dashdash;
 					if (slashstar)
 						nchars = slashstar - yytext;
+
+					if (nchars == 2 && yytext[0] == '<' && yytext[1] == '-')
+					{
+						/* Strip the unwanted chars from the token */
+						yyless(1);
+						BEGIN(xleftarrow);
+						return LEFT_ARROW_LESS;
+					}
 
 					/*
 					 * For SQL compatibility, '+' and '-' cannot be the
@@ -975,6 +1014,8 @@ other			.
 								return NOT_EQUALS;
 							if (yytext[0] == '!' && yytext[1] == '=')
 								return NOT_EQUALS;
+							if (yytext[0] == '-' && yytext[1] == '>')
+								return RIGHT_ARROW;
 						}
 					}
 
