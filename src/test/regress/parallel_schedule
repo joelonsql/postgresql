@@ -11,6 +11,10 @@
 # required setup steps
 test: test_setup
 
+test: foreign_key_join_cte
+
+test: foreign_key_join_group_by
+
 # ----------
 # The first group of parallel tests
 # ----------
@@ -123,7 +127,7 @@ test: plancache limit plpgsql copy2 temp domain rangefuncs prepare conversion tr
 # The stats test resets stats, so nothing else needing stats access can be in
 # this group.
 # ----------
-test: partition_join partition_prune reloptions hash_part indexing partition_aggregate partition_info tuplesort explain compression compression_lz4 memoize stats predicate numa
+test: partition_join partition_prune reloptions hash_part indexing partition_aggregate partition_info tuplesort explain compression compression_lz4 memoize stats predicate numa foreign_key_join
 
 # event_trigger depends on create_am and cannot run concurrently with
 # any test that runs DDL

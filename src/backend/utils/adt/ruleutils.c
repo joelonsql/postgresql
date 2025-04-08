@@ -12607,6 +12607,105 @@ get_from_clause_item(Node *jtnode, Query *query, deparse_context *context)
 				appendStringInfo(buf, " AS %s",
 								 quote_identifier(j->join_using_alias->aliasname));
 		}
+		else if (j->fkJoin)
+		{
+			if (IsA(j->fkJoin, ForeignKeyJoinNode))
+			{
+				ListCell   *lc_left,
+						   *lc_right;
+				bool		first = true;
+				ForeignKeyJoinNode *fkjn = (ForeignKeyJoinNode *) j->fkJoin;
+				const char *fkdir_str;
+				RangeTblEntry *left_rte,
+						   *right_rte;
+				List	   *leftAttnums,
+						   *rightAttnums;
+				int			right_rti;
+
+				/*
+				 * Determine the direction string and assign left/right
+				 * variables
+				 */
+				if (fkjn->fkdir == FKDIR_TO)
+				{
+					fkdir_str = " -> ";
+
+					/* Left side: referencing */
+					left_rte = rt_fetch(fkjn->referencingVarno, dpns->rtable);
+					leftAttnums = fkjn->referencingAttnums;
+
+					/* Right side: referenced */
+					right_rte = rt_fetch(fkjn->referencedVarno, dpns->rtable);
+					rightAttnums = fkjn->referencedAttnums;
+					right_rti = fkjn->referencedVarno;
+				}
+				else if (fkjn->fkdir == FKDIR_FROM)
+				{
+					fkdir_str = " <- ";
+
+					/* Left side: referenced */
+					left_rte = rt_fetch(fkjn->referencedVarno, dpns->rtable);
+					leftAttnums = fkjn->referencedAttnums;
+
+					/* Right side: referencing */
+					right_rte = rt_fetch(fkjn->referencingVarno, dpns->rtable);
+					rightAttnums = fkjn->referencingAttnums;
+					right_rti = fkjn->referencingVarno;
+				}
+				else
+				{
+					elog(ERROR, "unrecognized foreign key direction: %d", (int) fkjn->fkdir);
+				}
+
+				appendStringInfoString(buf, " KEY (");
+
+				/* Append the left (before FROM/TO) column names */
+				first = true;
+				foreach(lc_left, leftAttnums)
+				{
+					AttrNumber	attnum = lfirst_int(lc_left);
+					char	   *colname = get_rte_attribute_name(left_rte, attnum);
+
+					if (!first)
+						appendStringInfoString(buf, ", ");
+					else
+						first = false;
+
+					appendStringInfoString(buf, quote_identifier(colname));
+				}
+
+				appendStringInfoChar(buf, ')');
+
+				/* Append the direction and right table name or alias */
+				appendStringInfoString(buf, fkdir_str);
+
+				appendStringInfoString(buf, quote_identifier(get_rtable_name(right_rti, context)));
+
+				appendStringInfoString(buf, " (");
+
+				/* Append the right (after <-/->) column names */
+				first = true;
+				foreach(lc_right, rightAttnums)
+				{
+					AttrNumber	attnum = lfirst_int(lc_right);
+					char	   *colname = get_rte_attribute_name(right_rte, attnum);
+
+					if (!first)
+						appendStringInfoString(buf, ", ");
+					else
+						first = false;
+
+					appendStringInfoString(buf, quote_identifier(colname));
+				}
+
+				appendStringInfoChar(buf, ')');
+			}
+			else
+			{
+				elog(ERROR, "unexpected node type for fkJoin: %d",
+					 (int) nodeTag(j->fkJoin));
+			}
+		}
 		else if (j->quals)
 		{
 			appendStringInfoString(buf, " ON ");

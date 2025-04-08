@@ -268,6 +268,8 @@ static Node *makeRecursiveViewSelect(char *relname, List *aliases, Node *query);
 	struct KeyAction *keyaction;
 	ReturningClause *retclause;
 	ReturningOptionKind retoptionkind;
+	ForeignKeyDirection fkdir;
+	ForeignKeyClause *fkjn;
 }
 
 %type <node>	stmt toplevel_stmt schema_stmt routine_body_stmt
@@ -671,6 +673,7 @@ static Node *makeRecursiveViewSelect(char *relname, List *aliases, Node *query);
 				json_object_constructor_null_clause_opt
 				json_array_constructor_null_clause_opt
 
+%type <fkdir>	fk_direction
 
 /*
  * Non-keyword token types.  These are hard-wired into the "flex" lexer.
@@ -688,6 +691,7 @@ static Node *makeRecursiveViewSelect(char *relname, List *aliases, Node *query);
 %token <ival>	ICONST PARAM
 %token			TYPECAST DOT_DOT COLON_EQUALS EQUALS_GREATER
 %token			LESS_EQUALS GREATER_EQUALS NOT_EQUALS
+%token			LEFT_ARROW_LESS LEFT_ARROW_MINUS RIGHT_ARROW
 
 /*
  * If you want to make any keyword changes, update the keyword table in
@@ -805,7 +809,7 @@ static Node *makeRecursiveViewSelect(char *relname, List *aliases, Node *query);
  * FORMAT_LA, NULLS_LA, WITH_LA, and WITHOUT_LA are needed to make the grammar
  * LALR(1).
  */
-%token		FORMAT_LA NOT_LA NULLS_LA WITH_LA WITHOUT_LA
+%token		FORMAT_LA KEY_LA NOT_LA NULLS_LA WITH_LA WITHOUT_LA
 
 /*
  * The grammar likewise thinks these tokens are keywords, but they are never
@@ -828,7 +832,7 @@ static Node *makeRecursiveViewSelect(char *relname, List *aliases, Node *query);
 %left		AND
 %right		NOT
 %nonassoc	IS ISNULL NOTNULL	/* IS sets precedence for IS NULL, etc */
-%nonassoc	'<' '>' '=' LESS_EQUALS GREATER_EQUALS NOT_EQUALS
+%nonassoc	'<' LEFT_ARROW_LESS '>' '=' LESS_EQUALS GREATER_EQUALS NOT_EQUALS
 %nonassoc	BETWEEN IN_P LIKE ILIKE SIMILAR NOT_LA
 %nonassoc	ESCAPE			/* ESCAPE must be just above LIKE/ILIKE/SIMILAR */
 
@@ -881,8 +885,8 @@ static Node *makeRecursiveViewSelect(char *relname, List *aliases, Node *query);
 %nonassoc	UNBOUNDED NESTED /* ideally would have same precedence as IDENT */
 %nonassoc	IDENT PARTITION RANGE ROWS GROUPS PRECEDING FOLLOWING CUBE ROLLUP
 			SET KEYS OBJECT_P SCALAR VALUE_P WITH WITHOUT PATH
-%left		Op OPERATOR		/* multi-character ops and user-defined operators */
-%left		'+' '-'
+%left		Op OPERATOR RIGHT_ARROW	/* multi-character ops and user-defined operators */
+%left		'+' '-' LEFT_ARROW_MINUS
 %left		'*' '/' '%'
 %left		'^'
 /* Unary Operators */
@@ -4299,7 +4303,7 @@ ConstraintElem:
 								   NULL, NULL, yyscanner);
 					$$ = (Node *) n;
 				}
-			| PRIMARY KEY '(' columnList opt_without_overlaps ')' opt_c_include opt_definition OptConsTableSpace
+			| PRIMARY KEY_LA '(' columnList opt_without_overlaps ')' opt_c_include opt_definition OptConsTableSpace
 				ConstraintAttributeSpec
 				{
 					Constraint *n = makeNode(Constraint);
@@ -4353,7 +4357,7 @@ ConstraintElem:
 								   NULL, NULL, yyscanner);
 					$$ = (Node *) n;
 				}
-			| FOREIGN KEY '(' columnList optionalPeriodName ')' REFERENCES qualified_name
+			| FOREIGN KEY_LA '(' columnList optionalPeriodName ')' REFERENCES qualified_name
 				opt_column_and_period_list key_match key_actions ConstraintAttributeSpec
 				{
 					Constraint *n = makeNode(Constraint);
@@ -13780,6 +13784,7 @@ joined_table:
 					n->rarg = $4;
 					n->usingClause = NIL;
 					n->join_using_alias = NULL;
+					n->fkJoin = NULL;
 					n->quals = NULL;
 					$$ = n;
 				}
@@ -13793,13 +13798,26 @@ joined_table:
 					n->rarg = $4;
 					if ($5 != NULL && IsA($5, List))
 					{
-						 /* USING clause */
+						/* USING clause */
 						n->usingClause = linitial_node(List, castNode(List, $5));
 						n->join_using_alias = lsecond_node(Alias, castNode(List, $5));
+						n->fkJoin = NULL;
+						n->quals = NULL;
+					}
+					else if ($5 != NULL && IsA($5, ForeignKeyClause))
+					{
+						/* KEY clause */
+						n->usingClause = NIL;
+						n->join_using_alias = NULL;
+						n->fkJoin = (Node *) $5;
+						n->quals = NULL;
 					}
 					else
 					{
 						/* ON clause */
+						n->usingClause = NIL;
+						n->join_using_alias = NULL;
+						n->fkJoin = NULL;
 						n->quals = $5;
 					}
 					$$ = n;
@@ -13818,10 +13836,23 @@ joined_table:
 						/* USING clause */
 						n->usingClause = linitial_node(List, castNode(List, $4));
 						n->join_using_alias = lsecond_node(Alias, castNode(List, $4));
+						n->fkJoin = NULL;
+						n->quals = NULL;
+					}
+					else if ($4 != NULL && IsA($4, ForeignKeyClause))
+					{
+						/* KEY clause */
+						n->usingClause = NIL;
+						n->join_using_alias = NULL;
+						n->fkJoin = (Node *) $4;
+						n->quals = NULL;
 					}
 					else
 					{
 						/* ON clause */
+						n->usingClause = NIL;
+						n->join_using_alias = NULL;
+						n->fkJoin = NULL;
 						n->quals = $4;
 					}
 					$$ = n;
@@ -13836,6 +13867,7 @@ joined_table:
 					n->rarg = $5;
 					n->usingClause = NIL; /* figure out which columns later... */
 					n->join_using_alias = NULL;
+					n->fkJoin = NULL;
 					n->quals = NULL; /* fill later */
 					$$ = n;
 				}
@@ -13850,6 +13882,7 @@ joined_table:
 					n->rarg = $4;
 					n->usingClause = NIL; /* figure out which columns later... */
 					n->join_using_alias = NULL;
+					n->fkJoin = NULL;
 					n->quals = NULL; /* fill later */
 					$$ = n;
 				}
@@ -13964,6 +13997,21 @@ join_qual: USING '(' name_list ')' opt_alias_clause_for_join_using
 				{
 					$$ = $2;
 				}
+			| KEY_LA '(' name_list ')' fk_direction ColId '(' name_list ')'
+				{
+					ForeignKeyClause *n = makeNode(ForeignKeyClause);
+					n->localCols = $3;
+					n->fkdir = $5;
+					n->refAlias = $6;
+					n->refCols = $8;
+					n->location = @1;
+					$$ = (Node *) n;
+				}
+			;
+
+fk_direction:
+			LEFT_ARROW_LESS LEFT_ARROW_MINUS	{ $$ = FKDIR_FROM; }
+			| RIGHT_ARROW						{ $$ = FKDIR_TO; }
 		;
 
 
@@ -15029,6 +15077,8 @@ a_expr:		c_expr									{ $$ = $1; }
 				{ $$ = (Node *) makeSimpleA_Expr(AEXPR_OP, "+", NULL, $2, @1); }
 			| '-' a_expr					%prec UMINUS
 				{ $$ = doNegate($2, @1); }
+			| LEFT_ARROW_MINUS a_expr		%prec UMINUS
+				{ $$ = doNegate($2, @1); }
 			| a_expr '+' a_expr
 				{ $$ = (Node *) makeSimpleA_Expr(AEXPR_OP, "+", $1, $3, @2); }
 			| a_expr '-' a_expr
@@ -15043,6 +15093,8 @@ a_expr:		c_expr									{ $$ = $1; }
 				{ $$ = (Node *) makeSimpleA_Expr(AEXPR_OP, "^", $1, $3, @2); }
 			| a_expr '<' a_expr
 				{ $$ = (Node *) makeSimpleA_Expr(AEXPR_OP, "<", $1, $3, @2); }
+			| a_expr LEFT_ARROW_LESS a_expr
+				{ $$ = (Node *) makeSimpleA_Expr(AEXPR_OP, "<", $1, $3, @2); }
 			| a_expr '>' a_expr
 				{ $$ = (Node *) makeSimpleA_Expr(AEXPR_OP, ">", $1, $3, @2); }
 			| a_expr '=' a_expr
@@ -15053,6 +15105,8 @@ a_expr:		c_expr									{ $$ = $1; }
 				{ $$ = (Node *) makeSimpleA_Expr(AEXPR_OP, ">=", $1, $3, @2); }
 			| a_expr NOT_EQUALS a_expr
 				{ $$ = (Node *) makeSimpleA_Expr(AEXPR_OP, "<>", $1, $3, @2); }
+			| a_expr RIGHT_ARROW a_expr
+				{ $$ = (Node *) makeSimpleA_Expr(AEXPR_OP, "->", $1, $3, @2); }
 
 			| a_expr qual_Op a_expr				%prec Op
 				{ $$ = (Node *) makeA_Expr(AEXPR_OP, $2, $1, $3, @2); }
@@ -15523,6 +15577,8 @@ b_expr:		c_expr
 				{ $$ = (Node *) makeSimpleA_Expr(AEXPR_OP, "^", $1, $3, @2); }
 			| b_expr '<' b_expr
 				{ $$ = (Node *) makeSimpleA_Expr(AEXPR_OP, "<", $1, $3, @2); }
+			| b_expr LEFT_ARROW_LESS b_expr
+				{ $$ = (Node *) makeSimpleA_Expr(AEXPR_OP, "<", $1, $3, @2); }
 			| b_expr '>' b_expr
 				{ $$ = (Node *) makeSimpleA_Expr(AEXPR_OP, ">", $1, $3, @2); }
 			| b_expr '=' b_expr
@@ -15533,6 +15589,8 @@ b_expr:		c_expr
 				{ $$ = (Node *) makeSimpleA_Expr(AEXPR_OP, ">=", $1, $3, @2); }
 			| b_expr NOT_EQUALS b_expr
 				{ $$ = (Node *) makeSimpleA_Expr(AEXPR_OP, "<>", $1, $3, @2); }
+			| b_expr RIGHT_ARROW b_expr
+				{ $$ = (Node *) makeSimpleA_Expr(AEXPR_OP, "->", $1, $3, @2); }
 			| b_expr qual_Op b_expr				%prec Op
 				{ $$ = (Node *) makeA_Expr(AEXPR_OP, $2, $1, $3, @2); }
 			| qual_Op b_expr					%prec Op
@@ -16691,16 +16749,19 @@ all_Op:		Op										{ $$ = $1; }
 
 MathOp:		 '+'									{ $$ = "+"; }
 			| '-'									{ $$ = "-"; }
+			| LEFT_ARROW_MINUS						{ $$ = "-"; }
 			| '*'									{ $$ = "*"; }
 			| '/'									{ $$ = "/"; }
 			| '%'									{ $$ = "%"; }
 			| '^'									{ $$ = "^"; }
 			| '<'									{ $$ = "<"; }
+			| LEFT_ARROW_LESS						{ $$ = "<"; }
 			| '>'									{ $$ = ">"; }
 			| '='									{ $$ = "="; }
 			| LESS_EQUALS							{ $$ = "<="; }
 			| GREATER_EQUALS						{ $$ = ">="; }
 			| NOT_EQUALS							{ $$ = "<>"; }
+			| RIGHT_ARROW							{ $$ = "->"; }
 		;
 
 qual_Op:	Op
