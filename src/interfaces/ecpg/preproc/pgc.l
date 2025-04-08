@@ -169,6 +169,7 @@ static struct _if_value
 %x xus
 %x xcond
 %x xskip
+%x xleftarrow
 
 /* Additional exclusive states that are specific to ECPG */
 %x C SQL incl def def_ident undef
@@ -335,6 +336,7 @@ less_equals		"<="
 greater_equals	">="
 less_greater	"<>"
 not_equals		"!="
+right_arrow		"->"
 
 /*
  * "self" is the set of chars that should be returned as single-character
@@ -468,6 +470,28 @@ cppline			{space}*#([^i][A-Za-z]*|{if}|{ifdef}|{ifndef}|{import})((\/\*[^*/]*\*+
 
 		token_start = NULL;
 %}
+
+<xleftarrow>{
+"-"			{
+					BEGIN(SQL);
+					return LEFT_ARROW_MINUS;
+				}
+.|\n		{
+					/*
+					 * This should not happen - we enter xleftarrow state only
+					 * after seeing "<" and pushing back "-". The first character
+					 * we see should be that "-". However, if we see something else,
+					 * push it back for rescanning in SQL state to avoid getting
+					 * stuck.
+					 */
+					yyless(0);
+					BEGIN(SQL);
+				}
+<<EOF>>		{
+					BEGIN(SQL);
+					yyterminate();
+				}
+}
 
 <SQL>{
 {whitespace}	{
@@ -854,6 +878,10 @@ cppline			{space}*#([^i][A-Za-z]*|{if}|{ifdef}|{ifndef}|{import})((\/\*[^*/]*\*+
 					return NOT_EQUALS;
 				}
 
+{right_arrow}	{
+					return RIGHT_ARROW;
+				}
+
 {informix_special} {
 					/* are we simulating Informix? */
 					if (INFORMIX_MODE)
@@ -895,6 +923,14 @@ cppline			{space}*#([^i][A-Za-z]*|{if}|{ifdef}|{ifndef}|{import})((\/\*[^*/]*\*+
 						slashstar = dashdash;
 					if (slashstar)
 						nchars = slashstar - yytext;
+
+					if (nchars == 2 && yytext[0] == '<' && yytext[1] == '-')
+					{
+						/* Strip the unwanted chars from the token */
+						yyless(1);
+						BEGIN(xleftarrow);
+						return LEFT_ARROW_LESS;
+					}
 
 					/*
 					 * For SQL compatibility, '+' and '-' cannot be the
@@ -968,6 +1004,8 @@ cppline			{space}*#([^i][A-Za-z]*|{if}|{ifdef}|{ifndef}|{import})((\/\*[^*/]*\*+
 								return NOT_EQUALS;
 							if (yytext[0] == '!' && yytext[1] == '=')
 								return NOT_EQUALS;
+							if (yytext[0] == '-' && yytext[1] == '>')
+								return RIGHT_ARROW;
 						}
 					}
 

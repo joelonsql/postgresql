@@ -1,0 +1,182 @@
+[NO_PID]: ECPGdebug: set to 1
+[NO_PID]: sqlca: code: 0, state: 00000
+[NO_PID]: ECPGconnect: opening database ecpg1_regression on <DEFAULT> port <DEFAULT>  
+[NO_PID]: sqlca: code: 0, state: 00000
+[NO_PID]: ECPGsetcommit on line 17: action "on"; connection "ecpg1_regression"
+[NO_PID]: sqlca: code: 0, state: 00000
+[NO_PID]: ecpg_execute on line 22: query: create table t1 ( c1 int not null , c2 int not null , constraint t1_pkey primary key ( c1 ) ); with 0 parameter(s) on connection ecpg1_regression
+[NO_PID]: sqlca: code: 0, state: 00000
+[NO_PID]: ecpg_execute on line 22: using PQexec
+[NO_PID]: sqlca: code: 0, state: 00000
+[NO_PID]: ecpg_process_output on line 22: OK: CREATE TABLE
+[NO_PID]: sqlca: code: 0, state: 00000
+[NO_PID]: ecpg_execute on line 28: query: create table t2 ( c3 int not null , c4 int not null , constraint t2_pkey primary key ( c3 ) , constraint t2_c3_fkey foreign key ( c3 ) references t1 ( c1 ) ); with 0 parameter(s) on connection ecpg1_regression
+[NO_PID]: sqlca: code: 0, state: 00000
+[NO_PID]: ecpg_execute on line 28: using PQexec
+[NO_PID]: sqlca: code: 0, state: 00000
+[NO_PID]: ecpg_process_output on line 28: OK: CREATE TABLE
+[NO_PID]: sqlca: code: 0, state: 00000
+[NO_PID]: ecpg_execute on line 36: query: insert into t1 ( c1 , c2 ) values ( 1 , 10 ); with 0 parameter(s) on connection ecpg1_regression
+[NO_PID]: sqlca: code: 0, state: 00000
+[NO_PID]: ecpg_execute on line 36: using PQexec
+[NO_PID]: sqlca: code: 0, state: 00000
+[NO_PID]: ecpg_process_output on line 36: OK: INSERT 0 1
+[NO_PID]: sqlca: code: 0, state: 00000
+[NO_PID]: ecpg_execute on line 37: query: insert into t1 ( c1 , c2 ) values ( 2 , 20 ); with 0 parameter(s) on connection ecpg1_regression
+[NO_PID]: sqlca: code: 0, state: 00000
+[NO_PID]: ecpg_execute on line 37: using PQexec
+[NO_PID]: sqlca: code: 0, state: 00000
+[NO_PID]: ecpg_process_output on line 37: OK: INSERT 0 1
+[NO_PID]: sqlca: code: 0, state: 00000
+[NO_PID]: ecpg_execute on line 38: query: insert into t2 ( c3 , c4 ) values ( 1 , 30 ); with 0 parameter(s) on connection ecpg1_regression
+[NO_PID]: sqlca: code: 0, state: 00000
+[NO_PID]: ecpg_execute on line 38: using PQexec
+[NO_PID]: sqlca: code: 0, state: 00000
+[NO_PID]: ecpg_process_output on line 38: OK: INSERT 0 1
+[NO_PID]: sqlca: code: 0, state: 00000
+[NO_PID]: ecpg_execute on line 44: query: select ( 1 < - 2 ) :: int; with 0 parameter(s) on connection ecpg1_regression
+[NO_PID]: sqlca: code: 0, state: 00000
+[NO_PID]: ecpg_execute on line 44: using PQexec
+[NO_PID]: sqlca: code: 0, state: 00000
+[NO_PID]: ecpg_process_output on line 44: correctly got 1 tuples with 1 fields
+[NO_PID]: sqlca: code: 0, state: 00000
+[NO_PID]: ecpg_get_data on line 44: RESULT: 0 offset: -1; array: no
+[NO_PID]: sqlca: code: 0, state: 00000
+[NO_PID]: ecpg_execute on line 50: query: select t1 . c2 , t2 . c4 from t1 join t2 key ( c3 ) -> t1 ( c1 ); with 0 parameter(s) on connection ecpg1_regression
+[NO_PID]: sqlca: code: 0, state: 00000
+[NO_PID]: ecpg_execute on line 50: using PQexec
+[NO_PID]: sqlca: code: 0, state: 00000
+[NO_PID]: ecpg_process_output on line 50: correctly got 1 tuples with 2 fields
+[NO_PID]: sqlca: code: 0, state: 00000
+[NO_PID]: ecpg_get_data on line 50: RESULT: 10 offset: -1; array: no
+[NO_PID]: sqlca: code: 0, state: 00000
+[NO_PID]: ecpg_get_data on line 50: RESULT: 30 offset: -1; array: no
+[NO_PID]: sqlca: code: 0, state: 00000
+[NO_PID]: ecpg_execute on line 55: query: select t1 . c2 , t2 . c4 from t1 join t2 key ( c3 ) -> t1 ( c1 ); with 0 parameter(s) on connection ecpg1_regression
+[NO_PID]: sqlca: code: 0, state: 00000
+[NO_PID]: ecpg_execute on line 55: using PQexec
+[NO_PID]: sqlca: code: 0, state: 00000
+[NO_PID]: ecpg_process_output on line 55: correctly got 1 tuples with 2 fields
+[NO_PID]: sqlca: code: 0, state: 00000
+[NO_PID]: ecpg_get_data on line 55: RESULT: 10 offset: -1; array: no
+[NO_PID]: sqlca: code: 0, state: 00000
+[NO_PID]: ecpg_get_data on line 55: RESULT: 30 offset: -1; array: no
+[NO_PID]: sqlca: code: 0, state: 00000
+[NO_PID]: ecpg_execute on line 60: query: select t1 . c2 , t2 . c4 from t1 join t2 key ( c3 ) -> t1 ( c1 ); with 0 parameter(s) on connection ecpg1_regression
+[NO_PID]: sqlca: code: 0, state: 00000
+[NO_PID]: ecpg_execute on line 60: using PQexec
+[NO_PID]: sqlca: code: 0, state: 00000
+[NO_PID]: ecpg_process_output on line 60: correctly got 1 tuples with 2 fields
+[NO_PID]: sqlca: code: 0, state: 00000
+[NO_PID]: ecpg_get_data on line 60: RESULT: 10 offset: -1; array: no
+[NO_PID]: sqlca: code: 0, state: 00000
+[NO_PID]: ecpg_get_data on line 60: RESULT: 30 offset: -1; array: no
+[NO_PID]: sqlca: code: 0, state: 00000
+[NO_PID]: ecpg_execute on line 65: query: select t1 . c2 , t2 . c4 from t1 join t2 key ( c3 ) -> t1 ( c1 ); with 0 parameter(s) on connection ecpg1_regression
+[NO_PID]: sqlca: code: 0, state: 00000
+[NO_PID]: ecpg_execute on line 65: using PQexec
+[NO_PID]: sqlca: code: 0, state: 00000
+[NO_PID]: ecpg_process_output on line 65: correctly got 1 tuples with 2 fields
+[NO_PID]: sqlca: code: 0, state: 00000
+[NO_PID]: ecpg_get_data on line 65: RESULT: 10 offset: -1; array: no
+[NO_PID]: sqlca: code: 0, state: 00000
+[NO_PID]: ecpg_get_data on line 65: RESULT: 30 offset: -1; array: no
+[NO_PID]: sqlca: code: 0, state: 00000
+[NO_PID]: ecpg_execute on line 73: query: select t1 . c2 , t2 . c4 from t2 join t1 key ( c1 ) < - t2 ( c3 ); with 0 parameter(s) on connection ecpg1_regression
+[NO_PID]: sqlca: code: 0, state: 00000
+[NO_PID]: ecpg_execute on line 73: using PQexec
+[NO_PID]: sqlca: code: 0, state: 00000
+[NO_PID]: ecpg_check_PQresult on line 73: bad response - ERROR:  syntax error at or near "<"
+LINE 1: ...lect t1 . c2 , t2 . c4 from t2 join t1 key ( c1 ) < - t2 ( c...
+                                                             ^
+[NO_PID]: sqlca: code: 0, state: 00000
+[NO_PID]: raising sqlstate 42601 (sqlcode -400): syntax error at or near "<" on line 73
+[NO_PID]: sqlca: code: -400, state: 42601
+SQL error: syntax error at or near "<" on line 73
+[NO_PID]: ecpg_execute on line 78: query: select t1 . c2 , t2 . c4 from t2 join t1 key ( c1 ) < - t2 ( c3 ); with 0 parameter(s) on connection ecpg1_regression
+[NO_PID]: sqlca: code: 0, state: 00000
+[NO_PID]: ecpg_execute on line 78: using PQexec
+[NO_PID]: sqlca: code: 0, state: 00000
+[NO_PID]: ecpg_check_PQresult on line 78: bad response - ERROR:  syntax error at or near "<"
+LINE 1: ...lect t1 . c2 , t2 . c4 from t2 join t1 key ( c1 ) < - t2 ( c...
+                                                             ^
+[NO_PID]: sqlca: code: 0, state: 00000
+[NO_PID]: raising sqlstate 42601 (sqlcode -400): syntax error at or near "<" on line 78
+[NO_PID]: sqlca: code: -400, state: 42601
+SQL error: syntax error at or near "<" on line 78
+[NO_PID]: ecpg_execute on line 83: query: select t1 . c2 , t2 . c4 from t2 join t1 key ( c1 ) < - t2 ( c3 ); with 0 parameter(s) on connection ecpg1_regression
+[NO_PID]: sqlca: code: 0, state: 00000
+[NO_PID]: ecpg_execute on line 83: using PQexec
+[NO_PID]: sqlca: code: 0, state: 00000
+[NO_PID]: ecpg_check_PQresult on line 83: bad response - ERROR:  syntax error at or near "<"
+LINE 1: ...lect t1 . c2 , t2 . c4 from t2 join t1 key ( c1 ) < - t2 ( c...
+                                                             ^
+[NO_PID]: sqlca: code: 0, state: 00000
+[NO_PID]: raising sqlstate 42601 (sqlcode -400): syntax error at or near "<" on line 83
+[NO_PID]: sqlca: code: -400, state: 42601
+SQL error: syntax error at or near "<" on line 83
+[NO_PID]: ecpg_execute on line 88: query: select t1 . c2 , t2 . c4 from t2 join t1 key ( c1 ) < - t2 ( c3 ); with 0 parameter(s) on connection ecpg1_regression
+[NO_PID]: sqlca: code: 0, state: 00000
+[NO_PID]: ecpg_execute on line 88: using PQexec
+[NO_PID]: sqlca: code: 0, state: 00000
+[NO_PID]: ecpg_check_PQresult on line 88: bad response - ERROR:  syntax error at or near "<"
+LINE 1: ...lect t1 . c2 , t2 . c4 from t2 join t1 key ( c1 ) < - t2 ( c...
+                                                             ^
+[NO_PID]: sqlca: code: 0, state: 00000
+[NO_PID]: raising sqlstate 42601 (sqlcode -400): syntax error at or near "<" on line 88
+[NO_PID]: sqlca: code: -400, state: 42601
+SQL error: syntax error at or near "<" on line 88
+[NO_PID]: ecpg_execute on line 97: query: select ( 1 < - 2 ) :: int; with 0 parameter(s) on connection ecpg1_regression
+[NO_PID]: sqlca: code: 0, state: 00000
+[NO_PID]: ecpg_execute on line 97: using PQexec
+[NO_PID]: sqlca: code: 0, state: 00000
+[NO_PID]: ecpg_process_output on line 97: correctly got 1 tuples with 1 fields
+[NO_PID]: sqlca: code: 0, state: 00000
+[NO_PID]: ecpg_get_data on line 97: RESULT: 0 offset: -1; array: no
+[NO_PID]: sqlca: code: 0, state: 00000
+[NO_PID]: ecpg_execute on line 101: query: select ( 3 < - 1 ) :: int; with 0 parameter(s) on connection ecpg1_regression
+[NO_PID]: sqlca: code: 0, state: 00000
+[NO_PID]: ecpg_execute on line 101: using PQexec
+[NO_PID]: sqlca: code: 0, state: 00000
+[NO_PID]: ecpg_process_output on line 101: correctly got 1 tuples with 1 fields
+[NO_PID]: sqlca: code: 0, state: 00000
+[NO_PID]: ecpg_get_data on line 101: RESULT: 0 offset: -1; array: no
+[NO_PID]: sqlca: code: 0, state: 00000
+[NO_PID]: ecpg_execute on line 105: query: select ( 3 < - 2 ) :: int; with 0 parameter(s) on connection ecpg1_regression
+[NO_PID]: sqlca: code: 0, state: 00000
+[NO_PID]: ecpg_execute on line 105: using PQexec
+[NO_PID]: sqlca: code: 0, state: 00000
+[NO_PID]: ecpg_process_output on line 105: correctly got 1 tuples with 1 fields
+[NO_PID]: sqlca: code: 0, state: 00000
+[NO_PID]: ecpg_get_data on line 105: RESULT: 0 offset: -1; array: no
+[NO_PID]: sqlca: code: 0, state: 00000
+[NO_PID]: ecpg_execute on line 109: query: select ( - 1 < 1 ) :: int; with 0 parameter(s) on connection ecpg1_regression
+[NO_PID]: sqlca: code: 0, state: 00000
+[NO_PID]: ecpg_execute on line 109: using PQexec
+[NO_PID]: sqlca: code: 0, state: 00000
+[NO_PID]: ecpg_process_output on line 109: correctly got 1 tuples with 1 fields
+[NO_PID]: sqlca: code: 0, state: 00000
+[NO_PID]: ecpg_get_data on line 109: RESULT: 1 offset: -1; array: no
+[NO_PID]: sqlca: code: 0, state: 00000
+[NO_PID]: ecpg_execute on line 112: query: select ( - 3 < - 2 ) :: int; with 0 parameter(s) on connection ecpg1_regression
+[NO_PID]: sqlca: code: 0, state: 00000
+[NO_PID]: ecpg_execute on line 112: using PQexec
+[NO_PID]: sqlca: code: 0, state: 00000
+[NO_PID]: ecpg_process_output on line 112: correctly got 1 tuples with 1 fields
+[NO_PID]: sqlca: code: 0, state: 00000
+[NO_PID]: ecpg_get_data on line 112: RESULT: 1 offset: -1; array: no
+[NO_PID]: sqlca: code: 0, state: 00000
+[NO_PID]: ecpg_execute on line 116: query: drop table t2; with 0 parameter(s) on connection ecpg1_regression
+[NO_PID]: sqlca: code: 0, state: 00000
+[NO_PID]: ecpg_execute on line 116: using PQexec
+[NO_PID]: sqlca: code: 0, state: 00000
+[NO_PID]: ecpg_process_output on line 116: OK: DROP TABLE
+[NO_PID]: sqlca: code: 0, state: 00000
+[NO_PID]: ecpg_execute on line 117: query: drop table t1; with 0 parameter(s) on connection ecpg1_regression
+[NO_PID]: sqlca: code: 0, state: 00000
+[NO_PID]: ecpg_execute on line 117: using PQexec
+[NO_PID]: sqlca: code: 0, state: 00000
+[NO_PID]: ecpg_process_output on line 117: OK: DROP TABLE
+[NO_PID]: sqlca: code: 0, state: 00000
+[NO_PID]: ecpg_finish: connection ecpg1_regression closed
+[NO_PID]: sqlca: code: 0, state: 00000

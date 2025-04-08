@@ -140,6 +140,9 @@ base_yylex(YYSTYPE *lvalp, YYLTYPE *llocp, core_yyscan_t yyscanner)
 		case FORMAT:
 			cur_token_length = 6;
 			break;
+		case KEY:
+			cur_token_length = 3;
+			break;
 		case NOT:
 			cur_token_length = 3;
 			break;
