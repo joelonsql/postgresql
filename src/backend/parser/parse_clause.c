@@ -40,12 +40,15 @@
 #include "parser/parse_target.h"
 #include "parser/parse_type.h"
 #include "parser/parser.h"
+#include "parser/parsetree.h"
 #include "rewrite/rewriteManip.h"
 #include "utils/builtins.h"
 #include "utils/catcache.h"
 #include "utils/lsyscache.h"
 #include "utils/rel.h"
 #include "utils/syscache.h"
+#include "utils/fmgroids.h"
+#include "parser/parse_fkjoin.h"
 
 
 static int	extractRemainingColumns(ParseState *pstate,
@@ -96,7 +99,6 @@ static WindowClause *findWindowClause(List *wclist, const char *name);
 static Node *transformFrameOffset(ParseState *pstate, int frameOptions,
 								  Oid rangeopfamily, Oid rangeopcintype, Oid *inRangeFunc,
 								  Node *clause);
-
 
 /*
  * transformFromClause -
@@ -1215,7 +1217,7 @@ transformFromClauseItem(ParseState *pstate, Node *n,
 		/*
 		 * Generate combined namespace info for possible use below.
 		 */
-		my_namespace = list_concat(l_namespace, r_namespace);
+		my_namespace = list_concat_copy(l_namespace, r_namespace);
 
 		/*
 		 * We'll work from the nscolumns data and eref alias column names for
@@ -1399,6 +1401,19 @@ transformFromClauseItem(ParseState *pstate, Node *n,
 												l_usingvars,
 												r_usingvars);
 		}
+		else if (j->fkJoin)
+		{
+			/*
+			 * Transform foreign key join node, validate the foreign key
+			 * relationship between tables, and construct appropriate join
+			 * conditions.
+			 *
+			 * This overwrites both j->quals with the constructed join
+			 * conditions and j->fkJoin with a new ForeignKeyJoinNode
+			 * containing the validated foreign key information.
+			 */
+			transformAndValidateForeignKeyJoin(pstate, j, r_nsitem, l_namespace);
+		}
 		else if (j->quals)
 		{
 			/* User-written ON-condition; transform it */
@@ -1549,6 +1564,14 @@ transformFromClauseItem(ParseState *pstate, Node *n,
 										   j->join_using_alias,
 										   j->alias,
 										   true);
+
+		if (j->fkJoin)
+		{
+			ForeignKeyJoinNode *fkjn = castNode(ForeignKeyJoinNode, j->fkJoin);
+
+			nsitem->p_rte->uniqueness_preservation = list_copy(fkjn->uniqueness_preservation);
+			nsitem->p_rte->functional_dependencies = list_copy(fkjn->functional_dependencies);
+		}
 
 		/* Verify that we correctly predicted the join's RT index */
 		Assert(j->rtindex == nsitem->p_rtindex);
