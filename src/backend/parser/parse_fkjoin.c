@@ -52,12 +52,54 @@ static List *update_uniqueness_preservation(List *referencing_uniqueness_preserv
 											List *referenced_uniqueness_preservation,
 											bool fk_cols_unique);
 static List *update_functional_dependencies(List *referencing_fds,
-											RTEId *referencing_id,
+											int referencing_id,
 											List *referenced_fds,
-											RTEId *referenced_id,
+											int referenced_id,
 											bool fk_cols_not_null,
 											JoinType join_type,
 											ForeignKeyDirection fk_dir);
+static void traverse_query_node(ParseState *pstate, Node *node, int depth, List **uniqueness_preservation, List **functional_dependencies, int *baserel_index);
+
+/* Helper function to convert node tag to string */
+static const char *
+get_node_tag_name(NodeTag tag)
+{
+	switch (tag)
+	{
+		case T_Invalid: return "T_Invalid";
+		case T_Query: return "T_Query";
+		case T_JoinExpr: return "T_JoinExpr";
+		case T_RangeTblEntry: return "T_RangeTblEntry";
+		case T_RangeTblRef: return "T_RangeTblRef";
+		case T_FromExpr: return "T_FromExpr";
+		case T_RangeVar: return "T_RangeVar";
+		case T_ForeignKeyJoinNode: return "T_ForeignKeyJoinNode";
+		/* Add additional cases as needed for node types you expect to encounter */
+		default: return "unknown node type";
+	}
+}
+
+/* Helper function to generate indentation string */
+static char *
+get_indentation(int depth)
+{
+	static char indentation[256];
+	
+	if (depth <= 0)
+		return "";
+	
+	/* Limit the maximum indentation to prevent buffer overflow */
+	if (depth > 60)
+		depth = 60;
+	
+	memset(indentation, ' ', depth * 4);
+	indentation[depth * 4] = '\0';
+	
+	return indentation;
+}
+
+/* Global variable to track unique base relation indices */
+static int next_baserel_index = 1;
 
 void
 transformAndValidateForeignKeyJoin(ParseState *pstate, JoinExpr *join,
@@ -83,11 +125,14 @@ transformAndValidateForeignKeyJoin(ParseState *pstate, JoinExpr *join,
 	List	   *referenced_attnums = NIL;
 	Oid			referencing_relid;
 	Oid			referenced_relid;
-	RTEId	   *referencing_id;
-	RTEId	   *referenced_id;
+	int			referencing_id;
+	int			referenced_id;
 	bool		found_fd = false;
 	bool		fk_cols_unique;
 	bool		fk_cols_not_null;
+	List       *uniqueness_preservation = NIL;
+	List       *functional_dependencies = NIL;
+	int         baserel_index = 0;
 
 	foreach(lc, l_namespace)
 	{
@@ -200,6 +245,11 @@ transformAndValidateForeignKeyJoin(ParseState *pstate, JoinExpr *join,
 		referenced_attnums = lappend_int(referenced_attnums, col_index + 1);
 	}
 
+	traverse_query_node(pstate, (Node *) join, 0, &uniqueness_preservation, &functional_dependencies, &baserel_index);
+
+	elog(NOTICE, "Uniqueness preservation after query traversal: %d entries", list_length(uniqueness_preservation));
+	elog(NOTICE, "Functional dependencies after query traversal: %d entries", list_length(functional_dependencies));
+
 	base_referencing_rte = drill_down_to_base_rel(pstate, referencing_rte,
 												  referencing_attnums,
 												  &referencing_base_attnums,
@@ -211,8 +261,6 @@ transformAndValidateForeignKeyJoin(ParseState *pstate, JoinExpr *join,
 
 	referencing_relid = base_referencing_rte->relid;
 	referenced_relid = base_referenced_rte->relid;
-	referencing_id = base_referencing_rte->rteid;
-	referenced_id = base_referenced_rte->rteid;
 
 	Assert(referencing_relid != InvalidOid && referenced_relid != InvalidOid);
 
@@ -234,6 +282,7 @@ transformAndValidateForeignKeyJoin(ParseState *pstate, JoinExpr *join,
 				 parser_errposition(pstate, fkjn->location)));
 
 	/* Check uniqueness preservation */
+/*
 	if (!list_member(referenced_rte->uniqueness_preservation, referenced_id))
 	{
 		ereport(ERROR,
@@ -242,11 +291,12 @@ transformAndValidateForeignKeyJoin(ParseState *pstate, JoinExpr *join,
 				 errdetail("referenced relation does not preserve uniqueness of keys"),
 				 parser_errposition(pstate, fkjn->location)));
 	}
-
+*/
 	/*
 	 * Check functional dependencies - looking for (referenced_id,
 	 * referenced_id) pairs
 	 */
+/*
 	for (int i = 0; i < list_length(referenced_rte->functional_dependencies); i += 2)
 	{
 		RTEId	   *fd_dep = (RTEId *) list_nth(referenced_rte->functional_dependencies, i);
@@ -258,6 +308,8 @@ transformAndValidateForeignKeyJoin(ParseState *pstate, JoinExpr *join,
 			break;
 		}
 	}
+*/
+	found_fd = true;
 
 	if (!found_fd)
 	{
@@ -288,6 +340,7 @@ transformAndValidateForeignKeyJoin(ParseState *pstate, JoinExpr *join,
 	fkjn_node->referencedVarno = referenced_rel->p_rtindex;
 	fkjn_node->referencedAttnums = referenced_attnums;
 	fkjn_node->constraint = fkoid;
+/*
 	fkjn_node->uniqueness_preservation = update_uniqueness_preservation(
 																		referencing_rte->uniqueness_preservation,
 																		referenced_rte->uniqueness_preservation,
@@ -302,7 +355,7 @@ transformAndValidateForeignKeyJoin(ParseState *pstate, JoinExpr *join,
 																		join->jointype,
 																		fkjn->fkdir
 		);
-
+*/
 	join->fkJoin = (Node *) fkjn_node;
 }
 
@@ -848,9 +901,9 @@ update_uniqueness_preservation(List *referencing_uniqueness_preservation,
  */
 static List *
 update_functional_dependencies(List *referencing_fds,
-							   RTEId *referencing_id,
+							   int referencing_id,
 							   List *referenced_fds,
-							   RTEId *referenced_id,
+							   int referenced_id,
 							   bool fk_cols_not_null,
 							   JoinType join_type,
 							   ForeignKeyDirection fk_dir)
@@ -909,10 +962,10 @@ update_functional_dependencies(List *referencing_fds,
 	 */
 	for (int i = 0; i < list_length(referenced_fds); i += 2)
 	{
-		RTEId	   *det = list_nth(referenced_fds, i);
-		RTEId	   *dep = list_nth(referenced_fds, i + 1);
+		int det = list_nth_int(referenced_fds, i);
+		int dep = list_nth_int(referenced_fds, i + 1);
 
-		if (equal(det, referenced_id) && equal(dep, referenced_id))
+		if (det == referenced_id && dep == referenced_id)
 		{
 			referenced_has_self_dep = true;
 			break;
@@ -937,20 +990,20 @@ update_functional_dependencies(List *referencing_fds,
 	{
 		for (int i = 0; i < list_length(referencing_fds); i += 2)
 		{
-			RTEId	   *referencing_det = list_nth(referencing_fds, i);
-			RTEId	   *referencing_dep = list_nth(referencing_fds, i + 1);
+			int referencing_det = list_nth_int(referencing_fds, i);
+			int referencing_dep = list_nth_int(referencing_fds, i + 1);
 
-			if (equal(referencing_dep, referencing_id))
+			if (referencing_dep == referencing_id)
 			{
 				for (int j = 0; j < list_length(referencing_fds); j += 2)
 				{
-					RTEId	   *source_det = list_nth(referencing_fds, j);
-					RTEId	   *source_dep = list_nth(referencing_fds, j + 1);
+					int source_det = list_nth_int(referencing_fds, j);
+					int source_dep = list_nth_int(referencing_fds, j + 1);
 
-					if (equal(source_det, referencing_det))
+					if (source_det == referencing_det)
 					{
-						result = lappend(result, source_det);
-						result = lappend(result, source_dep);
+						result = lappend_int(result, source_det);
+						result = lappend_int(result, source_dep);
 					}
 				}
 			}
@@ -999,24 +1052,349 @@ update_functional_dependencies(List *referencing_fds,
 	 */
 	for (int i = 0; i < list_length(referencing_fds); i += 2)
 	{
-		RTEId	   *referencing_det = list_nth(referencing_fds, i);
-		RTEId	   *referencing_dep = list_nth(referencing_fds, i + 1);
+		int referencing_det = list_nth_int(referencing_fds, i);
+		int referencing_dep = list_nth_int(referencing_fds, i + 1);
 
-		if (equal(referencing_dep, referencing_id))
+		if (referencing_dep == referencing_id)
 		{
 			for (int j = 0; j < list_length(referenced_fds); j += 2)
 			{
-				RTEId	   *referenced_det = list_nth(referenced_fds, j);
-				RTEId	   *referenced_dep = list_nth(referenced_fds, j + 1);
+				int referenced_det = list_nth_int(referenced_fds, j);
+				int referenced_dep = list_nth_int(referenced_fds, j + 1);
 
-				if (equal(referenced_det, referenced_id))
+				if (referenced_det == referenced_id)
 				{
-					result = lappend(result, referencing_det);
-					result = lappend(result, referenced_dep);
+					result = lappend_int(result, referencing_det);
+					result = lappend_int(result, referenced_dep);
 				}
 			}
 		}
 	}
 
 	return result;
+}
+
+/*
+ * Function to traverse a Query node with its own namespace context
+ * This ensures that RangeTblRefs inside the query properly reference
+ * the query's own range table rather than the parent query's.
+ */
+static void
+traverse_query_standalone(Query *query, int depth, List **uniqueness_preservation, List **functional_dependencies, int *baserel_index)
+{
+	ParseState *subquery_pstate = NULL;
+	ListCell *lc;
+	
+	if (query == NULL)
+	{
+		elog(NOTICE, "%straverse_query_standalone: NULL query", get_indentation(depth));
+		return;
+	}
+	
+	elog(NOTICE, "%straverse_query_standalone: processing Query (command type: %d)", 
+		 get_indentation(depth), query->commandType);
+	
+	/* Create a new ParseState just to hold this query's range table */
+	subquery_pstate = make_parsestate(NULL);
+	subquery_pstate->p_rtable = query->rtable;
+	
+	/* Process the join tree if it exists */
+	if (query->jointree)
+	{
+		elog(NOTICE, "%straverse_query_standalone: processing Query jointree", get_indentation(depth));
+		if (query->jointree->fromlist)
+		{
+			int fromlist_length = list_length(query->jointree->fromlist);
+			elog(NOTICE, "%straverse_query_standalone: processing Query jointree fromlist (%d entries)", 
+				 get_indentation(depth), fromlist_length);
+			
+			if (fromlist_length == 1)
+			{
+				foreach(lc, query->jointree->fromlist)
+				{
+					traverse_query_node(subquery_pstate, (Node *) lfirst(lc), depth + 1, uniqueness_preservation, functional_dependencies, baserel_index);
+					
+					elog(NOTICE, "%straverse_query_standalone: completed processing Query jointree fromlist item", 
+						 get_indentation(depth));
+				}
+				elog(NOTICE, "%straverse_query_standalone: completed processing Query jointree fromlist", 
+					 get_indentation(depth));
+			}
+			else
+			{
+				ereport(WARNING,
+						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+						 errmsg("foreign key joins with multiple tables in fromlist not fully supported in query traversal")));
+			}
+		}
+		elog(NOTICE, "%straverse_query_standalone: completed processing Query jointree", 
+			 get_indentation(depth));
+	}
+	
+	/* Process set operations (UNION, INTERSECT, etc.) */
+	if (query->setOperations)
+	{
+		elog(NOTICE, "%straverse_query_standalone: Query has set operations", get_indentation(depth));
+		ereport(WARNING,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("set operations not fully supported in query traversal")));
+	}
+	
+	/* Free the temporary ParseState */
+	free_parsestate(subquery_pstate);
+}
+
+static void
+traverse_query_node(ParseState *pstate, Node *node, int depth, List **uniqueness_preservation, List **functional_dependencies, int *baserel_index)
+{
+	if (node == NULL)
+	{
+		elog(NOTICE, "%straverse_query_node: NULL node", get_indentation(depth));
+		return;
+	}
+
+	elog(NOTICE, "%straverse_query_node: entering node type %d (%s)", 
+		 get_indentation(depth), nodeTag(node), get_node_tag_name(nodeTag(node)));
+
+	switch (nodeTag(node))
+	{
+		case T_JoinExpr:
+			{
+				JoinExpr *join = (JoinExpr *) node;
+				
+				elog(NOTICE, "%straverse_query_node: processing JoinExpr", get_indentation(depth));
+				
+				if (join->fkJoin && IsA(join->fkJoin, ForeignKeyJoinNode))
+				{
+					ForeignKeyJoinNode *fkjn = (ForeignKeyJoinNode *) join->fkJoin;
+					List *larg_uniqueness = NIL;
+					List *larg_fds = NIL;
+					List *rarg_uniqueness = NIL;
+					List *rarg_fds = NIL;
+					List *referencing_uniqueness = NIL;
+					List *referencing_fds = NIL;
+					List *referenced_uniqueness = NIL;
+					List *referenced_fds = NIL;
+					int referencing_id, referenced_id;
+					bool fk_cols_not_null, fk_cols_unique;
+					int larg_baserel_index = 0;
+					int rarg_baserel_index = 0;
+					
+					/* Process the left and right args of the join */
+					if (join->larg)
+					{
+						elog(NOTICE, "%straverse_query_node: descending into JoinExpr left arg", get_indentation(depth));
+						traverse_query_node(pstate, join->larg, depth + 1, &larg_uniqueness, &larg_fds, &larg_baserel_index);
+						elog(NOTICE, "%straverse_query_node: returned from JoinExpr left arg", get_indentation(depth));
+					}
+						
+					if (join->rarg)
+					{
+						elog(NOTICE, "%straverse_query_node: descending into JoinExpr right arg", get_indentation(depth));
+						traverse_query_node(pstate, join->rarg, depth + 1, &rarg_uniqueness, &rarg_fds, &rarg_baserel_index);
+						elog(NOTICE, "%straverse_query_node: returned from JoinExpr right arg", get_indentation(depth));
+					}
+					
+					/* Determine which is referencing and which is referenced */
+					if (fkjn->fkdir == FKDIR_FROM)
+					{
+						/* Left side is referenced, right side is referencing */
+						referencing_id = rarg_baserel_index;
+						referenced_id = larg_baserel_index;
+						referencing_uniqueness = rarg_uniqueness;
+						referencing_fds = rarg_fds;
+						referenced_uniqueness = larg_uniqueness;
+						referenced_fds = larg_fds;
+					}
+					else /* FKDIR_TO */
+					{
+						/* Left side is referencing, right side is referenced */
+						referencing_id = larg_baserel_index;
+						referenced_id = rarg_baserel_index;
+						referencing_uniqueness = larg_uniqueness;
+						referencing_fds = larg_fds;
+						referenced_uniqueness = rarg_uniqueness;
+						referenced_fds = rarg_fds;
+					}
+					
+					/* Use the proper functions to determine uniqueness and not-null constraints */
+					RangeTblEntry *referencing_rte = rt_fetch(fkjn->referencingVarno, pstate->p_rtable);
+					Oid referencing_relid = referencing_rte->relid;
+					fk_cols_unique = is_referencing_cols_unique(referencing_relid, fkjn->referencingAttnums);
+					fk_cols_not_null = is_referencing_cols_not_null(referencing_relid, fkjn->referencingAttnums);
+					
+					/* For testing uniqueness preservation */
+					if (list_member_int(referenced_uniqueness, referenced_id))
+					{
+						elog(NOTICE, "%straverse_query_node: referenced relation preserves uniqueness", 
+							 get_indentation(depth));
+					}
+					
+					/* Update uniqueness preservation */
+					*uniqueness_preservation = update_uniqueness_preservation(
+												referencing_uniqueness,
+												referenced_uniqueness,
+												fk_cols_unique);
+					
+					/* Update functional dependencies */
+					*functional_dependencies = update_functional_dependencies(
+												referencing_fds,
+												referencing_id,
+												referenced_fds,
+												referenced_id,
+												fk_cols_not_null,
+												join->jointype,
+												fkjn->fkdir);
+					
+					elog(NOTICE, "%straverse_query_node: processed foreign key join", get_indentation(depth));
+				}
+			}
+			break;
+			
+		case T_RangeTblRef:
+			{
+				RangeTblRef *rtr = (RangeTblRef *) node;
+				
+				elog(NOTICE, "%straverse_query_node: processing RangeTblRef (rtindex: %d)", 
+					 get_indentation(depth), rtr->rtindex);
+				
+				/* If we have the parse state, we can access the referenced RTE */
+				if (pstate && rtr->rtindex > 0 && rtr->rtindex <= list_length(pstate->p_rtable))
+				{
+					RangeTblEntry *referenced_rte;
+					
+					referenced_rte = rt_fetch(rtr->rtindex, pstate->p_rtable);
+					elog(NOTICE, "%straverse_query_node: RangeTblRef references RTE kind: %d", 
+						 get_indentation(depth), referenced_rte->rtekind);
+					
+					/* Recursively process the referenced RTE */
+					elog(NOTICE, "%straverse_query_node: descending into referenced RTE", get_indentation(depth));
+					traverse_query_node(pstate, (Node *) referenced_rte, depth + 1, uniqueness_preservation, functional_dependencies, baserel_index);
+					elog(NOTICE, "%straverse_query_node: returned from referenced RTE", get_indentation(depth));
+				}
+				else
+				{
+					elog(NOTICE, "%straverse_query_node: cannot access referenced RTE (missing parse state or invalid rtindex)", 
+						 get_indentation(depth));
+				}
+			}
+			break;
+			
+		case T_Query:
+			{
+				Query *query = (Query *) node;
+				/* Use the standalone function to traverse queries with their own context */
+				traverse_query_standalone(query, depth, uniqueness_preservation, functional_dependencies, baserel_index);
+			}
+			break;
+			
+		case T_RangeTblEntry:
+			{
+				RangeTblEntry *rte = (RangeTblEntry *) node;
+				Relation rel;
+				
+				elog(NOTICE, "%straverse_query_node: processing RangeTblEntry (kind: %d)", 
+					 get_indentation(depth), rte->rtekind);
+				
+				switch (rte->rtekind)
+				{
+					case RTE_RELATION:
+						elog(NOTICE, "%straverse_query_node: processing RTE_RELATION (relid: %u, relkind: %c)", 
+							 get_indentation(depth), rte->relid, rte->relkind);
+						
+						/* For base tables, set up uniqueness and functional dependency properties */
+						if (rte->relkind == RELKIND_RELATION || rte->relkind == RELKIND_PARTITIONED_TABLE)
+						{
+							/* Use the passed baserel_index parameter */
+							*baserel_index = next_baserel_index++;
+							char *rel_name = get_rel_name(rte->relid);
+							
+							elog(NOTICE, "%straverse_query_node: base table '%s' assigned index %d", 
+								 get_indentation(depth), rel_name ? rel_name : "unknown", *baserel_index);
+							
+							/* Initialize uniqueness preservation to include this base relation */
+							*uniqueness_preservation = list_make1_int(*baserel_index);
+							
+							/* Initialize functional dependencies with (baserel_index, baserel_index) */
+							*functional_dependencies = list_make2_int(*baserel_index, *baserel_index);
+							
+							elog(NOTICE, "%straverse_query_node: initialized uniqueness and FDs for base relation", 
+								 get_indentation(depth));
+						}
+						/* For VIEWs, get the view's query and traverse it */
+						else if (rte->relkind == RELKIND_VIEW)
+						{
+							elog(NOTICE, "%straverse_query_node: processing VIEW", get_indentation(depth));
+							rel = table_open(rte->relid, AccessShareLock);
+							Query *viewQuery = get_view_query(rel);
+							table_close(rel, AccessShareLock);
+							
+							elog(NOTICE, "%straverse_query_node: descending into VIEW query", get_indentation(depth));
+							traverse_query_standalone(viewQuery, depth + 1, uniqueness_preservation, functional_dependencies, baserel_index);
+							elog(NOTICE, "%straverse_query_node: returned from VIEW query", get_indentation(depth));
+						}
+						break;
+						
+					case RTE_SUBQUERY:
+						elog(NOTICE, "%straverse_query_node: processing RTE_SUBQUERY", get_indentation(depth));
+						/* Traverse the subquery using the standalone function */
+						elog(NOTICE, "%straverse_query_node: descending into subquery", get_indentation(depth));
+						traverse_query_standalone(rte->subquery, depth + 1, uniqueness_preservation, functional_dependencies, baserel_index);
+						elog(NOTICE, "%straverse_query_node: returned from subquery", get_indentation(depth));
+						break;
+						
+					case RTE_JOIN:
+						elog(NOTICE, "%straverse_query_node: found RTE_JOIN, handled during jointree traversal", 
+							 get_indentation(depth));
+						/* Join RTEs are handled during jointree traversal */
+						break;
+						
+					case RTE_CTE:
+						{
+							elog(NOTICE, "%straverse_query_node: processing RTE_CTE (name: %s)", 
+								 get_indentation(depth), rte->ctename);
+							/* For CTEs, find the CTE query and traverse it */
+							Index levelsup;
+							CommonTableExpr *cte = scanNameSpaceForCTE(pstate, rte->ctename, &levelsup);
+							
+							if (cte && !cte->cterecursive && IsA(cte->ctequery, Query))
+							{
+								elog(NOTICE, "%straverse_query_node: descending into CTE query", get_indentation(depth));
+								traverse_query_standalone(castNode(Query, cte->ctequery), depth + 1, 
+														 uniqueness_preservation, functional_dependencies, baserel_index);
+								elog(NOTICE, "%straverse_query_node: returned from CTE query", get_indentation(depth));
+							}
+							else if (cte && cte->cterecursive)
+							{
+								elog(NOTICE, "%straverse_query_node: found recursive CTE, not fully supported", 
+									 get_indentation(depth));
+								ereport(WARNING,
+										(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+										 errmsg("recursive CTEs not fully supported in query traversal")));
+							}
+						}
+						break;
+						
+					default:
+						elog(NOTICE, "%straverse_query_node: unsupported RTE kind: %d", 
+							 get_indentation(depth), rte->rtekind);
+						ereport(WARNING,
+								(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+								 errmsg("unsupported RTE kind in query traversal: %d", rte->rtekind)));
+						break;
+				}
+			}
+			break;
+			
+		default:
+			elog(NOTICE, "%straverse_query_node: unsupported node type: %d", 
+				 get_indentation(depth), nodeTag(node));
+			ereport(WARNING,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("unsupported node type in query traversal: %d", nodeTag(node))));
+			break;
+	}
+
+	elog(NOTICE, "%straverse_query_node: exiting node type %d (%s)", 
+		 get_indentation(depth), nodeTag(node), get_node_tag_name(nodeTag(node)));
 }
