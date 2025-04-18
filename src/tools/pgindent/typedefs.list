@@ -836,6 +836,9 @@ ForeignAsyncNotify_function
 ForeignAsyncRequest_function
 ForeignDataWrapper
 ForeignKeyCacheInfo
+ForeignKeyClause
+ForeignKeyDirection
+ForeignKeyJoinNode
 ForeignKeyOptInfo
 ForeignPath
 ForeignScan

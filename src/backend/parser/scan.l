@@ -352,6 +352,7 @@ less_equals		"<="
 greater_equals	">="
 less_greater	"<>"
 not_equals		"!="
+right_arrow		"->"
 
 /*
  * "self" is the set of chars that should be returned as single-character
@@ -878,8 +879,18 @@ other			.
 					return NOT_EQUALS;
 				}
 
+{right_arrow}	{
+					SET_YYLLOC();
+					return RIGHT_ARROW;
+				}
+
 {self}			{
 					SET_YYLLOC();
+					if (yytext[0] == '-' && yyextra->inleftarrow)
+					{
+						yyextra->inleftarrow = false;
+						return LEFT_ARROW_MINUS;
+					}
 					return yytext[0];
 				}
 
@@ -904,6 +915,26 @@ other			.
 						slashstar = dashdash;
 					if (slashstar)
 						nchars = slashstar - yytext;
+
+					if (nchars == 2 && yytext[0] == '<' && yytext[1] == '-')
+					{
+						/* Strip the unwanted chars from the token */
+						yyless(1);
+
+						yyextra->inleftarrow = true;
+
+						return LEFT_ARROW_LESS;
+					}
+
+					if (nchars == 1 && yytext[0] == '-' && yyextra->inleftarrow)
+					{
+						/* Strip the unwanted chars from the token */
+						if (nchars < yyleng)
+							yyless(nchars);
+
+						yyextra->inleftarrow = false;
+						return LEFT_ARROW_MINUS;
+					}
 
 					/*
 					 * For SQL compatibility, '+' and '-' cannot be the
@@ -975,6 +1006,8 @@ other			.
 								return NOT_EQUALS;
 							if (yytext[0] == '!' && yytext[1] == '=')
 								return NOT_EQUALS;
+							if (yytext[0] == '-' && yytext[1] == '>')
+								return RIGHT_ARROW;
 						}
 					}
 
@@ -1279,6 +1312,8 @@ scanner_init(const char *str,
 	yyext->literalalloc = 1024;
 	yyext->literalbuf = (char *) palloc(yyext->literalalloc);
 	yyext->literallen = 0;
+
+	yyext->inleftarrow = false;
 
 	return scanner;
 }
