@@ -100,6 +100,32 @@ static Node *transformFrameOffset(ParseState *pstate, int frameOptions,
 								  Oid rangeopfamily, Oid rangeopcintype, Oid *inRangeFunc,
 								  Node *clause);
 
+static const char *
+getNodeTypeName(NodeTag tag)
+{
+	static char buf[100];
+	
+	switch (tag)
+	{
+		/* Only include node types we know are defined in our context */
+		case T_Invalid:           return "Invalid";
+		case T_RangeVar:          return "RangeVar";
+		case T_RangeTblRef:       return "RangeTblRef";
+		case T_JoinExpr:          return "JoinExpr";
+		case T_FromExpr:          return "FromExpr";
+		case T_Query:             return "Query";
+		case T_ForeignKeyClause:  return "ForeignKeyClause";
+		case T_ForeignKeyJoinNode: return "ForeignKeyJoinNode";
+		
+		default:
+			/* For unknown types, return a string with the numeric value */
+			snprintf(buf, sizeof(buf), "NodeType_%d", (int)tag);
+			return buf;
+	}
+}
+
+
+
 /*
  * transformFromClause -
  *	  Process the FROM clause and add items to the query's range table,
@@ -1171,6 +1197,31 @@ transformFromClauseItem(ParseState *pstate, Node *n,
 		bool		lateral_ok;
 		int			sv_namespace_length;
 		int			k;
+
+
+		/* Log the type of j->larg for debugging */
+		if (j->larg)
+		{
+			elog(NOTICE, "j->larg type: %d (%s)", 
+				 (int)nodeTag(j->larg), 
+				 getNodeTypeName(nodeTag(j->larg)));
+		}
+		else
+		{
+			elog(NOTICE, "j->larg is NULL");
+		}
+
+		if (j->rarg)
+		{
+			elog(NOTICE, "j->rarg type: %d (%s)", 
+				 (int)nodeTag(j->rarg), 
+				 getNodeTypeName(nodeTag(j->rarg)));
+		}
+		else
+		{
+			elog(NOTICE, "j->rarg is NULL");
+		}
+
 
 		/*
 		 * Recursively process the left subtree, then the right.  We must do

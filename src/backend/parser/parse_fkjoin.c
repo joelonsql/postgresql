@@ -43,7 +43,7 @@ static Node *build_fk_join_on_clause(ParseState *pstate,
 static Oid	find_foreign_key(Oid referencing_relid, Oid referenced_relid,
 							 List *referencing_attnums, List *referenced_attnums);
 static char *column_list_to_string(const List *columns);
-static RangeTblEntry *drill_down_to_base_rel(ParseState *pstate, RangeTblEntry *rte,
+static RangeTblEntry *drill_down_to_base_rel(ParseState *pstate, RangeTblEntry *rte, int rtindex,
 											 List *attnos, List **base_attnums,
 											 int *base_rte_id,
 											 List **uniqueness_preservation, List **functional_dependencies,
@@ -65,6 +65,10 @@ static List *update_functional_dependencies(List *referencing_fds,
 											bool fk_cols_not_null,
 											JoinType join_type,
 											ForeignKeyDirection fk_dir);
+static const char *getNodeTypeName(NodeTag tag);
+void traverse_node(ParseState *pstate, Node *n, ParseNamespaceItem *r_nsitem, 
+                  List *l_namespace, int indentation_depth, Query *query,
+                  List *track_cols);
 
 void
 transformAndValidateForeignKeyJoin(ParseState *pstate, JoinExpr *join,
@@ -99,6 +103,8 @@ transformAndValidateForeignKeyJoin(ParseState *pstate, JoinExpr *join,
 	bool		found_fd = false;
 	bool		fk_cols_unique;
 	bool		fk_cols_not_null;
+
+	elog(NOTICE, "XXXXXXX transformAndValidateForeignKeyJoin");
 
 	foreach(lc, l_namespace)
 	{
@@ -141,6 +147,14 @@ transformAndValidateForeignKeyJoin(ParseState *pstate, JoinExpr *join,
 		referenced_cols = fkjn->refCols;
 		referencing_cols = fkjn->localCols;
 	}
+
+	/* Log information about the referenced and referencing columns for debugging */
+	elog(NOTICE, "referencing_cols: %s", 
+		 referencing_cols ? 
+		 nodeToString(referencing_cols) : "NIL");
+	elog(NOTICE, "referenced_cols: %s", 
+		 referenced_cols ? 
+		 nodeToString(referenced_cols) : "NIL");
 
 	referencing_rte = rt_fetch(referencing_rel->p_rtindex, pstate->p_rtable);
 	referenced_rte = rt_fetch(referenced_rel->p_rtindex, pstate->p_rtable);
@@ -211,14 +225,21 @@ transformAndValidateForeignKeyJoin(ParseState *pstate, JoinExpr *join,
 		referenced_attnums = lappend_int(referenced_attnums, col_index + 1);
 	}
 
-	base_referencing_rte = drill_down_to_base_rel(pstate, referencing_rte,
+	elog(NOTICE, "=> traverse_node larg");
+	traverse_node(pstate, join->larg, r_nsitem, l_namespace, 0, NULL, fkjn->refCols);
+	elog(NOTICE, "<= traverse_node larg");
+	elog(NOTICE, "=> traverse_node rarg");
+	traverse_node(pstate, join->rarg, r_nsitem, l_namespace, 0, NULL, fkjn->localCols);
+	elog(NOTICE, "<= traverse_node rarg");
+
+	base_referencing_rte = drill_down_to_base_rel(pstate, referencing_rte, referencing_rel->p_rtindex,
 												  referencing_attnums,
 												  &referencing_base_attnums,
 												  &referencing_id,
 												  &referencing_uniqueness_preservation,
 												  &referencing_functional_dependencies,
 												  fkjn->location);
-	base_referenced_rte = drill_down_to_base_rel(pstate, referenced_rte,
+	base_referenced_rte = drill_down_to_base_rel(pstate, referenced_rte, referenced_rel->p_rtindex,
 												 referenced_attnums,
 												 &referenced_base_attnums,
 												 &referenced_id,
@@ -497,7 +518,7 @@ column_list_to_string(const List *columns)
  *		Resolves the base relation from a potentially derived relation
  */
 static RangeTblEntry *
-drill_down_to_base_rel(ParseState *pstate, RangeTblEntry *rte,
+drill_down_to_base_rel(ParseState *pstate, RangeTblEntry *rte, int rtindex,
 					   List *attnums, List **base_attnums,
 					   int *base_rte_id,
 					   List **uniqueness_preservation, List **functional_dependencies,
@@ -510,7 +531,7 @@ drill_down_to_base_rel(ParseState *pstate, RangeTblEntry *rte,
 		case RTE_RELATION:
 			{
 				Relation	rel = table_open(rte->relid, AccessShareLock);
-
+				elog(NOTICE, "RTE_RELATION");
 				switch (rel->rd_rel->relkind)
 				{
 					case RELKIND_VIEW:
@@ -547,6 +568,7 @@ drill_down_to_base_rel(ParseState *pstate, RangeTblEntry *rte,
 			break;
 
 		case RTE_SUBQUERY:
+			elog(NOTICE, "RTE_SUBQUERY");
 			base_rte = drill_down_to_base_rel_query(pstate, rte->subquery,
 													attnums, base_attnums,
 													base_rte_id,
@@ -560,6 +582,7 @@ drill_down_to_base_rel(ParseState *pstate, RangeTblEntry *rte,
 				Index		levelsup;
 				CommonTableExpr *cte = scanNameSpaceForCTE(pstate, rte->ctename, &levelsup);
 
+				elog(NOTICE, "RTE_CTE");
 				Assert(cte != NULL);
 
 				if (cte->cterecursive)
@@ -585,6 +608,7 @@ drill_down_to_base_rel(ParseState *pstate, RangeTblEntry *rte,
 				List	   *next_attnums = NIL;
 				ListCell   *lc;
 
+				elog(NOTICE, "RTE_JOIN");
 				foreach(lc, attnums)
 				{
 					int			attno = lfirst_int(lc);
@@ -612,6 +636,60 @@ drill_down_to_base_rel(ParseState *pstate, RangeTblEntry *rte,
 					next_attnums = lappend_int(next_attnums, var->varattno);
 				}
 
+				/* Find the JoinExpr in p_joinexprs */
+				if (pstate->p_joinexprs)
+				{
+					JoinExpr *join_expr = NULL;
+					join_expr = (JoinExpr *) list_nth(pstate->p_joinexprs, rtindex - 1);
+					if (join_expr->fkJoin)
+					{
+						elog(NOTICE, "fkJoin is set");
+						if (IsA(join_expr->fkJoin,ForeignKeyClause))
+						{
+							elog(NOTICE, "fkJoin is a ForeignKeyClause");
+						}
+						if (IsA(join_expr->fkJoin,ForeignKeyJoinNode))
+						{
+							elog(NOTICE, "fkJoin is a ForeignKeyJoinNode");
+
+						ForeignKeyJoinNode *fkjn_node = (ForeignKeyJoinNode *) join_expr->fkJoin;
+						
+						/* Log the types of larg and rarg for debugging */
+						if (join_expr->larg)
+						{
+							elog(NOTICE, "larg type: %d (%s)", 
+								 (int)nodeTag(join_expr->larg), 
+								 getNodeTypeName(nodeTag(join_expr->larg)));
+						}
+						else
+						{
+							elog(NOTICE, "larg is NULL");
+						}
+						
+						if (join_expr->rarg)
+						{
+							elog(NOTICE, "rarg type: %d (%s)", 
+								 (int)nodeTag(join_expr->rarg), 
+								 getNodeTypeName(nodeTag(join_expr->rarg)));
+						}
+						else
+						{
+							elog(NOTICE, "rarg is NULL");
+						}
+
+
+						}
+					}
+					else
+					{
+						elog(NOTICE, "fkJoin is NULL");
+					}
+				}
+				else
+				{
+					elog(NOTICE, "p_joinexprs is NULL");
+				}
+
 				Assert(next_rtindex != 0);
 /*
 	fkjn_node->uniqueness_preservation = update_uniqueness_preservation(
@@ -631,7 +709,7 @@ drill_down_to_base_rel(ParseState *pstate, RangeTblEntry *rte,
 */
 
 				base_rte = drill_down_to_base_rel(pstate,
-												  rt_fetch(next_rtindex, pstate->p_rtable),
+												  rt_fetch(next_rtindex, pstate->p_rtable), next_rtindex,
 												  next_attnums,
 												  base_attnums,
 												  base_rte_id,
@@ -717,7 +795,7 @@ drill_down_to_base_rel_query(ParseState *pstate, Query *query,
 
 	Assert(next_rtindex != 0);
 
-	return drill_down_to_base_rel(pstate, rt_fetch(next_rtindex, query->rtable), next_attnums,
+	return drill_down_to_base_rel(pstate, rt_fetch(next_rtindex, query->rtable), next_rtindex, next_attnums,
 								  base_attnums, base_rte_id, uniqueness_preservation, functional_dependencies, location);
 }
 
@@ -1074,5 +1152,764 @@ update_functional_dependencies(List *referencing_fds,
 	}
 
 	return result;
+}
+
+static const char *
+getNodeTypeName(NodeTag tag)
+{
+	static char buf[100];
+	
+	switch (tag)
+	{
+		/* Only include node types we know are defined in our context */
+		case T_Invalid:           return "Invalid";
+		case T_RangeVar:          return "RangeVar";
+		case T_RangeTblRef:       return "RangeTblRef";
+		case T_JoinExpr:          return "JoinExpr";
+		case T_FromExpr:          return "FromExpr";
+		case T_Query:             return "Query";
+		case T_ForeignKeyClause:  return "ForeignKeyClause";
+		case T_ForeignKeyJoinNode: return "ForeignKeyJoinNode";
+		
+		default:
+			/* For unknown types, return a string with the numeric value */
+			snprintf(buf, sizeof(buf), "NodeType_%d", (int)tag);
+			return buf;
+	}
+}
+
+/*
+ * traverse_node
+ *     Recursively traverses a node tree, handling JoinExpr nodes specially.
+ *     For subquery/CTE/view nodes, it only traverses deeper if the fromlist has length one.
+ *     Logs the traversal with visual indentation to show recursion depth.
+ *
+ * pstate: The parser state
+ * n: The node to traverse
+ * r_nsitem: Current right-side namespace item
+ * l_namespace: List of available namespace items
+ * indentation_depth: Current depth of recursion for indentation in logs
+ * query: If non-NULL, use this query's range table for looking up RTEs; otherwise use pstate
+ */
+void
+traverse_node(ParseState *pstate, Node *n, ParseNamespaceItem *r_nsitem, 
+             List *l_namespace, int indentation_depth, Query *query,
+             List *track_cols)
+{
+    #define MAX_TRAVERSE_DEPTH 100
+    
+    char indent[MAX_TRAVERSE_DEPTH + 1];
+    RangeTblEntry *rte;
+    int rtindex;
+    List *output_columns = NIL;
+    char *columns_str = NULL;
+    StringInfoData columns_buf;
+    List *mapped_cols = NIL;
+    bool columns_tracked = false;
+
+    if (indentation_depth > MAX_TRAVERSE_DEPTH)
+    {
+        elog(NOTICE, "indentation_depth exceeded maximum of %d", MAX_TRAVERSE_DEPTH);
+        return;
+    }
+
+    /* Create indentation string */
+    int i;
+    for (i = 0; i < indentation_depth; i++)
+        indent[i] = ' ';
+    indent[i] = '\0';
+    
+    if (n == NULL)
+    {
+        elog(NOTICE, "%s[NULL node]", indent);
+        return;
+    }
+    
+    /* Log entry into this node */
+    elog(NOTICE, "%s=> Processing node type: %s", indent, getNodeTypeName(nodeTag(n)));
+    
+    /* Log tracked columns status */
+    if (track_cols)
+    {
+        initStringInfo(&columns_buf);
+        appendStringInfoString(&columns_buf, "Tracking columns: ");
+        
+        ListCell *lc;
+        bool first = true;
+        foreach(lc, track_cols)
+        {
+            if (!first)
+                appendStringInfoString(&columns_buf, ", ");
+            appendStringInfoString(&columns_buf, strVal(lfirst(lc)));
+            first = false;
+        }
+        
+        elog(NOTICE, "%s  %s", indent, columns_buf.data);
+        pfree(columns_buf.data);
+    }
+    else
+    {
+        elog(NOTICE, "%s  Not tracking any columns", indent);
+    }
+    
+    switch (nodeTag(n))
+    {
+        case T_JoinExpr:
+        {
+            JoinExpr *join = (JoinExpr *) n;
+            List *larg_cols = NIL;
+            List *rarg_cols = NIL;
+            
+            /* Log join information */
+            elog(NOTICE, "%s  Join type: %d", indent, join->jointype);
+            
+            /* Get output columns if the join has an rtindex */
+            if (join->rtindex > 0)
+            {
+                RangeTblEntry *join_rte;
+                if (query)
+                    join_rte = rt_fetch(join->rtindex, query->rtable);
+                else
+                    join_rte = rt_fetch(join->rtindex, pstate->p_rtable);
+                
+                /* Get column list from RTE */
+                if (join_rte->eref && join_rte->eref->colnames)
+                {
+                    output_columns = join_rte->eref->colnames;
+                    
+                    initStringInfo(&columns_buf);
+                    appendStringInfoString(&columns_buf, "Output columns: ");
+                    
+                    ListCell *lc;
+                    bool first = true;
+                    foreach(lc, output_columns)
+                    {
+                        if (!first)
+                            appendStringInfoString(&columns_buf, ", ");
+                        appendStringInfoString(&columns_buf, strVal(lfirst(lc)));
+                        first = false;
+                    }
+                    
+                    elog(NOTICE, "%s  %s", indent, columns_buf.data);
+                    pfree(columns_buf.data);
+                    
+                    /* Check if we're tracking columns and they exist in this join's output */
+                    if (track_cols && join_rte->rtekind == RTE_JOIN && join_rte->joinaliasvars)
+                    {
+                        /* For each tracked column, see if it exists in the output and which side it comes from */
+                        int larg_side = -1;  /* RTE index for left side */
+                        int rarg_side = -1;  /* RTE index for right side */
+                        int target_side = -1;  /* Side that our tracked columns map to */
+                        bool all_same_side = true;
+                        
+                        initStringInfo(&columns_buf);
+                        appendStringInfoString(&columns_buf, "Column mappings: ");
+                        
+                        ListCell *col_lc;
+                        bool first = true;
+                        
+                        foreach(col_lc, track_cols)
+                        {
+                            char *col_name = strVal(lfirst(col_lc));
+                            bool col_found = false;
+                            int col_side = -1;
+                            int col_attno = -1;
+                            
+                            /* Find this column in the output columns */
+                            int att_pos = 0;
+                            ListCell *oc_lc;
+                            foreach(oc_lc, output_columns)
+                            {
+                                if (strcmp(col_name, strVal(lfirst(oc_lc))) == 0)
+                                {
+                                    col_found = true;
+                                    
+                                    /* Found the column - see which input it maps to */
+                                    Node *map_node = list_nth(join_rte->joinaliasvars, att_pos);
+                                    if (IsA(map_node, Var))
+                                    {
+                                        Var *var = (Var *) map_node;
+                                        col_side = var->varno;
+                                        col_attno = var->varattno;
+                                        
+                                        /* Determine which side this is (larg or rarg) */
+                                        if (larg_side < 0)
+                                            larg_side = col_side;
+                                        else if (rarg_side < 0 && col_side != larg_side)
+                                            rarg_side = col_side;
+                                            
+                                        /* All columns should map to the same side for tracking */
+                                        if (target_side < 0)
+                                            target_side = col_side;
+                                        else if (col_side != target_side)
+                                            all_same_side = false;
+                                            
+                                        /* Add to the mapped columns list, keeping track of attnum */
+                                        if (col_side == target_side)
+                                        {
+                                            /* Find actual column name in the target relation */
+                                            RangeTblEntry *target_rte = rt_fetch(col_side, 
+                                                                               query ? query->rtable : pstate->p_rtable);
+                                            if (target_rte->eref && target_rte->eref->colnames && 
+                                                col_attno > 0 && col_attno <= list_length(target_rte->eref->colnames))
+                                            {
+                                                char *mapped_name = strVal(list_nth(target_rte->eref->colnames, col_attno - 1));
+                                                mapped_cols = lappend(mapped_cols, makeString(pstrdup(mapped_name)));
+                                            }
+                                        }
+                                        
+                                        if (!first)
+                                            appendStringInfoString(&columns_buf, ", ");
+                                        appendStringInfo(&columns_buf, "%s -> (rel:%d, att:%d)", 
+                                                       col_name, col_side, col_attno);
+                                        first = false;
+                                    }
+                                    break;
+                                }
+                                att_pos++;
+                            }
+                            
+                            if (!col_found)
+                            {
+                                if (!first)
+                                    appendStringInfoString(&columns_buf, ", ");
+                                appendStringInfo(&columns_buf, "%s -> NOT FOUND", col_name);
+                                first = false;
+                            }
+                        }
+                        
+                        elog(NOTICE, "%s  %s", indent, columns_buf.data);
+                        pfree(columns_buf.data);
+                        
+                        columns_tracked = all_same_side && list_length(mapped_cols) > 0;
+                        
+                        /* Determine if we're going down larg or rarg with our columns */
+                        if (columns_tracked)
+                        {
+                            if (target_side == larg_side)
+                            {
+                                larg_cols = mapped_cols;
+                                elog(NOTICE, "%s  Tracked columns map to left side of join", indent);
+                            }
+                            else if (target_side == rarg_side)
+                            {
+                                rarg_cols = mapped_cols;
+                                elog(NOTICE, "%s  Tracked columns map to right side of join", indent);
+                            }
+                        }
+                        else
+                        {
+                            elog(NOTICE, "%s  Failed to track columns (all_same_side=%d, mapped_count=%d)", 
+                                 indent, all_same_side, list_length(mapped_cols));
+                        }
+                    }
+                }
+                else
+                {
+                    elog(NOTICE, "%s  No column information available", indent);
+                }
+            }
+            else
+            {
+                elog(NOTICE, "%s  Join does not have an rtindex yet", indent);
+            }
+            
+            /* Process left arg */
+            if (join->larg)
+            {
+                elog(NOTICE, "%s  Descending into left arg with %d tracked columns", 
+                     indent, larg_cols ? list_length(larg_cols) : 0);
+                traverse_node(pstate, join->larg, r_nsitem, l_namespace, indentation_depth + 2, query, larg_cols);
+            }
+            
+            /* Process right arg */
+            if (join->rarg)
+            {
+                elog(NOTICE, "%s  Descending into right arg with %d tracked columns", 
+                     indent, rarg_cols ? list_length(rarg_cols) : 0);
+                traverse_node(pstate, join->rarg, r_nsitem, l_namespace, indentation_depth + 2, query, rarg_cols);
+            }
+        }
+        break;
+        
+        case T_RangeTblRef:
+        {
+            RangeTblRef *rtr = (RangeTblRef *) n;
+            rtindex = rtr->rtindex;
+            
+            /* Use the appropriate range table for lookups */
+            if (query)
+                rte = rt_fetch(rtindex, query->rtable);
+            else
+                rte = rt_fetch(rtindex, pstate->p_rtable);
+                
+            elog(NOTICE, "%s  RangeTblRef to RTE index: %d in %s", indent, rtindex, 
+                 query ? "view's query" : "outer query");
+            
+            /* Log column information */
+            if (rte->eref && rte->eref->colnames)
+            {
+                output_columns = rte->eref->colnames;
+                
+                initStringInfo(&columns_buf);
+                appendStringInfoString(&columns_buf, "Columns: ");
+                
+                ListCell *lc;
+                bool first = true;
+                foreach(lc, output_columns)
+                {
+                    if (!first)
+                        appendStringInfoString(&columns_buf, ", ");
+                    appendStringInfoString(&columns_buf, strVal(lfirst(lc)));
+                    first = false;
+                }
+                
+                elog(NOTICE, "%s  %s", indent, columns_buf.data);
+                pfree(columns_buf.data);
+                
+                /* Check if we're tracking columns and they exist in this RTE's output */
+                if (track_cols)
+                {
+                    initStringInfo(&columns_buf);
+                    appendStringInfoString(&columns_buf, "Tracking status: ");
+                    
+                    bool all_found = true;
+                    bool first = true;
+                    ListCell *col_lc;
+                    foreach(col_lc, track_cols)
+                    {
+                        char *col_name = strVal(lfirst(col_lc));
+                        bool col_found = false;
+                        
+                        /* Find this column in the output columns */
+                        ListCell *oc_lc;
+                        foreach(oc_lc, output_columns)
+                        {
+                            if (strcmp(col_name, strVal(lfirst(oc_lc))) == 0)
+                            {
+                                col_found = true;
+                                break;
+                            }
+                        }
+                        
+                        if (!first)
+                            appendStringInfoString(&columns_buf, ", ");
+                        appendStringInfo(&columns_buf, "%s: %s", col_name, col_found ? "FOUND" : "NOT FOUND");
+                        first = false;
+                        
+                        if (!col_found)
+                            all_found = false;
+                    }
+                    
+                    elog(NOTICE, "%s  %s", indent, columns_buf.data);
+                    pfree(columns_buf.data);
+                    
+                    columns_tracked = all_found;
+                    
+                    if (columns_tracked)
+                        mapped_cols = list_copy(track_cols);
+                    else
+                        elog(NOTICE, "%s  Some tracked columns not found in this RTE", indent);
+                }
+            }
+            
+            /* Process the referenced RTE */
+            switch (rte->rtekind)
+            {
+                case RTE_RELATION:
+                {
+                    Relation rel;
+                    
+                    elog(NOTICE, "%s  RTE is a relation (relid: %u)", indent, rte->relid);
+                    
+                    /* Open the relation to check its type */
+                    rel = table_open(rte->relid, AccessShareLock);
+                    
+                    if (rel->rd_rel->relkind == RELKIND_VIEW)
+                    {
+                        Query *viewQuery = get_view_query(rel);
+                        List *view_mapped_cols = NIL;
+                        
+                        elog(NOTICE, "%s  Relation is a VIEW", indent);
+                        
+                        /* Map tracked columns to the view's underlying query */
+                        if (columns_tracked && mapped_cols)
+                        {
+                            view_mapped_cols = NIL;
+                            ListCell *col_lc;
+                            foreach(col_lc, mapped_cols)
+                            {
+                                char *col_name = strVal(lfirst(col_lc));
+                                
+                                /* Find this column in the view's target list */
+                                ListCell *tl_lc;
+                                int targetno = 0;
+                                foreach(tl_lc, viewQuery->targetList)
+                                {
+                                    TargetEntry *te = (TargetEntry *) lfirst(tl_lc);
+                                    if (!te->resjunk && strcmp(te->resname, col_name) == 0)
+                                    {
+                                        /* Found matching target entry - check if it's a simple column reference */
+                                        if (IsA(te->expr, Var))
+                                        {
+                                            Var *var = (Var *) te->expr;
+                                            /* Get the original column name from the referenced RTE */
+                                            RangeTblEntry *ref_rte = rt_fetch(var->varno, viewQuery->rtable);
+                                            if (ref_rte->eref && ref_rte->eref->colnames && 
+                                                var->varattno > 0 && var->varattno <= list_length(ref_rte->eref->colnames))
+                                            {
+                                                char *orig_name = strVal(list_nth(ref_rte->eref->colnames, var->varattno - 1));
+                                                view_mapped_cols = lappend(view_mapped_cols, makeString(pstrdup(orig_name)));
+                                                elog(NOTICE, "%s  Mapped column %s to underlying column %s", 
+                                                     indent, col_name, orig_name);
+                                            }
+                                        }
+                                        else
+                                        {
+                                            elog(NOTICE, "%s  Column %s maps to an expression, not tracking", indent, col_name);
+                                        }
+                                        break;
+                                    }
+                                    targetno++;
+                                }
+                            }
+                            
+                            if (list_length(view_mapped_cols) == list_length(mapped_cols))
+                                elog(NOTICE, "%s  Successfully mapped all columns to view query", indent);
+                            else
+                                elog(NOTICE, "%s  Failed to map some columns (%d of %d mapped)", 
+                                     indent, list_length(view_mapped_cols), list_length(mapped_cols));
+                        }
+                        
+                        /* Only traverse view query if fromlist has length 1 */
+                        if (viewQuery->jointree && 
+                            viewQuery->jointree->fromlist && 
+                            list_length(viewQuery->jointree->fromlist) == 1)
+                        {
+                            elog(NOTICE, "%s  VIEW has single fromlist item, traversing deeper", indent);
+                            /* Pass the view query as the context for the next level of traversal */
+                            traverse_node(pstate, 
+                                        (Node *) linitial(viewQuery->jointree->fromlist), 
+                                        r_nsitem, l_namespace, indentation_depth + 2, 
+                                        viewQuery, view_mapped_cols);
+                        }
+                        else
+                        {
+                            elog(NOTICE, "%s  VIEW has multiple or no fromlist items, stopping here", indent);
+                        }
+                    }
+                    else if (rel->rd_rel->relkind == RELKIND_RELATION || 
+                             rel->rd_rel->relkind == RELKIND_PARTITIONED_TABLE)
+                    {
+                        /* Base table - this is our base case */
+                        /* Get actual column names from the system catalogs */
+                        TupleDesc tupdesc = RelationGetDescr(rel);
+                        int natts = tupdesc->natts;
+                        
+                        initStringInfo(&columns_buf);
+                        appendStringInfoString(&columns_buf, "Base table columns: ");
+                        
+                        bool first = true;
+                        for (i = 0; i < natts; i++)
+                        {
+                            Form_pg_attribute att = TupleDescAttr(tupdesc, i);
+                            
+                            /* Skip dropped columns */
+                            if (att->attisdropped)
+                                continue;
+                                
+                            if (!first)
+                                appendStringInfoString(&columns_buf, ", ");
+                            appendStringInfoString(&columns_buf, NameStr(att->attname));
+                            first = false;
+                        }
+                        
+                        /* Check if tracked columns exist in this base table */
+                        bool tracked_in_base = false;
+                        if (columns_tracked && mapped_cols)
+                        {
+                            StringInfoData tracked_buf;
+                            initStringInfo(&tracked_buf);
+                            appendStringInfoString(&tracked_buf, "Tracked columns in base table: ");
+                            
+                            bool all_in_base = true;
+                            bool first = true;
+                            ListCell *col_lc;
+                            foreach(col_lc, mapped_cols)
+                            {
+                                char *col_name = strVal(lfirst(col_lc));
+                                bool found_in_base = false;
+                                
+                                /* Find column in base table's attributes */
+                                for (i = 0; i < natts; i++)
+                                {
+                                    Form_pg_attribute att = TupleDescAttr(tupdesc, i);
+                                    if (!att->attisdropped && 
+                                        strcmp(NameStr(att->attname), col_name) == 0)
+                                    {
+                                        found_in_base = true;
+                                        break;
+                                    }
+                                }
+                                
+                                if (!first)
+                                    appendStringInfoString(&tracked_buf, ", ");
+                                appendStringInfo(&tracked_buf, "%s: %s", col_name, found_in_base ? "FOUND" : "NOT FOUND");
+                                first = false;
+                                
+                                if (!found_in_base)
+                                    all_in_base = false;
+                            }
+                            
+                            tracked_in_base = all_in_base;
+                            
+                            if (tracked_in_base)
+                                appendStringInfoString(&tracked_buf, " (ALL FOUND)");
+                            else
+                                appendStringInfoString(&tracked_buf, " (SOME NOT FOUND)");
+                                
+                            elog(NOTICE, "%s  %s", indent, tracked_buf.data);
+                            pfree(tracked_buf.data);
+                        }
+                        
+                        elog(NOTICE, "%s*** Found base table: %s with %s %s***", indent, 
+                             get_rel_name(rte->relid) ? get_rel_name(rte->relid) : "unknown",
+                             columns_buf.data,
+                             tracked_in_base ? "- TRACKED COLUMNS FOUND HERE" : "");
+                        pfree(columns_buf.data);
+                    }
+                    else
+                    {
+                        elog(NOTICE, "%s  Relation has unsupported relkind: %c", indent, rel->rd_rel->relkind);
+                    }
+                    
+                    /* Close the relation */
+                    table_close(rel, AccessShareLock);
+                }
+                break;
+                
+                case RTE_SUBQUERY:
+                {
+                    Query *subquery = rte->subquery;
+                    List *subq_mapped_cols = NIL;
+                    
+                    elog(NOTICE, "%s  RTE is a SUBQUERY", indent);
+                    
+                    /* Log subquery output columns */
+                    initStringInfo(&columns_buf);
+                    appendStringInfoString(&columns_buf, "Subquery output columns: ");
+                    
+                    ListCell *lc;
+                    bool first = true;
+                    foreach(lc, subquery->targetList)
+                    {
+                        TargetEntry *tle = (TargetEntry *) lfirst(lc);
+                        
+                        /* Skip resjunk columns */
+                        if (tle->resjunk)
+                            continue;
+                            
+                        if (!first)
+                            appendStringInfoString(&columns_buf, ", ");
+                        appendStringInfoString(&columns_buf, tle->resname ? tle->resname : "<unnamed>");
+                        first = false;
+                    }
+                    
+                    elog(NOTICE, "%s  %s", indent, columns_buf.data);
+                    pfree(columns_buf.data);
+                    
+                    /* Map tracked columns to the subquery's underlying query */
+                    if (columns_tracked && mapped_cols)
+                    {
+                        subq_mapped_cols = NIL;
+                        ListCell *col_lc;
+                        foreach(col_lc, mapped_cols)
+                        {
+                            char *col_name = strVal(lfirst(col_lc));
+                            
+                            /* Find this column in the subquery's target list */
+                            ListCell *tl_lc;
+                            int targetno = 0;
+                            foreach(tl_lc, subquery->targetList)
+                            {
+                                TargetEntry *te = (TargetEntry *) lfirst(tl_lc);
+                                if (!te->resjunk && strcmp(te->resname, col_name) == 0)
+                                {
+                                    /* Found matching target entry - check if it's a simple column reference */
+                                    if (IsA(te->expr, Var))
+                                    {
+                                        Var *var = (Var *) te->expr;
+                                        /* Get the original column name from the referenced RTE */
+                                        RangeTblEntry *ref_rte = rt_fetch(var->varno, subquery->rtable);
+                                        if (ref_rte->eref && ref_rte->eref->colnames && 
+                                            var->varattno > 0 && var->varattno <= list_length(ref_rte->eref->colnames))
+                                        {
+                                            char *orig_name = strVal(list_nth(ref_rte->eref->colnames, var->varattno - 1));
+                                            subq_mapped_cols = lappend(subq_mapped_cols, makeString(pstrdup(orig_name)));
+                                            elog(NOTICE, "%s  Mapped column %s to underlying column %s", 
+                                                 indent, col_name, orig_name);
+                                        }
+                                    }
+                                    else
+                                    {
+                                        elog(NOTICE, "%s  Column %s maps to an expression, not tracking", indent, col_name);
+                                    }
+                                    break;
+                                }
+                                targetno++;
+                            }
+                        }
+                        
+                        if (list_length(subq_mapped_cols) == list_length(mapped_cols))
+                            elog(NOTICE, "%s  Successfully mapped all columns to subquery", indent);
+                        else
+                            elog(NOTICE, "%s  Failed to map some columns (%d of %d mapped)", 
+                                 indent, list_length(subq_mapped_cols), list_length(mapped_cols));
+                    }
+                    
+                    /* Only traverse subquery if fromlist has length 1 */
+                    if (subquery->jointree && 
+                        subquery->jointree->fromlist && 
+                        list_length(subquery->jointree->fromlist) == 1)
+                    {
+                        elog(NOTICE, "%s  SUBQUERY has single fromlist item, traversing deeper", indent);
+                        /* Pass the subquery as the context for the next level of traversal */
+                        traverse_node(pstate, 
+                                     (Node *) linitial(subquery->jointree->fromlist), 
+                                     r_nsitem, l_namespace, indentation_depth + 2,
+                                     subquery, subq_mapped_cols);
+                    }
+                    else
+                    {
+                        elog(NOTICE, "%s  SUBQUERY has multiple or no fromlist items, stopping here", indent);
+                    }
+                }
+                break;
+                
+                case RTE_CTE:
+                {
+                    Index levelsup;
+                    CommonTableExpr *cte;
+                    List *cte_mapped_cols = NIL;
+                    
+                    elog(NOTICE, "%s  RTE is a CTE (name: %s)", indent, rte->ctename);
+                    
+                    /* Find the CTE */
+                    cte = scanNameSpaceForCTE(pstate, rte->ctename, &levelsup);
+                    
+                    if (cte && !cte->cterecursive && IsA(cte->ctequery, Query))
+                    {
+                        Query *cteQuery = (Query *) cte->ctequery;
+                        
+                        /* Log CTE output columns */
+                        initStringInfo(&columns_buf);
+                        appendStringInfoString(&columns_buf, "CTE output columns: ");
+                        
+                        ListCell *lc;
+                        bool first = true;
+                        foreach(lc, cteQuery->targetList)
+                        {
+                            TargetEntry *tle = (TargetEntry *) lfirst(lc);
+                            
+                            /* Skip resjunk columns */
+                            if (tle->resjunk)
+                                continue;
+                                
+                            if (!first)
+                                appendStringInfoString(&columns_buf, ", ");
+                            appendStringInfoString(&columns_buf, tle->resname ? tle->resname : "<unnamed>");
+                            first = false;
+                        }
+                        
+                        elog(NOTICE, "%s  %s", indent, columns_buf.data);
+                        pfree(columns_buf.data);
+                        
+                        /* Map tracked columns to the CTE's underlying query */
+                        if (columns_tracked && mapped_cols)
+                        {
+                            cte_mapped_cols = NIL;
+                            ListCell *col_lc;
+                            foreach(col_lc, mapped_cols)
+                            {
+                                char *col_name = strVal(lfirst(col_lc));
+                                
+                                /* Find this column in the CTE's target list */
+                                ListCell *tl_lc;
+                                int targetno = 0;
+                                foreach(tl_lc, cteQuery->targetList)
+                                {
+                                    TargetEntry *te = (TargetEntry *) lfirst(tl_lc);
+                                    if (!te->resjunk && strcmp(te->resname, col_name) == 0)
+                                    {
+                                        /* Found matching target entry - check if it's a simple column reference */
+                                        if (IsA(te->expr, Var))
+                                        {
+                                            Var *var = (Var *) te->expr;
+                                            /* Get the original column name from the referenced RTE */
+                                            RangeTblEntry *ref_rte = rt_fetch(var->varno, cteQuery->rtable);
+                                            if (ref_rte->eref && ref_rte->eref->colnames && 
+                                                var->varattno > 0 && var->varattno <= list_length(ref_rte->eref->colnames))
+                                            {
+                                                char *orig_name = strVal(list_nth(ref_rte->eref->colnames, var->varattno - 1));
+                                                cte_mapped_cols = lappend(cte_mapped_cols, makeString(pstrdup(orig_name)));
+                                                elog(NOTICE, "%s  Mapped column %s to underlying column %s", 
+                                                     indent, col_name, orig_name);
+                                            }
+                                        }
+                                        else
+                                        {
+                                            elog(NOTICE, "%s  Column %s maps to an expression, not tracking", indent, col_name);
+                                        }
+                                        break;
+                                    }
+                                    targetno++;
+                                }
+                            }
+                            
+                            if (list_length(cte_mapped_cols) == list_length(mapped_cols))
+                                elog(NOTICE, "%s  Successfully mapped all columns to CTE query", indent);
+                            else
+                                elog(NOTICE, "%s  Failed to map some columns (%d of %d mapped)", 
+                                     indent, list_length(cte_mapped_cols), list_length(mapped_cols));
+                        }
+                        
+                        /* Only traverse CTE query if fromlist has length 1 */
+                        if (cteQuery->jointree && 
+                            cteQuery->jointree->fromlist && 
+                            list_length(cteQuery->jointree->fromlist) == 1)
+                        {
+                            elog(NOTICE, "%s  CTE has single fromlist item, traversing deeper", indent);
+                            /* Pass the CTE query as the context for the next level of traversal */
+                            traverse_node(pstate, 
+                                         (Node *) linitial(cteQuery->jointree->fromlist), 
+                                         r_nsitem, l_namespace, indentation_depth + 2,
+                                         cteQuery, cte_mapped_cols);
+                        }
+                        else
+                        {
+                            elog(NOTICE, "%s  CTE has multiple or no fromlist items, stopping here", indent);
+                        }
+                    }
+                    else if (cte && cte->cterecursive)
+                    {
+                        elog(NOTICE, "%s  CTE is recursive, stopping here", indent);
+                    }
+                }
+                break;
+
+                default:
+                    elog(NOTICE, "%s  RTE has unsupported rtekind: %d", indent, rte->rtekind);
+                    break;
+            }
+        }
+        break;
+        
+        default:
+            elog(NOTICE, "%s  Unsupported node type: %s", indent, getNodeTypeName(nodeTag(n)));
+            break;
+    }
+    
+    /* Log exit from this node */
+    elog(NOTICE, "%s<= Returning from node type: %s", indent, getNodeTypeName(nodeTag(n)));
 }
 
