@@ -66,9 +66,9 @@ static List *update_functional_dependencies(List *referencing_fds,
 											JoinType join_type,
 											ForeignKeyDirection fk_dir);
 static const char *getNodeTypeName(NodeTag tag);
-void traverse_node(ParseState *pstate, Node *n, ParseNamespaceItem *r_nsitem, 
-                  List *l_namespace, int indentation_depth, Query *query,
-                  List *track_attnums);
+void		traverse_node(ParseState *pstate, Node *n, ParseNamespaceItem *r_nsitem,
+						  List *l_namespace, int indentation_depth, Query *query,
+						  List *track_attnums);
 
 void
 transformAndValidateForeignKeyJoin(ParseState *pstate, JoinExpr *join,
@@ -148,12 +148,15 @@ transformAndValidateForeignKeyJoin(ParseState *pstate, JoinExpr *join,
 		referencing_cols = fkjn->localCols;
 	}
 
-	/* Log information about the referenced and referencing columns for debugging */
-	elog(NOTICE, "referencing_cols: %s", 
-		 referencing_cols ? 
+	/*
+	 * Log information about the referenced and referencing columns for
+	 * debugging
+	 */
+	elog(NOTICE, "referencing_cols: %s",
+		 referencing_cols ?
 		 nodeToString(referencing_cols) : "NIL");
-	elog(NOTICE, "referenced_cols: %s", 
-		 referenced_cols ? 
+	elog(NOTICE, "referenced_cols: %s",
+		 referenced_cols ?
 		 nodeToString(referenced_cols) : "NIL");
 
 	referencing_rte = rt_fetch(referencing_rel->p_rtindex, pstate->p_rtable);
@@ -255,18 +258,18 @@ transformAndValidateForeignKeyJoin(ParseState *pstate, JoinExpr *join,
 
 	/* Log information about the foreign key join for debugging */
 	elog(NOTICE, "referencing_id: %d", referencing_id);
-	elog(NOTICE, "referencing_uniqueness_preservation: %s", 
-		 referencing_uniqueness_preservation ? 
+	elog(NOTICE, "referencing_uniqueness_preservation: %s",
+		 referencing_uniqueness_preservation ?
 		 nodeToString(referencing_uniqueness_preservation) : "NIL");
-	elog(NOTICE, "referencing_functional_dependencies: %s", 
-		 referencing_functional_dependencies ? 
+	elog(NOTICE, "referencing_functional_dependencies: %s",
+		 referencing_functional_dependencies ?
 		 nodeToString(referencing_functional_dependencies) : "NIL");
 	elog(NOTICE, "referenced_id: %d", referenced_id);
-	elog(NOTICE, "referenced_uniqueness_preservation: %s", 
-		 referenced_uniqueness_preservation ? 
+	elog(NOTICE, "referenced_uniqueness_preservation: %s",
+		 referenced_uniqueness_preservation ?
 		 nodeToString(referenced_uniqueness_preservation) : "NIL");
-	elog(NOTICE, "referenced_functional_dependencies: %s", 
-		 referenced_functional_dependencies ? 
+	elog(NOTICE, "referenced_functional_dependencies: %s",
+		 referenced_functional_dependencies ?
 		 nodeToString(referenced_functional_dependencies) : "NIL");
 
 	referencing_relid = base_referencing_rte->relid;
@@ -292,7 +295,7 @@ transformAndValidateForeignKeyJoin(ParseState *pstate, JoinExpr *join,
 				 parser_errposition(pstate, fkjn->location)));
 
 	/* Check uniqueness preservation */
-	// FIXME
+	/* FIXME */
 	if (false && !list_member_int(referenced_uniqueness_preservation, referenced_id))
 	{
 		ereport(ERROR,
@@ -308,8 +311,8 @@ transformAndValidateForeignKeyJoin(ParseState *pstate, JoinExpr *join,
 	 */
 	for (int i = 0; i < list_length(referenced_functional_dependencies); i += 2)
 	{
-		int		fd_dep = list_nth_int(referenced_functional_dependencies, i);
-		int		fd_dcy = list_nth_int(referenced_functional_dependencies, i + 1);
+		int			fd_dep = list_nth_int(referenced_functional_dependencies, i);
+		int			fd_dcy = list_nth_int(referenced_functional_dependencies, i + 1);
 
 		if (fd_dep == referenced_id && fd_dcy == referenced_id)
 		{
@@ -318,8 +321,9 @@ transformAndValidateForeignKeyJoin(ParseState *pstate, JoinExpr *join,
 		}
 	}
 
-	found_fd = true; // FIXME
-	if (!found_fd)
+	found_fd = true;
+	//FIXME
+		if (!found_fd)
 	{
 		/*
 		 * This check ensures that the referenced relation is not filtered
@@ -537,6 +541,7 @@ drill_down_to_base_rel(ParseState *pstate, RangeTblEntry *rte, int rtindex,
 		case RTE_RELATION:
 			{
 				Relation	rel = table_open(rte->relid, AccessShareLock);
+
 				elog(NOTICE, "RTE_RELATION");
 				switch (rel->rd_rel->relkind)
 				{
@@ -645,43 +650,44 @@ drill_down_to_base_rel(ParseState *pstate, RangeTblEntry *rte, int rtindex,
 				/* Find the JoinExpr in p_joinexprs */
 				if (pstate->p_joinexprs)
 				{
-					JoinExpr *join_expr = NULL;
+					JoinExpr   *join_expr = NULL;
+
 					join_expr = (JoinExpr *) list_nth(pstate->p_joinexprs, rtindex - 1);
 					if (join_expr->fkJoin)
 					{
 						elog(NOTICE, "fkJoin is set");
-						if (IsA(join_expr->fkJoin,ForeignKeyClause))
+						if (IsA(join_expr->fkJoin, ForeignKeyClause))
 						{
 							elog(NOTICE, "fkJoin is a ForeignKeyClause");
 						}
-						if (IsA(join_expr->fkJoin,ForeignKeyJoinNode))
+						if (IsA(join_expr->fkJoin, ForeignKeyJoinNode))
 						{
 							elog(NOTICE, "fkJoin is a ForeignKeyJoinNode");
 
-						ForeignKeyJoinNode *fkjn_node = (ForeignKeyJoinNode *) join_expr->fkJoin;
-						
-						/* Log the types of larg and rarg for debugging */
-						if (join_expr->larg)
-						{
-							elog(NOTICE, "larg type: %d (%s)", 
-								 (int)nodeTag(join_expr->larg), 
-								 getNodeTypeName(nodeTag(join_expr->larg)));
-						}
-						else
-						{
-							elog(NOTICE, "larg is NULL");
-						}
-						
-						if (join_expr->rarg)
-						{
-							elog(NOTICE, "rarg type: %d (%s)", 
-								 (int)nodeTag(join_expr->rarg), 
-								 getNodeTypeName(nodeTag(join_expr->rarg)));
-						}
-						else
-						{
-							elog(NOTICE, "rarg is NULL");
-						}
+							ForeignKeyJoinNode *fkjn_node = (ForeignKeyJoinNode *) join_expr->fkJoin;
+
+							/* Log the types of larg and rarg for debugging */
+							if (join_expr->larg)
+							{
+								elog(NOTICE, "larg type: %d (%s)",
+									 (int) nodeTag(join_expr->larg),
+									 getNodeTypeName(nodeTag(join_expr->larg)));
+							}
+							else
+							{
+								elog(NOTICE, "larg is NULL");
+							}
+
+							if (join_expr->rarg)
+							{
+								elog(NOTICE, "rarg type: %d (%s)",
+									 (int) nodeTag(join_expr->rarg),
+									 getNodeTypeName(nodeTag(join_expr->rarg)));
+							}
+							else
+							{
+								elog(NOTICE, "rarg is NULL");
+							}
 
 
 						}
@@ -1048,8 +1054,8 @@ update_functional_dependencies(List *referencing_fds,
 	 */
 	for (int i = 0; i < list_length(referenced_fds); i += 2)
 	{
-		int det = list_nth_int(referenced_fds, i);
-		int dep = list_nth_int(referenced_fds, i + 1);
+		int			det = list_nth_int(referenced_fds, i);
+		int			dep = list_nth_int(referenced_fds, i + 1);
 
 		if (det == referenced_id && dep == referenced_id)
 		{
@@ -1076,15 +1082,15 @@ update_functional_dependencies(List *referencing_fds,
 	{
 		for (int i = 0; i < list_length(referencing_fds); i += 2)
 		{
-			int referencing_det = list_nth_int(referencing_fds, i);
-			int referencing_dep = list_nth_int(referencing_fds, i + 1);
+			int			referencing_det = list_nth_int(referencing_fds, i);
+			int			referencing_dep = list_nth_int(referencing_fds, i + 1);
 
 			if (referencing_dep == referencing_id)
 			{
 				for (int j = 0; j < list_length(referencing_fds); j += 2)
 				{
-					int source_det = list_nth_int(referencing_fds, j);
-					int source_dep = list_nth_int(referencing_fds, j + 1);
+					int			source_det = list_nth_int(referencing_fds, j);
+					int			source_dep = list_nth_int(referencing_fds, j + 1);
 
 					if (source_det == referencing_det)
 					{
@@ -1125,8 +1131,8 @@ update_functional_dependencies(List *referencing_fds,
 	 * functional dependencies Let S = {(A, B)} be the set of referenced
 	 * functional dependencies Let r = referencing_id Let s = referenced_id
 	 *
-	 * The new transitive dependencies are defined as:
-	 * T = {(X, B) | (X, r) ∈ R ∧ (s, B) ∈ S}
+	 * The new transitive dependencies are defined as: T = {(X, B) | (X, r) ∈
+	 * R ∧ (s, B) ∈ S}
 	 *
 	 * The correctness of this derivation relies on the fact that
 	 * referenced_id is preserved in this join (as verified in previous
@@ -1138,15 +1144,15 @@ update_functional_dependencies(List *referencing_fds,
 	 */
 	for (int i = 0; i < list_length(referencing_fds); i += 2)
 	{
-		int referencing_det = list_nth_int(referencing_fds, i);
-		int referencing_dep = list_nth_int(referencing_fds, i + 1);
+		int			referencing_det = list_nth_int(referencing_fds, i);
+		int			referencing_dep = list_nth_int(referencing_fds, i + 1);
 
 		if (referencing_dep == referencing_id)
 		{
 			for (int j = 0; j < list_length(referenced_fds); j += 2)
 			{
-				int referenced_det = list_nth_int(referenced_fds, j);
-				int referenced_dep = list_nth_int(referenced_fds, j + 1);
+				int			referenced_det = list_nth_int(referenced_fds, j);
+				int			referenced_dep = list_nth_int(referenced_fds, j + 1);
 
 				if (referenced_det == referenced_id)
 				{
@@ -1164,22 +1170,30 @@ static const char *
 getNodeTypeName(NodeTag tag)
 {
 	static char buf[100];
-	
+
 	switch (tag)
 	{
-		/* Only include node types we know are defined in our context */
-		case T_Invalid:           return "Invalid";
-		case T_RangeVar:          return "RangeVar";
-		case T_RangeTblRef:       return "RangeTblRef";
-		case T_JoinExpr:          return "JoinExpr";
-		case T_FromExpr:          return "FromExpr";
-		case T_Query:             return "Query";
-		case T_ForeignKeyClause:  return "ForeignKeyClause";
-		case T_ForeignKeyJoinNode: return "ForeignKeyJoinNode";
-		
+			/* Only include node types we know are defined in our context */
+		case T_Invalid:
+			return "Invalid";
+		case T_RangeVar:
+			return "RangeVar";
+		case T_RangeTblRef:
+			return "RangeTblRef";
+		case T_JoinExpr:
+			return "JoinExpr";
+		case T_FromExpr:
+			return "FromExpr";
+		case T_Query:
+			return "Query";
+		case T_ForeignKeyClause:
+			return "ForeignKeyClause";
+		case T_ForeignKeyJoinNode:
+			return "ForeignKeyJoinNode";
+
 		default:
 			/* For unknown types, return a string with the numeric value */
-			snprintf(buf, sizeof(buf), "NodeType_%d", (int)tag);
+			snprintf(buf, sizeof(buf), "NodeType_%d", (int) tag);
 			return buf;
 	}
 }
@@ -1198,813 +1212,953 @@ getNodeTypeName(NodeTag tag)
  * query: If non-NULL, use this query's range table for looking up RTEs; otherwise use pstate
  */
 void
-traverse_node(ParseState *pstate, Node *n, ParseNamespaceItem *r_nsitem, 
-             List *l_namespace, int indentation_depth, Query *query,
-             List *track_attnums)
+traverse_node(ParseState *pstate, Node *n, ParseNamespaceItem *r_nsitem,
+			  List *l_namespace, int indentation_depth, Query *query,
+			  List *track_attnums)
 {
-    #define MAX_TRAVERSE_DEPTH 100
-    
-    char indent[MAX_TRAVERSE_DEPTH + 1];
-    RangeTblEntry *rte;
-    int rtindex;
-    List *output_columns = NIL;
-    StringInfoData columns_buf;
-    List *mapped_attnums = NIL;
-    bool columns_tracked = false;
+#define MAX_TRAVERSE_DEPTH 100
 
-    if (indentation_depth > MAX_TRAVERSE_DEPTH)
-    {
-        elog(NOTICE, "indentation_depth exceeded maximum of %d", MAX_TRAVERSE_DEPTH);
-        return;
-    }
+	char		indent[MAX_TRAVERSE_DEPTH + 1];
+	RangeTblEntry *rte;
+	int			rtindex;
+	List	   *output_columns = NIL;
+	StringInfoData columns_buf;
+	List	   *mapped_attnums = NIL;
+	bool		columns_tracked = false;
 
-    /* Create indentation string */
-    int i;
-    for (i = 0; i < indentation_depth; i++)
-        indent[i] = ' ';
-    indent[i] = '\0';
-    
-    if (n == NULL)
-    {
-        elog(NOTICE, "%s[NULL node]", indent);
-        return;
-    }
-    
-    /* Log entry into this node */
-    elog(NOTICE, "%s=> Processing node type: %s", indent, getNodeTypeName(nodeTag(n)));
-    
-    /* Log tracked columns status */
-    if (track_attnums)
-    {
-        initStringInfo(&columns_buf);
-        appendStringInfoString(&columns_buf, "Tracking attnums: ");
-        
-        ListCell *lc;
-        bool first = true;
-        foreach(lc, track_attnums)
-        {
-            if (!first)
-                appendStringInfoString(&columns_buf, ", ");
-            appendStringInfo(&columns_buf, "%d", lfirst_int(lc));
-            first = false;
-        }
-        
-        elog(NOTICE, "%s  %s", indent, columns_buf.data);
-        pfree(columns_buf.data);
-    }
-    else
-    {
-        elog(NOTICE, "%s  Not tracking any columns", indent);
-    }
-    
-    switch (nodeTag(n))
-    {
-        case T_JoinExpr:
-        {
-            JoinExpr *join = (JoinExpr *) n;
-            List *larg_attnums = NIL;
-            List *rarg_attnums = NIL;
-            
-            /* Log join information */
-            elog(NOTICE, "%s  Join type: %d", indent, join->jointype);
-            
-            /* Get output columns if the join has an rtindex */
-            if (join->rtindex > 0)
-            {
-                RangeTblEntry *join_rte;
-                if (query)
-                    join_rte = rt_fetch(join->rtindex, query->rtable);
-                else
-                    join_rte = rt_fetch(join->rtindex, pstate->p_rtable);
-                
-                /* Get column list from RTE */
-                if (join_rte->eref && join_rte->eref->colnames)
-                {
-                    output_columns = join_rte->eref->colnames;
-                    
-                    initStringInfo(&columns_buf);
-                    appendStringInfoString(&columns_buf, "Output columns: ");
-                    
-                    ListCell *lc;
-                    bool first = true;
-                    foreach(lc, output_columns)
-                    {
-                        if (!first)
-                            appendStringInfoString(&columns_buf, ", ");
-                        appendStringInfoString(&columns_buf, strVal(lfirst(lc)));
-                        first = false;
-                    }
-                    
-                    elog(NOTICE, "%s  %s", indent, columns_buf.data);
-                    pfree(columns_buf.data);
-                    
-                    /* Check if we're tracking attribute numbers and they exist in this join's output */
-                    if (track_attnums && join_rte->rtekind == RTE_JOIN && join_rte->joinaliasvars)
-                    {
-                        /* For each tracked attnum, see which side of the join it maps to */
-                        int larg_side = -1;  /* RTE index for left side */
-                        int rarg_side = -1;  /* RTE index for right side */
-                        int target_side = -1;  /* Side that our tracked attnums map to */
-                        bool all_same_side = true;
-                        
-                        initStringInfo(&columns_buf);
-                        appendStringInfoString(&columns_buf, "Attnum mappings: ");
-                        
-                        ListCell *col_lc;
-                        bool first = true;
-                        
-                        /* Special case for subqueries: check if we need to consult the target list */
-                        if (query != NULL)
-                        {
-                            elog(NOTICE, "%s  Checking subquery targetList to determine column origins", indent);
-                            
-                            /* First, determine which RTEs are left and right side of this join */
-                            if (join->rtindex > 0 && 
-                                join->rtindex <= list_length(query->rtable))
-                            {
-                                /* Find the join expression's left and right RTE indexes */
-                                JoinExpr *join_expr = NULL;
-                                int larg_relno = -1;
-                                int rarg_relno = -1;
+	if (indentation_depth > MAX_TRAVERSE_DEPTH)
+	{
+		elog(NOTICE, "indentation_depth exceeded maximum of %d", MAX_TRAVERSE_DEPTH);
+		return;
+	}
 
-                                /* Find or derive the join expression */
-                                if (IsA(join->larg, RangeTblRef))
-                                {
-                                    RangeTblRef *rtref = (RangeTblRef *) join->larg;
-                                    larg_relno = rtref->rtindex;
-                                }
-                                if (IsA(join->rarg, RangeTblRef))
-                                {
-                                    RangeTblRef *rtref = (RangeTblRef *) join->rarg;
-                                    rarg_relno = rtref->rtindex;
-                                }
+	/* Create indentation string */
+	int			i;
 
-                                elog(NOTICE, "%s  Join left side is rel:%d, right side is rel:%d", 
-                                     indent, larg_relno, rarg_relno);
-                                
-                                /* Scan the targetList to find where tracked attnum originates */
-                                foreach(col_lc, track_attnums)
-                                {
-                                    int attnum = lfirst_int(col_lc);
-                                    bool attnum_valid = (attnum > 0 && attnum <= list_length(query->targetList));
-                                    int col_side = -1;
-                                    int col_attno = -1;
-                                    
-                                    if (attnum_valid)
-                                    {
-                                        TargetEntry *te = (TargetEntry *) list_nth(query->targetList, attnum - 1);
-                                        
-                                        if (IsA(te->expr, Var))
-                                        {
-                                            Var *var = (Var *) te->expr;
-                                            col_side = var->varno;
-                                            col_attno = var->varattno;
-                                            
-                                            elog(NOTICE, "%s  Target column %d originates from rel:%d, att:%d", 
-                                                 indent, attnum, col_side, col_attno);
-                                            
-                                            /* All columns should map to the same side for tracking */
-                                            if (target_side < 0)
-                                                target_side = col_side;
-                                            else if (col_side != target_side)
-                                                all_same_side = false;
-                                                    
-                                            /* Add to the mapped attnums list */
-                                            mapped_attnums = lappend_int(mapped_attnums, col_attno);
-                                            
-                                            if (!first)
-                                                appendStringInfoString(&columns_buf, ", ");
-                                            appendStringInfo(&columns_buf, "%d -> (rel:%d, att:%d)", 
-                                                            attnum, col_side, col_attno);
-                                            first = false;
-                                        }
-                                        else
-                                        {
-                                            if (!first)
-                                                appendStringInfoString(&columns_buf, ", ");
-                                            appendStringInfo(&columns_buf, "%d -> EXPRESSION (not valid for tracking)", attnum);
-                                            first = false;
-                                            elog(WARNING, "%s  Attnum %d maps to an expression, not valid for foreign key tracking", 
-                                                 indent, attnum);
-                                        }
-                                    }
-                                    else
-                                    {
-                                        if (!first)
-                                            appendStringInfoString(&columns_buf, ", ");
-                                        appendStringInfo(&columns_buf, "%d -> INVALID ATTNUM", attnum);
-                                        first = false;
-                                    }
-                                }
-                                
-                                /* Determine if our tracked columns go to left or right child */
-                                if (all_same_side && target_side > 0)
-                                {
-                                    /* Set the appropriate side based on the actual relation numbers */
-                                    if (target_side == larg_relno)
-                                    {
-                                        larg_attnums = mapped_attnums;
-                                        elog(NOTICE, "%s  Tracked attnums map to left side of join (rel:%d)", 
-                                             indent, larg_relno);
-                                    }
-                                    else if (target_side == rarg_relno)
-                                    {
-                                        rarg_attnums = mapped_attnums;
-                                        elog(NOTICE, "%s  Tracked attnums map to right side of join (rel:%d)", 
-                                             indent, rarg_relno);
-                                    }
-                                    else
-                                    {
-                                        elog(NOTICE, "%s  Target rel:%d doesn't match left (%d) or right (%d) side", 
-                                             indent, target_side, larg_relno, rarg_relno);
-                                    }
-                                }
-                            }
-                        }
-                        else
-                        {
-                            /* Standard case: use joinaliasvars to determine mapping */
-                            foreach(col_lc, track_attnums)
-                            {
-                                int attnum = lfirst_int(col_lc);
-                                bool attnum_valid = (attnum > 0 && attnum <= list_length(join_rte->joinaliasvars));
-                                int col_side = -1;
-                                int col_attno = -1;
-                                
-                                if (attnum_valid)
-                                {
-                                    /* Found the attnum - see which input it maps to */
-                                    Node *map_node = list_nth(join_rte->joinaliasvars, attnum - 1);
-                                    if (IsA(map_node, Var))
-                                    {
-                                        Var *var = (Var *) map_node;
-                                        col_side = var->varno;
-                                        col_attno = var->varattno;
-                                        
-                                        /* Determine which side this is (larg or rarg) */
-                                        if (larg_side < 0)
-                                            larg_side = col_side;
-                                        else if (rarg_side < 0 && col_side != larg_side)
-                                            rarg_side = col_side;
-                                            
-                                        /* All columns should map to the same side for tracking */
-                                        if (target_side < 0)
-                                            target_side = col_side;
-                                        else if (col_side != target_side)
-                                            all_same_side = false;
-                                                
-                                        /* Add to the mapped attnums list for the appropriate side */
-                                        if (col_side == target_side)
-                                        {
-                                            mapped_attnums = lappend_int(mapped_attnums, col_attno);
-                                        }
-                                        
-                                        if (!first)
-                                            appendStringInfoString(&columns_buf, ", ");
-                                        appendStringInfo(&columns_buf, "%d -> (rel:%d, att:%d)", 
-                                                        attnum, col_side, col_attno);
-                                        first = false;
-                                    }
-                                    else
-                                    {
-                                        if (!first)
-                                            appendStringInfoString(&columns_buf, ", ");
-                                        appendStringInfo(&columns_buf, "%d -> EXPRESSION (not valid for tracking)", attnum);
-                                        first = false;
-                                        elog(WARNING, "%s  Attnum %d maps to an expression, not valid for foreign key tracking", 
-                                             indent, attnum);
-                                    }
-                                }
-                                else
-                                {
-                                    if (!first)
-                                        appendStringInfoString(&columns_buf, ", ");
-                                    appendStringInfo(&columns_buf, "%d -> INVALID ATTNUM", attnum);
-                                    first = false;
-                                }
-                            }
-                        }
-                        
-                        elog(NOTICE, "%s  %s", indent, columns_buf.data);
-                        pfree(columns_buf.data);
-                        
-                        columns_tracked = all_same_side && list_length(mapped_attnums) > 0;
-                        
-                        /* For standard case, determine if we're going down larg or rarg with our attnums */
-                        if (columns_tracked && query == NULL)
-                        {
-                            if (target_side == larg_side)
-                            {
-                                larg_attnums = mapped_attnums;
-                                elog(NOTICE, "%s  Tracked attnums map to left side of join", indent);
-                            }
-                            else if (target_side == rarg_side)
-                            {
-                                rarg_attnums = mapped_attnums;
-                                elog(NOTICE, "%s  Tracked attnums map to right side of join", indent);
-                            }
-                        }
-                        
-                        if (!columns_tracked)
-                        {
-                            elog(NOTICE, "%s  Failed to track attnums (all_same_side=%d, mapped_count=%d)", 
-                                 indent, all_same_side, list_length(mapped_attnums));
-                        }
-                    }
-                }
-                else
-                {
-                    elog(NOTICE, "%s  No column information available", indent);
-                }
-            }
-            else
-            {
-                elog(NOTICE, "%s  Join does not have an rtindex yet", indent);
-            }
-            
-            /* Process left arg */
-            if (join->larg)
-            {
-                elog(NOTICE, "%s  Descending into left arg with %d tracked attnums", 
-                     indent, larg_attnums ? list_length(larg_attnums) : 0);
-                traverse_node(pstate, join->larg, r_nsitem, l_namespace, indentation_depth + 2, query, larg_attnums);
-            }
-            
-            /* Process right arg */
-            if (join->rarg)
-            {
-                elog(NOTICE, "%s  Descending into right arg with %d tracked attnums", 
-                     indent, rarg_attnums ? list_length(rarg_attnums) : 0);
-                traverse_node(pstate, join->rarg, r_nsitem, l_namespace, indentation_depth + 2, query, rarg_attnums);
-            }
-        }
-        break;
-        
-        case T_RangeTblRef:
-        {
-            RangeTblRef *rtr = (RangeTblRef *) n;
-            rtindex = rtr->rtindex;
-            
-            /* Use the appropriate range table for lookups */
-            if (query)
-                rte = rt_fetch(rtindex, query->rtable);
-            else
-                rte = rt_fetch(rtindex, pstate->p_rtable);
-                
-            elog(NOTICE, "%s  RangeTblRef to RTE index: %d in %s", indent, rtindex, 
-                 query ? "view's query" : "outer query");
-            
-            /* Log column information */
-            if (rte->eref && rte->eref->colnames)
-            {
-                output_columns = rte->eref->colnames;
-                
-                initStringInfo(&columns_buf);
-                appendStringInfoString(&columns_buf, "Columns: ");
-                
-                ListCell *lc;
-                bool first = true;
-                foreach(lc, output_columns)
-                {
-                    if (!first)
-                        appendStringInfoString(&columns_buf, ", ");
-                    appendStringInfoString(&columns_buf, strVal(lfirst(lc)));
-                    first = false;
-                }
-                
-                elog(NOTICE, "%s  %s", indent, columns_buf.data);
-                pfree(columns_buf.data);
-                
-                /* Check if we're tracking attnums and they are valid for this RTE */
-                if (track_attnums)
-                {
-                    initStringInfo(&columns_buf);
-                    appendStringInfoString(&columns_buf, "Tracking status: ");
-                    
-                    bool all_valid = true;
-                    bool first = true;
-                    ListCell *att_lc;
-                    
-                    foreach(att_lc, track_attnums)
-                    {
-                        int attnum = lfirst_int(att_lc);
-                        bool attnum_valid = (attnum > 0 && attnum <= list_length(output_columns));
-                        
-                        if (!first)
-                            appendStringInfoString(&columns_buf, ", ");
-                        appendStringInfo(&columns_buf, "%d: %s", attnum, attnum_valid ? "VALID" : "INVALID");
-                        first = false;
-                        
-                        if (!attnum_valid)
-                            all_valid = false;
-                    }
-                    
-                    elog(NOTICE, "%s  %s", indent, columns_buf.data);
-                    pfree(columns_buf.data);
-                    
-                    columns_tracked = all_valid;
-                    
-                    if (columns_tracked)
-                        mapped_attnums = list_copy(track_attnums);
-                    else
-                        elog(NOTICE, "%s  Some tracked attnums are invalid for this RTE", indent);
-                }
-            }
-            
-            /* Process the referenced RTE */
-            switch (rte->rtekind)
-            {
-                case RTE_RELATION:
-                {
-                    Relation rel;
-                    
-                    elog(NOTICE, "%s  RTE is a relation (relid: %u)", indent, rte->relid);
-                    
-                    /* Open the relation to check its type */
-                    rel = table_open(rte->relid, AccessShareLock);
-                    
-                    if (rel->rd_rel->relkind == RELKIND_VIEW)
-                    {
-                        Query *viewQuery = get_view_query(rel);
-                        List *view_mapped_attnums = NIL;
-                        
-                        elog(NOTICE, "%s  Relation is a VIEW", indent);
-                        
-                        /* Map tracked attnums to the view's underlying query */
-                        if (columns_tracked && mapped_attnums)
-                        {
-                            view_mapped_attnums = NIL;
-                            ListCell *att_lc;
-                            foreach(att_lc, mapped_attnums)
-                            {
-                                int attnum = lfirst_int(att_lc);
-                                
-                                /* Find this attnum in the view's target list */
-                                if (attnum > 0 && attnum <= list_length(viewQuery->targetList))
-                                {
-                                    TargetEntry *te = (TargetEntry *) list_nth(viewQuery->targetList, attnum - 1);
-                                    
-                                    /* Found matching target entry - check if it's a simple column reference */
-                                    if (IsA(te->expr, Var))
-                                    {
-                                        Var *var = (Var *) te->expr;
-                                        /* Map to the attnum in the lower query */
-                                        view_mapped_attnums = lappend_int(view_mapped_attnums, var->varattno);
-                                        elog(NOTICE, "%s  Mapped attnum %d to underlying attnum %d", 
-                                             indent, attnum, var->varattno);
-                                    }
-                                    else
-                                    {
-                                        elog(WARNING, "%s  Attnum %d maps to an expression, not valid for foreign key tracking", 
-                                             indent, attnum);
-                                    }
-                                }
-                            }
-                            
-                            if (list_length(view_mapped_attnums) == list_length(mapped_attnums))
-                                elog(NOTICE, "%s  Successfully mapped all attnums to view query", indent);
-                            else
-                                elog(NOTICE, "%s  Failed to map some attnums (%d of %d mapped)", 
-                                     indent, list_length(view_mapped_attnums), list_length(mapped_attnums));
-                        }
-                        
-                        /* Only traverse view query if fromlist has length 1 */
-                        if (viewQuery->jointree && 
-                            viewQuery->jointree->fromlist && 
-                            list_length(viewQuery->jointree->fromlist) == 1)
-                        {
-                            elog(NOTICE, "%s  VIEW has single fromlist item, traversing deeper", indent);
-                            /* Pass the view query as the context for the next level of traversal */
-                            traverse_node(pstate, 
-                                        (Node *) linitial(viewQuery->jointree->fromlist), 
-                                        r_nsitem, l_namespace, indentation_depth + 2, 
-                                        viewQuery, view_mapped_attnums);
-                        }
-                        else
-                        {
-                            elog(NOTICE, "%s  VIEW has multiple or no fromlist items, stopping here", indent);
-                        }
-                    }
-                    else if (rel->rd_rel->relkind == RELKIND_RELATION || 
-                             rel->rd_rel->relkind == RELKIND_PARTITIONED_TABLE)
-                    {
-                        /* Base table - this is our base case */
-                        /* Get actual column names from the system catalogs */
-                        TupleDesc tupdesc = RelationGetDescr(rel);
-                        int natts = tupdesc->natts;
-                        
-                        initStringInfo(&columns_buf);
-                        appendStringInfoString(&columns_buf, "Base table columns: ");
-                        
-                        bool first = true;
-                        for (i = 0; i < natts; i++)
-                        {
-                            Form_pg_attribute att = TupleDescAttr(tupdesc, i);
-                            
-                            /* Skip dropped columns */
-                            if (att->attisdropped)
-                                continue;
-                                
-                            if (!first)
-                                appendStringInfoString(&columns_buf, ", ");
-                            appendStringInfoString(&columns_buf, NameStr(att->attname));
-                            first = false;
-                        }
-                        
-                        /* Check if tracked attnums are valid in this base table */
-                        bool tracked_in_base = false;
-                        if (columns_tracked && mapped_attnums)
-                        {
-                            StringInfoData tracked_buf;
-                            initStringInfo(&tracked_buf);
-                            appendStringInfoString(&tracked_buf, "Tracked attnums in base table: ");
-                            
-                            bool all_in_base = true;
-                            bool first = true;
-                            ListCell *att_lc;
-                            foreach(att_lc, mapped_attnums)
-                            {
-                                int attnum = lfirst_int(att_lc);
-                                bool found_in_base = (attnum > 0 && attnum <= natts);
-                                
-                                /* Check if this is a valid non-dropped column */
-                                if (found_in_base)
-                                {
-                                    Form_pg_attribute att = TupleDescAttr(tupdesc, attnum - 1);
-                                    if (att->attisdropped)
-                                        found_in_base = false;
-                                }
-                                
-                                if (!first)
-                                    appendStringInfoString(&tracked_buf, ", ");
-                                appendStringInfo(&tracked_buf, "%d: %s", attnum, found_in_base ? "VALID" : "INVALID");
-                                first = false;
-                                
-                                if (!found_in_base)
-                                    all_in_base = false;
-                            }
-                            
-                            tracked_in_base = all_in_base;
-                            
-                            if (tracked_in_base)
-                                appendStringInfoString(&tracked_buf, " (ALL VALID)");
-                            else
-                                appendStringInfoString(&tracked_buf, " (SOME INVALID)");
-                                
-                            elog(NOTICE, "%s  %s", indent, tracked_buf.data);
-                            pfree(tracked_buf.data);
-                        }
-                        
-                        elog(NOTICE, "%s*** Found base table: %s with %s %s***", indent, 
-                             get_rel_name(rte->relid) ? get_rel_name(rte->relid) : "unknown",
-                             columns_buf.data,
-                             tracked_in_base ? "- TRACKED ATTNUMS VALID HERE" : "");
-                        pfree(columns_buf.data);
-                    }
-                    else
-                    {
-                        elog(NOTICE, "%s  Relation has unsupported relkind: %c", indent, rel->rd_rel->relkind);
-                    }
-                    
-                    /* Close the relation */
-                    table_close(rel, AccessShareLock);
-                }
-                break;
-                
-                case RTE_SUBQUERY:
-                {
-                    Query *subquery = rte->subquery;
-                    List *subq_mapped_attnums = NIL;
-                    
-                    elog(NOTICE, "%s  RTE is a SUBQUERY", indent);
-                    
-                    /* Log subquery output columns */
-                    initStringInfo(&columns_buf);
-                    appendStringInfoString(&columns_buf, "Subquery output columns: ");
-                    
-                    ListCell *lc;
-                    bool first = true;
-                    foreach(lc, subquery->targetList)
-                    {
-                        TargetEntry *tle = (TargetEntry *) lfirst(lc);
-                        
-                        /* Skip resjunk columns */
-                        if (tle->resjunk)
-                            continue;
-                            
-                        if (!first)
-                            appendStringInfoString(&columns_buf, ", ");
-                        appendStringInfoString(&columns_buf, tle->resname ? tle->resname : "<unnamed>");
-                        first = false;
-                    }
-                    
-                    elog(NOTICE, "%s  %s", indent, columns_buf.data);
-                    pfree(columns_buf.data);
-                    
-                    /* Map tracked attnums to the subquery's underlying query */
-                    if (columns_tracked && mapped_attnums)
-                    {
-                        subq_mapped_attnums = NIL;
-                        ListCell *att_lc;
-                        foreach(att_lc, mapped_attnums)
-                        {
-                            int attnum = lfirst_int(att_lc);
-                            
-                            /* Find target entry for this attnum */
-                            int targetno = 0;
-                            int valid_targetno = 0; /* Counting non-resjunk targets */
-                            TargetEntry *matching_te = NULL;
-                            
-                            foreach(lc, subquery->targetList)
-                            {
-                                TargetEntry *te = (TargetEntry *) lfirst(lc);
-                                if (!te->resjunk)
-                                {
-                                    valid_targetno++;
-                                    if (valid_targetno == attnum)
-                                    {
-                                        matching_te = te;
-                                        break;
-                                    }
-                                }
-                                targetno++;
-                            }
-                            
-                            if (matching_te)
-                            {
-                                /* Found matching target entry - check if it's a simple column reference */
-                                if (IsA(matching_te->expr, Var))
-                                {
-                                    Var *var = (Var *) matching_te->expr;
-                                    /* Map to the attnum in the referenced RTE */
-                                    subq_mapped_attnums = lappend_int(subq_mapped_attnums, var->varattno);
-                                    elog(NOTICE, "%s  Mapped attnum %d to underlying attnum %d", 
-                                         indent, attnum, var->varattno);
-                                }
-                                else
-                                {
-                                    elog(WARNING, "%s  Attnum %d maps to an expression, not valid for foreign key tracking", 
-                                         indent, attnum);
-                                }
-                            }
-                        }
-                        
-                        if (list_length(subq_mapped_attnums) == list_length(mapped_attnums))
-                            elog(NOTICE, "%s  Successfully mapped all attnums to subquery", indent);
-                        else
-                            elog(NOTICE, "%s  Failed to map some attnums (%d of %d mapped)", 
-                                 indent, list_length(subq_mapped_attnums), list_length(mapped_attnums));
-                    }
-                    
-                    /* Only traverse subquery if fromlist has length 1 */
-                    if (subquery->jointree && 
-                        subquery->jointree->fromlist && 
-                        list_length(subquery->jointree->fromlist) == 1)
-                    {
-                        elog(NOTICE, "%s  SUBQUERY has single fromlist item, traversing deeper", indent);
-                        /* Pass the subquery as the context for the next level of traversal */
-                        traverse_node(pstate, 
-                                     (Node *) linitial(subquery->jointree->fromlist), 
-                                     r_nsitem, l_namespace, indentation_depth + 2,
-                                     subquery, subq_mapped_attnums);
-                    }
-                    else
-                    {
-                        elog(NOTICE, "%s  SUBQUERY has multiple or no fromlist items, stopping here", indent);
-                    }
-                }
-                break;
-                
-                case RTE_CTE:
-                {
-                    Index levelsup;
-                    CommonTableExpr *cte;
-                    List *cte_mapped_attnums = NIL;
-                    
-                    elog(NOTICE, "%s  RTE is a CTE (name: %s)", indent, rte->ctename);
-                    
-                    /* Find the CTE */
-                    cte = scanNameSpaceForCTE(pstate, rte->ctename, &levelsup);
-                    
-                    if (cte && !cte->cterecursive && IsA(cte->ctequery, Query))
-                    {
-                        Query *cteQuery = (Query *) cte->ctequery;
-                        
-                        /* Log CTE output columns */
-                        initStringInfo(&columns_buf);
-                        appendStringInfoString(&columns_buf, "CTE output columns: ");
-                        
-                        ListCell *lc;
-                        bool first = true;
-                        foreach(lc, cteQuery->targetList)
-                        {
-                            TargetEntry *tle = (TargetEntry *) lfirst(lc);
-                            
-                            /* Skip resjunk columns */
-                            if (tle->resjunk)
-                                continue;
-                                
-                            if (!first)
-                                appendStringInfoString(&columns_buf, ", ");
-                            appendStringInfoString(&columns_buf, tle->resname ? tle->resname : "<unnamed>");
-                            first = false;
-                        }
-                        
-                        elog(NOTICE, "%s  %s", indent, columns_buf.data);
-                        pfree(columns_buf.data);
-                        
-                        /* Map tracked attnums to the CTE's underlying query */
-                        if (columns_tracked && mapped_attnums)
-                        {
-                            cte_mapped_attnums = NIL;
-                            ListCell *att_lc;
-                            foreach(att_lc, mapped_attnums)
-                            {
-                                int attnum = lfirst_int(att_lc);
-                                
-                                /* Find target entry for this attnum */
-                                int targetno = 0;
-                                int valid_targetno = 0; /* Counting non-resjunk targets */
-                                TargetEntry *matching_te = NULL;
-                                
-                                foreach(lc, cteQuery->targetList)
-                                {
-                                    TargetEntry *te = (TargetEntry *) lfirst(lc);
-                                    if (!te->resjunk)
-                                    {
-                                        valid_targetno++;
-                                        if (valid_targetno == attnum)
-                                        {
-                                            matching_te = te;
-                                            break;
-                                        }
-                                    }
-                                    targetno++;
-                                }
-                                
-                                if (matching_te)
-                                {
-                                    /* Found matching target entry - check if it's a simple column reference */
-                                    if (IsA(matching_te->expr, Var))
-                                    {
-                                        Var *var = (Var *) matching_te->expr;
-                                        /* Map to the attnum in the referenced RTE */
-                                        cte_mapped_attnums = lappend_int(cte_mapped_attnums, var->varattno);
-                                        elog(NOTICE, "%s  Mapped attnum %d to underlying attnum %d", 
-                                             indent, attnum, var->varattno);
-                                    }
-                                    else
-                                    {
-                                        elog(WARNING, "%s  Attnum %d maps to an expression, not valid for foreign key tracking", 
-                                             indent, attnum);
-                                    }
-                                }
-                            }
-                            
-                            if (list_length(cte_mapped_attnums) == list_length(mapped_attnums))
-                                elog(NOTICE, "%s  Successfully mapped all attnums to CTE query", indent);
-                            else
-                                elog(NOTICE, "%s  Failed to map some attnums (%d of %d mapped)", 
-                                     indent, list_length(cte_mapped_attnums), list_length(mapped_attnums));
-                        }
-                        
-                        /* Only traverse CTE query if fromlist has length 1 */
-                        if (cteQuery->jointree && 
-                            cteQuery->jointree->fromlist && 
-                            list_length(cteQuery->jointree->fromlist) == 1)
-                        {
-                            elog(NOTICE, "%s  CTE has single fromlist item, traversing deeper", indent);
-                            /* Pass the CTE query as the context for the next level of traversal */
-                            traverse_node(pstate, 
-                                         (Node *) linitial(cteQuery->jointree->fromlist), 
-                                         r_nsitem, l_namespace, indentation_depth + 2,
-                                         cteQuery, cte_mapped_attnums);
-                        }
-                        else
-                        {
-                            elog(NOTICE, "%s  CTE has multiple or no fromlist items, stopping here", indent);
-                        }
-                    }
-                    else if (cte && cte->cterecursive)
-                    {
-                        elog(NOTICE, "%s  CTE is recursive, stopping here", indent);
-                    }
-                }
-                break;
+	for (i = 0; i < indentation_depth; i++)
+		indent[i] = ' ';
+	indent[i] = '\0';
 
-                default:
-                    elog(NOTICE, "%s  RTE has unsupported rtekind: %d", indent, rte->rtekind);
-                    break;
-            }
-        }
-        break;
-        
-        default:
-            elog(NOTICE, "%s  Unsupported node type: %s", indent, getNodeTypeName(nodeTag(n)));
-            break;
-    }
-    
-    /* Log exit from this node */
-    elog(NOTICE, "%s<= Returning from node type: %s", indent, getNodeTypeName(nodeTag(n)));
+	if (n == NULL)
+	{
+		elog(NOTICE, "%s[NULL node]", indent);
+		return;
+	}
+
+	/* Log entry into this node */
+	elog(NOTICE, "%s=> Processing node type: %s", indent, getNodeTypeName(nodeTag(n)));
+
+	/* Log tracked columns status */
+	if (track_attnums)
+	{
+		initStringInfo(&columns_buf);
+		appendStringInfoString(&columns_buf, "Tracking attnums: ");
+
+		ListCell   *lc;
+		bool		first = true;
+
+		foreach(lc, track_attnums)
+		{
+			if (!first)
+				appendStringInfoString(&columns_buf, ", ");
+			appendStringInfo(&columns_buf, "%d", lfirst_int(lc));
+			first = false;
+		}
+
+		elog(NOTICE, "%s  %s", indent, columns_buf.data);
+		pfree(columns_buf.data);
+	}
+	else
+	{
+		elog(NOTICE, "%s  Not tracking any columns", indent);
+	}
+
+	switch (nodeTag(n))
+	{
+		case T_JoinExpr:
+			{
+				JoinExpr   *join = (JoinExpr *) n;
+				List	   *larg_attnums = NIL;
+				List	   *rarg_attnums = NIL;
+
+				/* Log join information */
+				elog(NOTICE, "%s  Join type: %d", indent, join->jointype);
+
+				/* Get output columns if the join has an rtindex */
+				if (join->rtindex > 0)
+				{
+					RangeTblEntry *join_rte;
+
+					if (query)
+						join_rte = rt_fetch(join->rtindex, query->rtable);
+					else
+						join_rte = rt_fetch(join->rtindex, pstate->p_rtable);
+
+					/* Get column list from RTE */
+					if (join_rte->eref && join_rte->eref->colnames)
+					{
+						output_columns = join_rte->eref->colnames;
+
+						initStringInfo(&columns_buf);
+						appendStringInfoString(&columns_buf, "Output columns: ");
+
+						ListCell   *lc;
+						bool		first = true;
+
+						foreach(lc, output_columns)
+						{
+							if (!first)
+								appendStringInfoString(&columns_buf, ", ");
+							appendStringInfoString(&columns_buf, strVal(lfirst(lc)));
+							first = false;
+						}
+
+						elog(NOTICE, "%s  %s", indent, columns_buf.data);
+						pfree(columns_buf.data);
+
+						/*
+						 * Check if we're tracking attribute numbers and they
+						 * exist in this join's output
+						 */
+						if (track_attnums && join_rte->rtekind == RTE_JOIN && join_rte->joinaliasvars)
+						{
+							/*
+							 * For each tracked attnum, see which side of the
+							 * join it maps to
+							 */
+							int			larg_side = -1; /* RTE index for left
+														 * side */
+							int			rarg_side = -1; /* RTE index for right
+														 * side */
+							int			target_side = -1;	/* Side that our tracked
+															 * attnums map to */
+							bool		all_same_side = true;
+
+							initStringInfo(&columns_buf);
+							appendStringInfoString(&columns_buf, "Attnum mappings: ");
+
+							ListCell   *col_lc;
+							bool		first = true;
+
+							/*
+							 * Special case for subqueries: check if we need
+							 * to consult the target list
+							 */
+							if (query != NULL)
+							{
+								elog(NOTICE, "%s  Checking subquery targetList to determine column origins", indent);
+
+								/*
+								 * First, determine which RTEs are left and
+								 * right side of this join
+								 */
+								if (join->rtindex > 0 &&
+									join->rtindex <= list_length(query->rtable))
+								{
+									/*
+									 * Find the join expression's left and
+									 * right RTE indexes
+									 */
+									JoinExpr   *join_expr = NULL;
+									int			larg_relno = -1;
+									int			rarg_relno = -1;
+
+									/* Find or derive the join expression */
+									if (IsA(join->larg, RangeTblRef))
+									{
+										RangeTblRef *rtref = (RangeTblRef *) join->larg;
+
+										larg_relno = rtref->rtindex;
+									}
+									if (IsA(join->rarg, RangeTblRef))
+									{
+										RangeTblRef *rtref = (RangeTblRef *) join->rarg;
+
+										rarg_relno = rtref->rtindex;
+									}
+
+									elog(NOTICE, "%s  Join left side is rel:%d, right side is rel:%d",
+										 indent, larg_relno, rarg_relno);
+
+									/*
+									 * Scan the targetList to find where
+									 * tracked attnum originates
+									 */
+									foreach(col_lc, track_attnums)
+									{
+										int			attnum = lfirst_int(col_lc);
+										bool		attnum_valid = (attnum > 0 && attnum <= list_length(query->targetList));
+										int			col_side = -1;
+										int			col_attno = -1;
+
+										if (attnum_valid)
+										{
+											TargetEntry *te = (TargetEntry *) list_nth(query->targetList, attnum - 1);
+
+											if (IsA(te->expr, Var))
+											{
+												Var		   *var = (Var *) te->expr;
+
+												col_side = var->varno;
+												col_attno = var->varattno;
+
+												elog(NOTICE, "%s  Target column %d originates from rel:%d, att:%d",
+													 indent, attnum, col_side, col_attno);
+
+												/*
+												 * All columns should map to
+												 * the same side for tracking
+												 */
+												if (target_side < 0)
+													target_side = col_side;
+												else if (col_side != target_side)
+													all_same_side = false;
+
+												/*
+												 * Add to the mapped attnums
+												 * list
+												 */
+												mapped_attnums = lappend_int(mapped_attnums, col_attno);
+
+												if (!first)
+													appendStringInfoString(&columns_buf, ", ");
+												appendStringInfo(&columns_buf, "%d -> (rel:%d, att:%d)",
+																 attnum, col_side, col_attno);
+												first = false;
+											}
+											else
+											{
+												if (!first)
+													appendStringInfoString(&columns_buf, ", ");
+												appendStringInfo(&columns_buf, "%d -> EXPRESSION (not valid for tracking)", attnum);
+												first = false;
+												elog(WARNING, "%s  Attnum %d maps to an expression, not valid for foreign key tracking",
+													 indent, attnum);
+											}
+										}
+										else
+										{
+											if (!first)
+												appendStringInfoString(&columns_buf, ", ");
+											appendStringInfo(&columns_buf, "%d -> INVALID ATTNUM", attnum);
+											first = false;
+										}
+									}
+
+									/*
+									 * Determine if our tracked columns go to
+									 * left or right child
+									 */
+									if (all_same_side && target_side > 0)
+									{
+										/*
+										 * Set the appropriate side based on
+										 * the actual relation numbers
+										 */
+										if (target_side == larg_relno)
+										{
+											larg_attnums = mapped_attnums;
+											elog(NOTICE, "%s  Tracked attnums map to left side of join (rel:%d)",
+												 indent, larg_relno);
+										}
+										else if (target_side == rarg_relno)
+										{
+											rarg_attnums = mapped_attnums;
+											elog(NOTICE, "%s  Tracked attnums map to right side of join (rel:%d)",
+												 indent, rarg_relno);
+										}
+										else
+										{
+											elog(NOTICE, "%s  Target rel:%d doesn't match left (%d) or right (%d) side",
+												 indent, target_side, larg_relno, rarg_relno);
+										}
+									}
+								}
+							}
+							else
+							{
+								/*
+								 * Standard case: use joinaliasvars to
+								 * determine mapping
+								 */
+								foreach(col_lc, track_attnums)
+								{
+									int			attnum = lfirst_int(col_lc);
+									bool		attnum_valid = (attnum > 0 && attnum <= list_length(join_rte->joinaliasvars));
+									int			col_side = -1;
+									int			col_attno = -1;
+
+									if (attnum_valid)
+									{
+										/*
+										 * Found the attnum - see which input
+										 * it maps to
+										 */
+										Node	   *map_node = list_nth(join_rte->joinaliasvars, attnum - 1);
+
+										if (IsA(map_node, Var))
+										{
+											Var		   *var = (Var *) map_node;
+
+											col_side = var->varno;
+											col_attno = var->varattno;
+
+											/*
+											 * Determine which side this is
+											 * (larg or rarg)
+											 */
+											if (larg_side < 0)
+												larg_side = col_side;
+											else if (rarg_side < 0 && col_side != larg_side)
+												rarg_side = col_side;
+
+											/*
+											 * All columns should map to the
+											 * same side for tracking
+											 */
+											if (target_side < 0)
+												target_side = col_side;
+											else if (col_side != target_side)
+												all_same_side = false;
+
+											/*
+											 * Add to the mapped attnums list
+											 * for the appropriate side
+											 */
+											if (col_side == target_side)
+											{
+												mapped_attnums = lappend_int(mapped_attnums, col_attno);
+											}
+
+											if (!first)
+												appendStringInfoString(&columns_buf, ", ");
+											appendStringInfo(&columns_buf, "%d -> (rel:%d, att:%d)",
+															 attnum, col_side, col_attno);
+											first = false;
+										}
+										else
+										{
+											if (!first)
+												appendStringInfoString(&columns_buf, ", ");
+											appendStringInfo(&columns_buf, "%d -> EXPRESSION (not valid for tracking)", attnum);
+											first = false;
+											elog(WARNING, "%s  Attnum %d maps to an expression, not valid for foreign key tracking",
+												 indent, attnum);
+										}
+									}
+									else
+									{
+										if (!first)
+											appendStringInfoString(&columns_buf, ", ");
+										appendStringInfo(&columns_buf, "%d -> INVALID ATTNUM", attnum);
+										first = false;
+									}
+								}
+							}
+
+							elog(NOTICE, "%s  %s", indent, columns_buf.data);
+							pfree(columns_buf.data);
+
+							columns_tracked = all_same_side && list_length(mapped_attnums) > 0;
+
+							/*
+							 * For standard case, determine if we're going
+							 * down larg or rarg with our attnums
+							 */
+							if (columns_tracked && query == NULL)
+							{
+								if (target_side == larg_side)
+								{
+									larg_attnums = mapped_attnums;
+									elog(NOTICE, "%s  Tracked attnums map to left side of join", indent);
+								}
+								else if (target_side == rarg_side)
+								{
+									rarg_attnums = mapped_attnums;
+									elog(NOTICE, "%s  Tracked attnums map to right side of join", indent);
+								}
+							}
+
+							if (!columns_tracked)
+							{
+								elog(NOTICE, "%s  Failed to track attnums (all_same_side=%d, mapped_count=%d)",
+									 indent, all_same_side, list_length(mapped_attnums));
+							}
+						}
+					}
+					else
+					{
+						elog(NOTICE, "%s  No column information available", indent);
+					}
+				}
+				else
+				{
+					elog(NOTICE, "%s  Join does not have an rtindex yet", indent);
+				}
+
+				/* Process left arg */
+				if (join->larg)
+				{
+					elog(NOTICE, "%s  Descending into left arg with %d tracked attnums",
+						 indent, larg_attnums ? list_length(larg_attnums) : 0);
+					traverse_node(pstate, join->larg, r_nsitem, l_namespace, indentation_depth + 2, query, larg_attnums);
+				}
+
+				/* Process right arg */
+				if (join->rarg)
+				{
+					elog(NOTICE, "%s  Descending into right arg with %d tracked attnums",
+						 indent, rarg_attnums ? list_length(rarg_attnums) : 0);
+					traverse_node(pstate, join->rarg, r_nsitem, l_namespace, indentation_depth + 2, query, rarg_attnums);
+				}
+			}
+			break;
+
+		case T_RangeTblRef:
+			{
+				RangeTblRef *rtr = (RangeTblRef *) n;
+
+				rtindex = rtr->rtindex;
+
+				/* Use the appropriate range table for lookups */
+				if (query)
+					rte = rt_fetch(rtindex, query->rtable);
+				else
+					rte = rt_fetch(rtindex, pstate->p_rtable);
+
+				elog(NOTICE, "%s  RangeTblRef to RTE index: %d in %s", indent, rtindex,
+					 query ? "view's query" : "outer query");
+
+				/* Log column information */
+				if (rte->eref && rte->eref->colnames)
+				{
+					output_columns = rte->eref->colnames;
+
+					initStringInfo(&columns_buf);
+					appendStringInfoString(&columns_buf, "Columns: ");
+
+					ListCell   *lc;
+					bool		first = true;
+
+					foreach(lc, output_columns)
+					{
+						if (!first)
+							appendStringInfoString(&columns_buf, ", ");
+						appendStringInfoString(&columns_buf, strVal(lfirst(lc)));
+						first = false;
+					}
+
+					elog(NOTICE, "%s  %s", indent, columns_buf.data);
+					pfree(columns_buf.data);
+
+					/*
+					 * Check if we're tracking attnums and they are valid for
+					 * this RTE
+					 */
+					if (track_attnums)
+					{
+						initStringInfo(&columns_buf);
+						appendStringInfoString(&columns_buf, "Tracking status: ");
+
+						bool		all_valid = true;
+						bool		first = true;
+						ListCell   *att_lc;
+
+						foreach(att_lc, track_attnums)
+						{
+							int			attnum = lfirst_int(att_lc);
+							bool		attnum_valid = (attnum > 0 && attnum <= list_length(output_columns));
+
+							if (!first)
+								appendStringInfoString(&columns_buf, ", ");
+							appendStringInfo(&columns_buf, "%d: %s", attnum, attnum_valid ? "VALID" : "INVALID");
+							first = false;
+
+							if (!attnum_valid)
+								all_valid = false;
+						}
+
+						elog(NOTICE, "%s  %s", indent, columns_buf.data);
+						pfree(columns_buf.data);
+
+						columns_tracked = all_valid;
+
+						if (columns_tracked)
+							mapped_attnums = list_copy(track_attnums);
+						else
+							elog(NOTICE, "%s  Some tracked attnums are invalid for this RTE", indent);
+					}
+				}
+
+				/* Process the referenced RTE */
+				switch (rte->rtekind)
+				{
+					case RTE_RELATION:
+						{
+							Relation	rel;
+
+							elog(NOTICE, "%s  RTE is a relation (relid: %u)", indent, rte->relid);
+
+							/* Open the relation to check its type */
+							rel = table_open(rte->relid, AccessShareLock);
+
+							if (rel->rd_rel->relkind == RELKIND_VIEW)
+							{
+								Query	   *viewQuery = get_view_query(rel);
+								List	   *view_mapped_attnums = NIL;
+
+								elog(NOTICE, "%s  Relation is a VIEW", indent);
+
+								/*
+								 * Map tracked attnums to the view's
+								 * underlying query
+								 */
+								if (columns_tracked && mapped_attnums)
+								{
+									view_mapped_attnums = NIL;
+									ListCell   *att_lc;
+
+									foreach(att_lc, mapped_attnums)
+									{
+										int			attnum = lfirst_int(att_lc);
+
+										/*
+										 * Find this attnum in the view's
+										 * target list
+										 */
+										if (attnum > 0 && attnum <= list_length(viewQuery->targetList))
+										{
+											TargetEntry *te = (TargetEntry *) list_nth(viewQuery->targetList, attnum - 1);
+
+											/*
+											 * Found matching target entry -
+											 * check if it's a simple column
+											 * reference
+											 */
+											if (IsA(te->expr, Var))
+											{
+												Var		   *var = (Var *) te->expr;
+
+												/*
+												 * Map to the attnum in the
+												 * lower query
+												 */
+												view_mapped_attnums = lappend_int(view_mapped_attnums, var->varattno);
+												elog(NOTICE, "%s  Mapped attnum %d to underlying attnum %d",
+													 indent, attnum, var->varattno);
+											}
+											else
+											{
+												elog(WARNING, "%s  Attnum %d maps to an expression, not valid for foreign key tracking",
+													 indent, attnum);
+											}
+										}
+									}
+
+									if (list_length(view_mapped_attnums) == list_length(mapped_attnums))
+										elog(NOTICE, "%s  Successfully mapped all attnums to view query", indent);
+									else
+										elog(NOTICE, "%s  Failed to map some attnums (%d of %d mapped)",
+											 indent, list_length(view_mapped_attnums), list_length(mapped_attnums));
+								}
+
+								/*
+								 * Only traverse view query if fromlist has
+								 * length 1
+								 */
+								if (viewQuery->jointree &&
+									viewQuery->jointree->fromlist &&
+									list_length(viewQuery->jointree->fromlist) == 1)
+								{
+									elog(NOTICE, "%s  VIEW has single fromlist item, traversing deeper", indent);
+
+									/*
+									 * Pass the view query as the context for
+									 * the next level of traversal
+									 */
+									traverse_node(pstate,
+												  (Node *) linitial(viewQuery->jointree->fromlist),
+												  r_nsitem, l_namespace, indentation_depth + 2,
+												  viewQuery, view_mapped_attnums);
+								}
+								else
+								{
+									elog(NOTICE, "%s  VIEW has multiple or no fromlist items, stopping here", indent);
+								}
+							}
+							else if (rel->rd_rel->relkind == RELKIND_RELATION ||
+									 rel->rd_rel->relkind == RELKIND_PARTITIONED_TABLE)
+							{
+								/* Base table - this is our base case */
+								/*
+								 * Get actual column names from the system
+								 * catalogs
+								 */
+								TupleDesc	tupdesc = RelationGetDescr(rel);
+								int			natts = tupdesc->natts;
+
+								initStringInfo(&columns_buf);
+								appendStringInfoString(&columns_buf, "Base table columns: ");
+
+								bool		first = true;
+
+								for (i = 0; i < natts; i++)
+								{
+									Form_pg_attribute att = TupleDescAttr(tupdesc, i);
+
+									/* Skip dropped columns */
+									if (att->attisdropped)
+										continue;
+
+									if (!first)
+										appendStringInfoString(&columns_buf, ", ");
+									appendStringInfoString(&columns_buf, NameStr(att->attname));
+									first = false;
+								}
+
+								/*
+								 * Check if tracked attnums are valid in this
+								 * base table
+								 */
+								bool		tracked_in_base = false;
+
+								if (columns_tracked && mapped_attnums)
+								{
+									StringInfoData tracked_buf;
+
+									initStringInfo(&tracked_buf);
+									appendStringInfoString(&tracked_buf, "Tracked attnums in base table: ");
+
+									bool		all_in_base = true;
+									bool		first = true;
+									ListCell   *att_lc;
+
+									foreach(att_lc, mapped_attnums)
+									{
+										int			attnum = lfirst_int(att_lc);
+										bool		found_in_base = (attnum > 0 && attnum <= natts);
+
+										/*
+										 * Check if this is a valid
+										 * non-dropped column
+										 */
+										if (found_in_base)
+										{
+											Form_pg_attribute att = TupleDescAttr(tupdesc, attnum - 1);
+
+											if (att->attisdropped)
+												found_in_base = false;
+										}
+
+										if (!first)
+											appendStringInfoString(&tracked_buf, ", ");
+										appendStringInfo(&tracked_buf, "%d: %s", attnum, found_in_base ? "VALID" : "INVALID");
+										first = false;
+
+										if (!found_in_base)
+											all_in_base = false;
+									}
+
+									tracked_in_base = all_in_base;
+
+									if (tracked_in_base)
+										appendStringInfoString(&tracked_buf, " (ALL VALID)");
+									else
+										appendStringInfoString(&tracked_buf, " (SOME INVALID)");
+
+									elog(NOTICE, "%s  %s", indent, tracked_buf.data);
+									pfree(tracked_buf.data);
+								}
+
+								elog(NOTICE, "%s*** Found base table: %s with %s %s***", indent,
+									 get_rel_name(rte->relid) ? get_rel_name(rte->relid) : "unknown",
+									 columns_buf.data,
+									 tracked_in_base ? "- TRACKED ATTNUMS VALID HERE" : "");
+								pfree(columns_buf.data);
+							}
+							else
+							{
+								elog(NOTICE, "%s  Relation has unsupported relkind: %c", indent, rel->rd_rel->relkind);
+							}
+
+							/* Close the relation */
+							table_close(rel, AccessShareLock);
+						}
+						break;
+
+					case RTE_SUBQUERY:
+						{
+							Query	   *subquery = rte->subquery;
+							List	   *subq_mapped_attnums = NIL;
+
+							elog(NOTICE, "%s  RTE is a SUBQUERY", indent);
+
+							/* Log subquery output columns */
+							initStringInfo(&columns_buf);
+							appendStringInfoString(&columns_buf, "Subquery output columns: ");
+
+							ListCell   *lc;
+							bool		first = true;
+
+							foreach(lc, subquery->targetList)
+							{
+								TargetEntry *tle = (TargetEntry *) lfirst(lc);
+
+								/* Skip resjunk columns */
+								if (tle->resjunk)
+									continue;
+
+								if (!first)
+									appendStringInfoString(&columns_buf, ", ");
+								appendStringInfoString(&columns_buf, tle->resname ? tle->resname : "<unnamed>");
+								first = false;
+							}
+
+							elog(NOTICE, "%s  %s", indent, columns_buf.data);
+							pfree(columns_buf.data);
+
+							/*
+							 * Map tracked attnums to the subquery's
+							 * underlying query
+							 */
+							if (columns_tracked && mapped_attnums)
+							{
+								subq_mapped_attnums = NIL;
+								ListCell   *att_lc;
+
+								foreach(att_lc, mapped_attnums)
+								{
+									int			attnum = lfirst_int(att_lc);
+
+									/* Find target entry for this attnum */
+									int			targetno = 0;
+									int			valid_targetno = 0; /* Counting non-resjunk
+																	 * targets */
+									TargetEntry *matching_te = NULL;
+
+									foreach(lc, subquery->targetList)
+									{
+										TargetEntry *te = (TargetEntry *) lfirst(lc);
+
+										if (!te->resjunk)
+										{
+											valid_targetno++;
+											if (valid_targetno == attnum)
+											{
+												matching_te = te;
+												break;
+											}
+										}
+										targetno++;
+									}
+
+									if (matching_te)
+									{
+										/*
+										 * Found matching target entry - check
+										 * if it's a simple column reference
+										 */
+										if (IsA(matching_te->expr, Var))
+										{
+											Var		   *var = (Var *) matching_te->expr;
+
+											/*
+											 * Map to the attnum in the
+											 * referenced RTE
+											 */
+											subq_mapped_attnums = lappend_int(subq_mapped_attnums, var->varattno);
+											elog(NOTICE, "%s  Mapped attnum %d to underlying attnum %d",
+												 indent, attnum, var->varattno);
+										}
+										else
+										{
+											elog(WARNING, "%s  Attnum %d maps to an expression, not valid for foreign key tracking",
+												 indent, attnum);
+										}
+									}
+								}
+
+								if (list_length(subq_mapped_attnums) == list_length(mapped_attnums))
+									elog(NOTICE, "%s  Successfully mapped all attnums to subquery", indent);
+								else
+									elog(NOTICE, "%s  Failed to map some attnums (%d of %d mapped)",
+										 indent, list_length(subq_mapped_attnums), list_length(mapped_attnums));
+							}
+
+							/* Only traverse subquery if fromlist has length 1 */
+							if (subquery->jointree &&
+								subquery->jointree->fromlist &&
+								list_length(subquery->jointree->fromlist) == 1)
+							{
+								elog(NOTICE, "%s  SUBQUERY has single fromlist item, traversing deeper", indent);
+
+								/*
+								 * Pass the subquery as the context for the
+								 * next level of traversal
+								 */
+								traverse_node(pstate,
+											  (Node *) linitial(subquery->jointree->fromlist),
+											  r_nsitem, l_namespace, indentation_depth + 2,
+											  subquery, subq_mapped_attnums);
+							}
+							else
+							{
+								elog(NOTICE, "%s  SUBQUERY has multiple or no fromlist items, stopping here", indent);
+							}
+						}
+						break;
+
+					case RTE_CTE:
+						{
+							Index		levelsup;
+							CommonTableExpr *cte;
+							List	   *cte_mapped_attnums = NIL;
+
+							elog(NOTICE, "%s  RTE is a CTE (name: %s)", indent, rte->ctename);
+
+							/* Find the CTE */
+							cte = scanNameSpaceForCTE(pstate, rte->ctename, &levelsup);
+
+							if (cte && !cte->cterecursive && IsA(cte->ctequery, Query))
+							{
+								Query	   *cteQuery = (Query *) cte->ctequery;
+
+								/* Log CTE output columns */
+								initStringInfo(&columns_buf);
+								appendStringInfoString(&columns_buf, "CTE output columns: ");
+
+								ListCell   *lc;
+								bool		first = true;
+
+								foreach(lc, cteQuery->targetList)
+								{
+									TargetEntry *tle = (TargetEntry *) lfirst(lc);
+
+									/* Skip resjunk columns */
+									if (tle->resjunk)
+										continue;
+
+									if (!first)
+										appendStringInfoString(&columns_buf, ", ");
+									appendStringInfoString(&columns_buf, tle->resname ? tle->resname : "<unnamed>");
+									first = false;
+								}
+
+								elog(NOTICE, "%s  %s", indent, columns_buf.data);
+								pfree(columns_buf.data);
+
+								/*
+								 * Map tracked attnums to the CTE's underlying
+								 * query
+								 */
+								if (columns_tracked && mapped_attnums)
+								{
+									cte_mapped_attnums = NIL;
+									ListCell   *att_lc;
+
+									foreach(att_lc, mapped_attnums)
+									{
+										int			attnum = lfirst_int(att_lc);
+
+										/* Find target entry for this attnum */
+										int			targetno = 0;
+										int			valid_targetno = 0; /* Counting non-resjunk
+																		 * targets */
+										TargetEntry *matching_te = NULL;
+
+										foreach(lc, cteQuery->targetList)
+										{
+											TargetEntry *te = (TargetEntry *) lfirst(lc);
+
+											if (!te->resjunk)
+											{
+												valid_targetno++;
+												if (valid_targetno == attnum)
+												{
+													matching_te = te;
+													break;
+												}
+											}
+											targetno++;
+										}
+
+										if (matching_te)
+										{
+											/*
+											 * Found matching target entry -
+											 * check if it's a simple column
+											 * reference
+											 */
+											if (IsA(matching_te->expr, Var))
+											{
+												Var		   *var = (Var *) matching_te->expr;
+
+												/*
+												 * Map to the attnum in the
+												 * referenced RTE
+												 */
+												cte_mapped_attnums = lappend_int(cte_mapped_attnums, var->varattno);
+												elog(NOTICE, "%s  Mapped attnum %d to underlying attnum %d",
+													 indent, attnum, var->varattno);
+											}
+											else
+											{
+												elog(WARNING, "%s  Attnum %d maps to an expression, not valid for foreign key tracking",
+													 indent, attnum);
+											}
+										}
+									}
+
+									if (list_length(cte_mapped_attnums) == list_length(mapped_attnums))
+										elog(NOTICE, "%s  Successfully mapped all attnums to CTE query", indent);
+									else
+										elog(NOTICE, "%s  Failed to map some attnums (%d of %d mapped)",
+											 indent, list_length(cte_mapped_attnums), list_length(mapped_attnums));
+								}
+
+								/*
+								 * Only traverse CTE query if fromlist has
+								 * length 1
+								 */
+								if (cteQuery->jointree &&
+									cteQuery->jointree->fromlist &&
+									list_length(cteQuery->jointree->fromlist) == 1)
+								{
+									elog(NOTICE, "%s  CTE has single fromlist item, traversing deeper", indent);
+
+									/*
+									 * Pass the CTE query as the context for
+									 * the next level of traversal
+									 */
+									traverse_node(pstate,
+												  (Node *) linitial(cteQuery->jointree->fromlist),
+												  r_nsitem, l_namespace, indentation_depth + 2,
+												  cteQuery, cte_mapped_attnums);
+								}
+								else
+								{
+									elog(NOTICE, "%s  CTE has multiple or no fromlist items, stopping here", indent);
+								}
+							}
+							else if (cte && cte->cterecursive)
+							{
+								elog(NOTICE, "%s  CTE is recursive, stopping here", indent);
+							}
+						}
+						break;
+
+					default:
+						elog(NOTICE, "%s  RTE has unsupported rtekind: %d", indent, rte->rtekind);
+						break;
+				}
+			}
+			break;
+
+		default:
+			elog(NOTICE, "%s  Unsupported node type: %s", indent, getNodeTypeName(nodeTag(n)));
+			break;
+	}
+
+	/* Log exit from this node */
+	elog(NOTICE, "%s<= Returning from node type: %s", indent, getNodeTypeName(nodeTag(n)));
 }
-
