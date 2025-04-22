@@ -43,15 +43,11 @@ static Node *build_fk_join_on_clause(ParseState *pstate,
 static Oid	find_foreign_key(Oid referencing_relid, Oid referenced_relid,
 							 List *referencing_attnums, List *referenced_attnums);
 static char *column_list_to_string(const List *columns);
-static RangeTblEntry *drill_down_to_base_rel(ParseState *pstate, RangeTblEntry *rte, int rtindex,
+static RangeTblEntry *drill_down_to_base_rel(ParseState *pstate, RangeTblEntry *rte,
 											 List *attnos, List **base_attnums,
-											 int *base_rte_id,
-											 List **uniqueness_preservation, List **functional_dependencies,
 											 int location);
 static RangeTblEntry *drill_down_to_base_rel_query(ParseState *pstate, Query *query,
 												   List *attnos, List **base_attnums,
-												   int *base_rte_id,
-												   List **uniqueness_preservation, List **functional_dependencies,
 												   int location);
 static bool is_referencing_cols_unique(Oid referencing_relid, List *referencing_base_attnums);
 static bool is_referencing_cols_not_null(Oid referencing_relid, List *referencing_base_attnums);
@@ -65,210 +61,470 @@ static List *update_functional_dependencies(List *referencing_fds,
 											bool fk_cols_not_null,
 											JoinType join_type,
 											ForeignKeyDirection fk_dir);
-void		traverse_node(ParseState *pstate, Node *n, ParseNamespaceItem *r_nsitem,
-						  List *l_namespace, Query *query,
-						  List *track_cols,
-						  int *tacked_base_rte_id,
-						  int *next_base_rte_id);
-static void
-			map_tracked_columns_in_join(List *track_cols, RangeTblEntry *join_rte,
-										List **larg_cols, List **rarg_cols,
-										Query *query, ParseState *pstate);
 
-/*
- * map_tracked_columns_to_target_list
- *     Maps tracked columns through a Query's target list to find the
- *     corresponding source columns.
- *
- * Used for mapping column references through views, subqueries, and CTEs.
- *
- * Returns a list of the mapped column names if successful, or NIL if no
- * columns could be mapped.
- */
 static List *
-map_tracked_columns_to_target_list(List *track_cols, Query *query)
+map_tracked_attnums_to_source_attnums(List *track_attnums, Query *inner_query, Index *source_varno)
 {
-	List	   *mapped_cols = NIL;
-	ListCell   *col_lc;
-	ListCell   *tl_lc;
-	char	   *col_name;
-	TargetEntry *te;
-	Var		   *var;
-	RangeTblEntry *ref_rte;
-	char	   *orig_name;
+	List	   *mapped_attnums = NIL;
+	ListCell   *attnum_lc;
+	int			current_varno = 0;	/* 0 indicates unset */
 
-	if (!track_cols || !query)
+	*source_varno = 0;
+
+	if (!track_attnums || !inner_query)
 		return NIL;
 
-	/* For each tracked column, try to find its source column */
-	foreach(col_lc, track_cols)
+	foreach(attnum_lc, track_attnums)
 	{
-		bool		found = false;
+		int			attno = lfirst_int(attnum_lc);
+		TargetEntry *te;
+		Var		   *var;
 
-		col_name = strVal(lfirst(col_lc));
-
-		/* Find this column in the query's target list */
-		foreach(tl_lc, query->targetList)
-		{
-			te = (TargetEntry *) lfirst(tl_lc);
-			if (!te->resjunk && strcmp(te->resname, col_name) == 0)
-			{
-				found = true;
-
-				/*
-				 * Found matching target entry - check if it's a simple column
-				 * reference
-				 */
-				if (IsA(te->expr, Var))
-				{
-					var = (Var *) te->expr;
-					/* Get the original column name from the referenced RTE */
-					ref_rte = rt_fetch(var->varno, query->rtable);
-					if (ref_rte->eref && ref_rte->eref->colnames &&
-						var->varattno > 0 && var->varattno <= list_length(ref_rte->eref->colnames))
-					{
-						orig_name = strVal(list_nth(ref_rte->eref->colnames, var->varattno - 1));
-						mapped_cols = lappend(mapped_cols, makeString(pstrdup(orig_name)));
-					}
-				}
-				/* If not a simple column reference, we can't trace it further */
-				break;
-			}
-		}
-
-		/* Raise an error if column not found */
-		if (!found)
-		{
+		if (attno <= 0 || attno > list_length(inner_query->targetList))
 			ereport(ERROR,
 					(errcode(ERRCODE_INVALID_COLUMN_REFERENCE),
-					 errmsg("could not map column \"%s\" through query target list", col_name)));
+					 errmsg("invalid attribute number %d in query target list", attno)));
+
+		te = list_nth(inner_query->targetList, attno - 1);
+
+		/* We can only map through simple Var references */
+		if (!IsA(te->expr, Var))
+		{
+			/*
+			 * Can't map through this expression. Depending on requirements,
+			 * we might error out or just return NIL for this column or the
+			 * whole list. Let's error for now, as FK joins require base
+			 * columns.
+			 */
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("cannot map through expression in target list entry for attribute %d", attno),
+					 errdetail("Target entry expression: %s", nodeToString(te->expr))));
+			return NIL;			/* Not reachable, but keeps compiler happy */
 		}
+
+		var = (Var *) te->expr;
+
+		/* Check if all tracked columns map to the same source relation */
+		if (current_varno == 0)
+		{
+			current_varno = var->varno;
+			*source_varno = var->varno;
+		}
+		else if (current_varno != var->varno)
+		{
+			ereport(ERROR,
+					(errcode(ERRCODE_UNDEFINED_TABLE),
+					 errmsg("tracked columns must all come from the same source relation"),
+			/* TODO: Add location info if possible */
+					 errdetail("Found columns mapping to varno %d and varno %d.", current_varno, var->varno)));
+		}
+
+		mapped_attnums = lappend_int(mapped_attnums, var->varattno);
 	}
 
-	return mapped_cols;
+	return mapped_attnums;
 }
 
 /*
- * map_tracked_columns_in_join
- *     Maps tracked columns in a join, determining which side the columns
- *     come from and constructing appropriate column lists for each side.
+ * map_tracked_attnums_in_join
+ *     Maps tracked attribute numbers in a join's output to the corresponding
+ *     attribute numbers on either the left or right input side.
  *
  * Returns true if columns were successfully mapped to one side of the join.
- * The output parameters larg_cols and rarg_cols will contain the mapped
- * column lists for the appropriate side.
+ * The output parameters larg_attnums and rarg_attnums will contain the mapped
+ * attribute number lists for the appropriate side.
+ * Raises an error if tracked attnums map to both sides or cannot be mapped.
  */
 static void
-map_tracked_columns_in_join(List *track_cols, RangeTblEntry *join_rte,
-							List **larg_cols, List **rarg_cols,
-							Query *query, ParseState *pstate)
+map_tracked_attnums_in_join(List *track_attnums, RangeTblEntry *join_rte,
+							List **larg_attnums, List **rarg_attnums,
+							ParseState *pstate, int location /* For error reporting */ )
 {
-	int			num_columns;
 	int			num_left_columns;
-	List	   *output_columns;
-	ListCell   *oc_lc;
-	ListCell   *tc_lc;
-	int			col_index;
-	bool		is_left_side;
-	List	   *mapped_cols = NIL;
+	List	   *mapped_attnums = NIL;
 	bool		all_same_side = true;
 	int			mapped_side = -1;	/* -1 = unknown, 0 = left, 1 = right */
-	List	   *found_cols = NIL;
-	int			location = -1;
+	ListCell   *lc;
+	Index		source_varno = 0;	/* Track the common source varno */
 
 	/* Initialize output parameters */
-	*larg_cols = NIL;
-	*rarg_cols = NIL;
+	*larg_attnums = NIL;
+	*rarg_attnums = NIL;
 
-	Assert(track_cols != NIL);
+	Assert(track_attnums != NIL);
 	Assert(join_rte != NULL);
 	Assert(join_rte->rtekind == RTE_JOIN);
 	Assert(join_rte->joinaliasvars != NIL);
+
+	/*
+	 * joinleftcols/joinrightcols might be NIL for lateral joins, but FK joins
+	 * shouldn't be lateral? Assert anyway.
+	 */
 	Assert(join_rte->joinleftcols != NIL);
 	Assert(join_rte->joinrightcols != NIL);
 
-	output_columns = join_rte->eref->colnames;
-	num_columns = list_length(output_columns);
 	num_left_columns = list_length(join_rte->joinleftcols);
 
-	/* Iterate over each output column */
-	col_index = 0;
-	foreach(oc_lc, output_columns)
+	foreach(lc, track_attnums)
 	{
-		char	   *output_colname = strVal(lfirst(oc_lc));
-		Node	   *alias_var = list_nth(join_rte->joinaliasvars, col_index);
+		int			attno = lfirst_int(lc);
+		Node	   *alias_var;
+		bool		is_left_side;
+		Var		   *var;
 
-		is_left_side = (col_index < num_left_columns);
+		if (attno <= 0 || attno > list_length(join_rte->joinaliasvars))
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_COLUMN_REFERENCE),
+					 errmsg("invalid attribute number %d in join alias vars", attno),
+					 parser_errposition(pstate, location)));
 
-		/* Check if this output column matches any tracked column */
-		foreach(tc_lc, track_cols)
+		alias_var = list_nth(join_rte->joinaliasvars, attno - 1);
+
+		/* Determine which side this attribute comes from */
+
+		/*
+		 * This logic assumes joinaliasvars perfectly aligns with left then
+		 * right vars
+		 */
+		/* Let's verify this assumption. Yes, transformJoinExpr ensures this. */
+		is_left_side = (attno <= num_left_columns);
+
+		if (!IsA(alias_var, Var))
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("cannot map through expression in join alias variable for attribute %d", attno),
+					 errdetail("Alias variable expression: %s", nodeToString(alias_var)),
+					 parser_errposition(pstate, location)));
+
+		var = (Var *) alias_var;
+
+		/* Track if we've seen columns from both sides */
+		if (mapped_side == -1)
 		{
-			char	   *track_colname = strVal(lfirst(tc_lc));
-
-			if (strcmp(output_colname, track_colname) == 0)
-			{
-				/* Track that we've found this column */
-				found_cols = lappend(found_cols, makeString(pstrdup(track_colname)));
-
-				if (IsA(alias_var, Var))
-				{
-					Var		   *var = (Var *) alias_var;
-					RangeTblEntry *source_rte;
-					char	   *mapped_colname;
-
-					/* Get source RTE to find the original column name */
-					if (query)
-						source_rte = rt_fetch(var->varno, query->rtable);
-					else
-						source_rte = rt_fetch(var->varno, pstate->p_rtable);
-
-					if (source_rte->eref && source_rte->eref->colnames &&
-						var->varattno > 0 && var->varattno <= list_length(source_rte->eref->colnames))
-					{
-						mapped_colname = strVal(list_nth(source_rte->eref->colnames, var->varattno - 1));
-
-						/* Track if we've seen columns from both sides */
-						if (mapped_side == -1)
-							mapped_side = is_left_side ? 0 : 1;
-						else if (mapped_side != (is_left_side ? 0 : 1))
-							all_same_side = false;
-
-						/* Use var's location for error reporting if needed */
-						if (location < 0)
-							location = var->location;
-
-						/* Add to the mapped columns list */
-						mapped_cols = lappend(mapped_cols, makeString(pstrdup(mapped_colname)));
-					}
-				}
-
-				break;			/* Found this tracked column, move to next
-								 * output column */
-			}
+			mapped_side = is_left_side ? 0 : 1;
+			source_varno = var->varno;	/* Record varno of the first mapped
+										 * column */
 		}
+		else if (mapped_side != (is_left_side ? 0 : 1))
+			all_same_side = false;
+		/* Also ensure they map to the *same* input relation (varno) */
+		else if (source_varno != var->varno)
+			all_same_side = false;	/* Treat mapping to different relations on
+									 * the same side as an error */
 
-		col_index++;
+
+		/* Add the source attribute number to the list */
+		mapped_attnums = lappend_int(mapped_attnums, var->varattno);
+
+		/* If we found inconsistency, break early */
+		if (!all_same_side)
+			break;
 	}
 
-	/* Check if we found all tracked columns */
-	if (list_length(found_cols) != list_length(track_cols))
-		ereport(ERROR,
-				(errcode(ERRCODE_UNDEFINED_COLUMN),
-				 errmsg("not all tracked columns could be found in join output"),
-				 location >= 0 ? parser_errposition(pstate, location) : 0));
-
-	/* Check if all columns come from the same side */
+	/* Check if all columns come from the same side and same source varno */
 	if (!all_same_side)
 		ereport(ERROR,
 				(errcode(ERRCODE_UNDEFINED_TABLE),
-				 errmsg("tracked columns must all come from the same side of the join"),
-				 location >= 0 ? parser_errposition(pstate, location) : 0));
+				 errmsg("tracked columns must all come from the same side of the join and map to the same source relation"),
+				 parser_errposition(pstate, location)));
 
 	/* Assign columns to the appropriate side */
 	if (mapped_side == 0)		/* All columns came from left side */
-		*larg_cols = mapped_cols;
+		*larg_attnums = mapped_attnums;
 	else						/* All columns came from right side */
-		*rarg_cols = mapped_cols;
+		*rarg_attnums = mapped_attnums;
 }
+
+/*
+ * traverse_node
+ *     Recursively traverses a node tree, handling JoinExpr nodes specially.
+ *     For subquery/CTE/view nodes, it attempts to map tracked attribute numbers
+ *     and only traverses deeper if the source is a single node in the fromlist.
+ *     Assigns sequential IDs to base relations encountered along the tracked path.
+ *
+ * pstate: The parser state
+ * n: The node to traverse
+ * r_nsitem: Current right-side namespace item (unused in this function?)
+ * l_namespace: List of available namespace items (unused in this function?)
+ * query: If non-NULL, use this query's range table for looking up RTEs; otherwise use pstate
+ * track_attnums: List of attribute numbers (relative to 'n' or 'query') being tracked down to a base relation.
+ * base_attnums: Output parameter, stores the final list of attribute numbers corresponding to the base relation.
+ * found_base_rte_id: Output parameter, stores the sequential ID assigned to the base relation found.
+ * found_base_relid: Output parameter, stores the OID of the base relation found.
+ * next_base_rteid: In/out parameter, used to assign the next available sequential ID.
+ */
+static void
+traverse_node(ParseState *pstate, Node *n, ParseNamespaceItem *r_nsitem,
+			  List *l_namespace, Query *query,
+			  List *track_attnums,	/* <<< Renamed parameter */
+			  List **base_attnums,	/* <<< New output parameter */
+			  int *found_base_rte_id,	/* Renamed for clarity */
+			  Oid *found_base_relid,	/* Renamed for clarity */
+			  int *next_base_rteid)
+{
+	RangeTblEntry *rte;
+	List	   *mapped_attnums = NIL;	/* <<< Renamed variable */
+	Query	   *inner_query = NULL;
+	char	   *object_name = NULL;
+	int			location = -1;	/* For error reporting */
+
+	switch (nodeTag(n))
+	{
+		case T_JoinExpr:
+			{
+				JoinExpr   *join = (JoinExpr *) n;
+				List	   *larg_attnums = NIL; /* <<< Renamed variable */
+				List	   *rarg_attnums = NIL; /* <<< Renamed variable */
+				RangeTblEntry *join_rte;
+
+
+				if (join->rtindex == 0)
+				{
+					ereport(ERROR,
+							(errcode(ERRCODE_INTERNAL_ERROR),
+							 errmsg("join node must have a valid rtindex")));
+				}
+
+				/* Get output columns if the join has an rtindex */
+				if (track_attnums != NIL)	/* <<< Changed check */
+				{
+					if (query)
+						join_rte = rt_fetch(join->rtindex, query->rtable);
+					else
+						join_rte = rt_fetch(join->rtindex, pstate->p_rtable);
+
+					Assert(join_rte->eref);
+					Assert(join_rte->eref->colnames);
+					Assert(join_rte->rtekind == RTE_JOIN);
+					Assert(join_rte->joinaliasvars);
+					/* Assuming FK join implies non-lateral join */
+					Assert(join_rte->joinleftcols != NIL);
+					Assert(join_rte->joinrightcols != NIL);
+
+
+					/* Map the tracked attnums through the join */
+					map_tracked_attnums_in_join(track_attnums, join_rte,	/* <<< Changed call */
+												&larg_attnums, &rarg_attnums,	/* <<< Changed args */
+												pstate, location);	/* <<< Pass pstate &
+																	 * location */
+				}
+
+				/* Pass mapped attnums down */
+				traverse_node(pstate, join->larg, r_nsitem, l_namespace, query,
+							  larg_attnums, base_attnums,
+							  found_base_rte_id, found_base_relid, next_base_rteid);
+				traverse_node(pstate, join->rarg, r_nsitem, l_namespace, query,
+							  rarg_attnums, base_attnums,
+							  found_base_rte_id, found_base_relid, next_base_rteid);
+			}
+			break;
+
+		case T_RangeTblRef:
+			{
+				RangeTblRef *rtr = (RangeTblRef *) n;
+				int			rtindex = rtr->rtindex;
+
+				/* Use the appropriate range table for lookups */
+				if (query)
+					rte = rt_fetch(rtindex, query->rtable);
+				else
+					rte = rt_fetch(rtindex, pstate->p_rtable);
+
+				Assert(rte->eref);
+				Assert(rte->eref->colnames);
+
+				/* Process the referenced RTE */
+				switch (rte->rtekind)
+				{
+					case RTE_RELATION:
+						{
+							Relation	rel;
+
+							/* Open the relation to check its type */
+							rel = table_open(rte->relid, AccessShareLock);
+
+							if (rel->rd_rel->relkind == RELKIND_VIEW)
+							{
+								inner_query = get_view_query(rel);
+								object_name = get_rel_name(rte->relid) ? get_rel_name(rte->relid) : "<unnamed>";
+								elog(NOTICE, "Processing view %s", object_name);
+							}
+							else if (rel->rd_rel->relkind == RELKIND_RELATION ||
+									 rel->rd_rel->relkind == RELKIND_PARTITIONED_TABLE)
+							{
+								(*next_base_rteid)++;
+								if (track_attnums)	/* <<< Changed check */
+								{
+									/*
+									 * Check if tracked attnums actually match
+									 * this relation
+									 */
+									if (list_length(track_attnums) > 0)
+									{
+										*found_base_rte_id = *next_base_rteid;
+										*found_base_relid = rte->relid;
+										elog(NOTICE, "*** Found base table: %s TRACKED ID=%d***", get_rel_name(rte->relid), *next_base_rteid);
+
+										/*
+										 * The tracked attnums at this point
+										 * correspond to the base relation's
+										 * columns. Assign them to the output
+										 * parameter.
+										 */
+										*base_attnums = track_attnums;
+									}
+									else
+									{
+										/*
+										 * Should not happen if mapping logic
+										 * is correct
+										 */
+										elog(WARNING, "*** Base table %s reached with empty track_attnums ***", get_rel_name(rte->relid));
+									}
+								}
+								else
+								{
+									elog(NOTICE, "*** Found base table: %s", get_rel_name(rte->relid));
+								}
+							}
+							else
+							{
+								/* Handle unsupported relation kinds */
+								ereport(ERROR,
+										(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+										 errmsg("foreign key joins involving this type of relation are not supported"),
+										 errdetail_relkind_not_supported(rel->rd_rel->relkind),
+										 parser_errposition(pstate, location)));	/* Use location if
+																					 * available */
+							}
+
+							/* Close the relation */
+							table_close(rel, AccessShareLock);
+						}
+						break;
+
+					case RTE_SUBQUERY:
+						inner_query = rte->subquery;
+						object_name = "subquery";
+						elog(NOTICE, "Processing subquery");
+						break;
+
+					case RTE_CTE:
+						{
+							Index		levelsup;
+							CommonTableExpr *cte;
+
+							object_name = rte->ctename;
+							elog(NOTICE, "Processing CTE %s", object_name);
+
+							/* Find the CTE */
+							cte = scanNameSpaceForCTE(pstate, rte->ctename, &levelsup);
+
+							if (cte && !cte->cterecursive && IsA(cte->ctequery, Query))
+							{
+								inner_query = (Query *) cte->ctequery;
+							}
+							else
+							{
+								/*
+								 * Handle recursive or non-Query CTEs if
+								 * necessary
+								 */
+								ereport(ERROR,
+										(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+										 errmsg("foreign key joins involving recursive or non-query CTEs are not supported"),
+										 parser_errposition(pstate, location)));
+							}
+						}
+						break;
+
+					default:
+						elog(NOTICE, "Unsupported RTE kind: %d", rte->rtekind);
+
+						/*
+						 * Error maybe? FK joins likely don't support
+						 * functions, values, etc.
+						 */
+						ereport(ERROR,
+								(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+								 errmsg("foreign key joins involving RTE kind %d are not supported", rte->rtekind),
+								 parser_errposition(pstate, location)));
+						break;
+				}
+
+				/* Common path for processing any inner query */
+				if (inner_query != NULL)
+				{
+					Index		source_varno = 0;	/* To store the varno from
+													 * mapping */
+
+					/* Map tracked attnums to the inner query target list */
+					if (track_attnums != NIL)	/* <<< Changed check */
+					{
+						elog(NOTICE, "Mapping tracked attnums through %s",	/* Changed log */
+							 object_name ? object_name : "query");
+						/* <<< Changed call and variable */
+						mapped_attnums = map_tracked_attnums_to_source_attnums(track_attnums, inner_query, &source_varno);
+
+						/* Check if mapping was successful */
+						if (mapped_attnums == NIL && list_length(track_attnums) > 0)
+						{
+							/*
+							 * Error already raised inside
+							 * map_tracked_attnums_to_source_attnums
+							 */
+							/* Should not get here */
+							elog(ERROR, "Failed to map attnums through %s", object_name ? object_name : "query");
+						}
+						if (source_varno == 0 && list_length(track_attnums) > 0)
+						{
+							/*
+							 * Should not happen if
+							 * map_tracked_attnums_to_source_attnums works
+							 */
+							elog(ERROR, "Mapped attnums but did not get source varno from %s", object_name ? object_name : "query");
+						}
+					}
+
+					/*
+					 * If mapping was successful, continue traversal from the
+					 * specific source relation within the inner query,
+					 * identified by source_varno. We construct a synthetic
+					 * RangeTblRef to pass down.
+					 */
+					if (mapped_attnums != NIL && source_varno > 0)
+					{
+						RangeTblRef *source_rtr = makeNode(RangeTblRef);
+
+						source_rtr->rtindex = source_varno;
+
+						elog(NOTICE, "Traversing into %s source (RTE %d)",
+							 object_name ? object_name : "query", source_varno);
+
+						traverse_node(pstate,
+									  (Node *) source_rtr,	/* Recurse on the
+															 * specific source */
+									  r_nsitem, l_namespace, inner_query,
+									  mapped_attnums, base_attnums,
+									  found_base_rte_id, found_base_relid, next_base_rteid);
+					}
+					else if (track_attnums != NIL)
+					{
+						/* Mapping failed or produced no result */
+						elog(NOTICE, "Stopping traversal at %s: could not map attributes or find source varno",
+							 object_name ? object_name : "query");
+					}
+				}
+			}
+			break;
+
+		default:
+			elog(NOTICE, "Unsupported node type for traversal: %d", (int) nodeTag(n));
+			break;
+	}
+}
+
 
 void
 transformAndValidateForeignKeyJoin(ParseState *pstate, JoinExpr *join,
@@ -300,10 +556,12 @@ transformAndValidateForeignKeyJoin(ParseState *pstate, JoinExpr *join,
 	Oid			referenced_relid;
 	int			referencing_id = 0;
 	int			referenced_id = 0;
-	int			next_base_rte_id = 0;
+	int			next_base_rte_id = 0;	/* Renamed to avoid shadowing */
 	bool		found_fd = false;
 	bool		fk_cols_unique;
 	bool		fk_cols_not_null;
+	Node	   *referencing_arg;
+	Node	   *referenced_arg;
 
 	elog(NOTICE, "XXXXXXX transformAndValidateForeignKeyJoin");
 
@@ -336,6 +594,8 @@ transformAndValidateForeignKeyJoin(ParseState *pstate, JoinExpr *join,
 
 	if (fkjn->fkdir == FKDIR_FROM)
 	{
+		referencing_arg = join->larg;
+		referenced_arg = join->rarg;
 		referencing_rel = other_rel;
 		referenced_rel = r_nsitem;
 		referencing_cols = fkjn->refCols;
@@ -343,22 +603,13 @@ transformAndValidateForeignKeyJoin(ParseState *pstate, JoinExpr *join,
 	}
 	else
 	{
+		referenced_arg = join->larg;
+		referencing_arg = join->rarg;
 		referenced_rel = other_rel;
 		referencing_rel = r_nsitem;
 		referenced_cols = fkjn->refCols;
 		referencing_cols = fkjn->localCols;
 	}
-
-	/*
-	 * Log information about the referenced and referencing columns for
-	 * debugging
-	 */
-	elog(NOTICE, "referencing_cols: %s",
-		 referencing_cols ?
-		 nodeToString(referencing_cols) : "NIL");
-	elog(NOTICE, "referenced_cols: %s",
-		 referenced_cols ?
-		 nodeToString(referenced_cols) : "NIL");
 
 	referencing_rte = rt_fetch(referencing_rel->p_rtindex, pstate->p_rtable);
 	referenced_rte = rt_fetch(referenced_rel->p_rtindex, pstate->p_rtable);
@@ -429,48 +680,88 @@ transformAndValidateForeignKeyJoin(ParseState *pstate, JoinExpr *join,
 		referenced_attnums = lappend_int(referenced_attnums, col_index + 1);
 	}
 
-	elog(NOTICE, "=> traverse_node larg");
-	traverse_node(pstate, join->larg, r_nsitem, l_namespace, NULL, fkjn->refCols, &referencing_id, &next_base_rte_id);
-	elog(NOTICE, "<= traverse_node larg referencing_id %d next_base_rte_id %d", referencing_id, next_base_rte_id);
-	elog(NOTICE, "=> traverse_node rarg");
-	traverse_node(pstate, join->rarg, r_nsitem, l_namespace, NULL, fkjn->localCols, &referenced_id, &next_base_rte_id);
-	elog(NOTICE, "<= traverse_node rarg referenced_id %d next_base_rte_id %d", referenced_id, next_base_rte_id);
+	/*
+	 * Call traverse_node primarily to assign sequential IDs (referencing_id,
+	 * referenced_id) to the base relations found along the path of the
+	 * tracked attribute numbers. This is used later for functional dependency
+	 * tracking. It also finds the base relation OIDs, though
+	 * drill_down_to_base_rel is used as the definitive source for these
+	 * later.
+	 */
+	next_base_rte_id = 0;		/* Reset counter for this join */
+	referencing_base_attnums = NIL;
+	referenced_base_attnums = NIL;
+	referencing_id = 0;
+	referencing_relid = InvalidOid;
+	referenced_id = 0;
+	referenced_relid = InvalidOid;
 
-	base_referencing_rte = drill_down_to_base_rel(pstate, referencing_rte, referencing_rel->p_rtindex,
-												  referencing_attnums,
-												  &referencing_base_attnums,
-												  &referencing_id,
-												  &referencing_uniqueness_preservation,
-												  &referencing_functional_dependencies,
-												  fkjn->location);
-	base_referenced_rte = drill_down_to_base_rel(pstate, referenced_rte, referenced_rel->p_rtindex,
-												 referenced_attnums,
-												 &referenced_base_attnums,
-												 &referenced_id,
-												 &referenced_uniqueness_preservation,
-												 &referenced_functional_dependencies,
-												 fkjn->location);
+	/* Traverse the referencing side */
+	traverse_node(pstate, referencing_arg, r_nsitem, l_namespace, NULL,
+				  referencing_attnums,	/* <<< Pass attnums */
+				  &referencing_base_attnums,	/* <<< Pass base attnums ptr */
+				  &referencing_id, &referencing_relid, &next_base_rte_id);
 
-	/* Log information about the foreign key join for debugging */
-	elog(NOTICE, "referencing_id: %d", referencing_id);
-	elog(NOTICE, "referencing_uniqueness_preservation: %s",
-		 referencing_uniqueness_preservation ?
-		 nodeToString(referencing_uniqueness_preservation) : "NIL");
-	elog(NOTICE, "referencing_functional_dependencies: %s",
-		 referencing_functional_dependencies ?
-		 nodeToString(referencing_functional_dependencies) : "NIL");
-	elog(NOTICE, "referenced_id: %d", referenced_id);
-	elog(NOTICE, "referenced_uniqueness_preservation: %s",
-		 referenced_uniqueness_preservation ?
-		 nodeToString(referenced_uniqueness_preservation) : "NIL");
-	elog(NOTICE, "referenced_functional_dependencies: %s",
-		 referenced_functional_dependencies ?
-		 nodeToString(referenced_functional_dependencies) : "NIL");
+	/* Traverse the referenced side */
+	traverse_node(pstate, referenced_arg, r_nsitem, l_namespace, NULL,
+				  referenced_attnums,	/* <<< Pass attnums */
+				  &referenced_base_attnums, /* <<< Pass base attnums ptr */
+				  &referenced_id, &referenced_relid, &next_base_rte_id);
 
-	referencing_relid = base_referencing_rte->relid;
-	referenced_relid = base_referenced_rte->relid;
+	/*
+	 * elog(NOTICE, "referencing_base_attnums: %s (traverse_node)",
+	 * nodeToString(referencing_base_attnums));
+	 */
+
+	/*
+	 * elog(NOTICE, "referenced_base_attnums: %s (traverse_node)",
+	 * nodeToString(referenced_base_attnums));
+	 */
+
+	Assert(referencing_base_attnums != NIL);	/* Verify traverse_node found
+												 * them */
+	Assert(referenced_base_attnums != NIL); /* Verify traverse_node found them */
+	/* referencing_base_attnums = NIL; *//* Keep the results from
+	 * traverse_node */
+	/* referenced_base_attnums = NIL; */	/* Keep the results from traverse_node */
+
+	/*
+	 * traverse_node should now correctly find the base relations and
+	 * attribute numbers, making drill_down_to_base_rel redundant for this
+	 * purpose.
+	 */
+	/* base_referencing_rte = drill_down_to_base_rel(pstate, referencing_rte, */
+	/* referencing_attnums, */
+	/* &referencing_base_attnums, */
+	/* fkjn->location); */
+	/* base_referenced_rte = drill_down_to_base_rel(pstate, referenced_rte, */
+	/* referenced_attnums, */
+	/* &referenced_base_attnums, */
+	/* fkjn->location); */
+
+	/*
+	 * elog(NOTICE, "referencing_base_attnums: %s (drill_down_to_base_rel)",
+	 * nodeToString(referencing_base_attnums));
+	 */
+
+	/*
+	 * elog(NOTICE, "referenced_base_attnums: %s (drill_down_to_base_rel)",
+	 * nodeToString(referenced_base_attnums));
+	 */
+
+	/* referencing_relid and referenced_relid are now set by traverse_node */
 
 	Assert(referencing_relid != InvalidOid && referenced_relid != InvalidOid);
+	Assert(referencing_id != 0);	/* Should have been assigned by
+									 * traverse_node */
+	Assert(referenced_id != 0); /* Should have been assigned by traverse_node */
+
+	/*
+	 * Ensure distinct IDs were assigned if they came from different
+	 * traversals
+	 */
+	Assert(referencing_id != referenced_id);
+
 
 	fkoid = find_foreign_key(referencing_relid, referenced_relid,
 							 referencing_base_attnums, referenced_base_attnums);
@@ -489,54 +780,6 @@ transformAndValidateForeignKeyJoin(ParseState *pstate, JoinExpr *join,
 						column_list_to_string(referenced_cols)),
 				 parser_errposition(pstate, fkjn->location)));
 
-	/* Check uniqueness preservation */
-	/* FIXME */
-	if (false && !list_member_int(referenced_uniqueness_preservation, referenced_id))
-	{
-		ereport(ERROR,
-				(errcode(ERRCODE_INVALID_FOREIGN_KEY),
-				 errmsg("foreign key join violation"),
-				 errdetail("referenced relation does not preserve uniqueness of keys"),
-				 parser_errposition(pstate, fkjn->location)));
-	}
-
-	/*
-	 * Check functional dependencies - looking for (referenced_id,
-	 * referenced_id) pairs
-	 */
-	for (int i = 0; i < list_length(referenced_functional_dependencies); i += 2)
-	{
-		int			fd_dep = list_nth_int(referenced_functional_dependencies, i);
-		int			fd_dcy = list_nth_int(referenced_functional_dependencies, i + 1);
-
-		if (fd_dep == referenced_id && fd_dcy == referenced_id)
-		{
-			found_fd = true;
-			break;
-		}
-	}
-
-	found_fd = true;
-	/* FIXME */
-	if (!found_fd)
-	{
-		/*
-		 * This check ensures that the referenced relation is not filtered
-		 * (e.g., by WHERE, LIMIT, OFFSET, HAVING, RLS). Foreign key joins
-		 * require the referenced side to represent the complete set of rows
-		 * from the underlying table(s). The presence of a functional
-		 * dependency (referenced_id, referenced_id) indicates this row
-		 * preservation property.
-		 */
-		ereport(ERROR,
-				(errcode(ERRCODE_INVALID_FOREIGN_KEY),
-				 errmsg("foreign key join violation"),
-				 errdetail("referenced relation does not preserve all rows"),
-				 parser_errposition(pstate, fkjn->location)));
-	}
-
-	fk_cols_unique = is_referencing_cols_unique(referencing_relid, referencing_base_attnums);
-	fk_cols_not_null = is_referencing_cols_not_null(referencing_relid, referencing_base_attnums);
 
 	join->quals = build_fk_join_on_clause(pstate, referencing_rel->p_nscolumns, referencing_attnums, referenced_rel->p_nscolumns, referenced_attnums);
 
@@ -723,10 +966,8 @@ column_list_to_string(const List *columns)
  *		Resolves the base relation from a potentially derived relation
  */
 static RangeTblEntry *
-drill_down_to_base_rel(ParseState *pstate, RangeTblEntry *rte, int rtindex,
+drill_down_to_base_rel(ParseState *pstate, RangeTblEntry *rte,
 					   List *attnums, List **base_attnums,
-					   int *base_rte_id,
-					   List **uniqueness_preservation, List **functional_dependencies,
 					   int location)
 {
 	RangeTblEntry *base_rte = NULL;
@@ -744,9 +985,6 @@ drill_down_to_base_rel(ParseState *pstate, RangeTblEntry *rte, int rtindex,
 																get_view_query(rel),
 																attnums,
 																base_attnums,
-																base_rte_id,
-																uniqueness_preservation,
-																functional_dependencies,
 																location);
 						break;
 
@@ -754,10 +992,6 @@ drill_down_to_base_rel(ParseState *pstate, RangeTblEntry *rte, int rtindex,
 					case RELKIND_PARTITIONED_TABLE:
 						base_rte = rte;
 						*base_attnums = attnums;
-						*base_rte_id = next_baserelindex++;
-						*uniqueness_preservation = list_make1_int(*base_rte_id);
-						if (!rel->rd_rel->relrowsecurity)
-							*functional_dependencies = list_make2_int(*base_rte_id, *base_rte_id);
 						break;
 
 					default:
@@ -775,9 +1009,6 @@ drill_down_to_base_rel(ParseState *pstate, RangeTblEntry *rte, int rtindex,
 		case RTE_SUBQUERY:
 			base_rte = drill_down_to_base_rel_query(pstate, rte->subquery,
 													attnums, base_attnums,
-													base_rte_id,
-													uniqueness_preservation,
-													functional_dependencies,
 													location);
 			break;
 
@@ -798,9 +1029,6 @@ drill_down_to_base_rel(ParseState *pstate, RangeTblEntry *rte, int rtindex,
 														castNode(Query, cte->ctequery),
 														attnums,
 														base_attnums,
-														base_rte_id,
-														uniqueness_preservation,
-														functional_dependencies,
 														location);
 			}
 			break;
@@ -838,54 +1066,10 @@ drill_down_to_base_rel(ParseState *pstate, RangeTblEntry *rte, int rtindex,
 					next_attnums = lappend_int(next_attnums, var->varattno);
 				}
 
-				/* Find the JoinExpr in p_joinexprs */
-				if (pstate->p_joinexprs)
-				{
-					JoinExpr   *join_expr = NULL;
-
-					join_expr = (JoinExpr *) list_nth(pstate->p_joinexprs, rtindex - 1);
-					if (join_expr->fkJoin)
-					{
-						ForeignKeyJoinNode *fkjn_node = (ForeignKeyJoinNode *) join_expr->fkJoin;
-
-						/* Log the types of larg and rarg for debugging */
-						if (join_expr->larg)
-						{
-						}
-
-						if (join_expr->rarg)
-						{
-						}
-
-
-					}
-				}
-
-				Assert(next_rtindex != 0);
-/*
-	fkjn_node->uniqueness_preservation = update_uniqueness_preservation(
-																		referencing_uniqueness_preservation,
-																		referenced_uniqueness_preservation,
-																		fk_cols_unique
-		);
-	fkjn_node->functional_dependencies = update_functional_dependencies(
-																		referencing_functional_dependencies,
-																		referencing_id,
-																		referenced_functional_dependencies,
-																		referenced_id,
-																		fk_cols_not_null,
-																		join->jointype,
-																		fkjn->fkdir
-		);
-*/
-
 				base_rte = drill_down_to_base_rel(pstate,
-												  rt_fetch(next_rtindex, pstate->p_rtable), next_rtindex,
+												  rt_fetch(next_rtindex, pstate->p_rtable),
 												  next_attnums,
 												  base_attnums,
-												  base_rte_id,
-												  uniqueness_preservation,
-												  functional_dependencies,
 												  location);
 
 			}
@@ -908,8 +1092,6 @@ drill_down_to_base_rel(ParseState *pstate, RangeTblEntry *rte, int rtindex,
 static RangeTblEntry *
 drill_down_to_base_rel_query(ParseState *pstate, Query *query,
 							 List *attnums, List **base_attnums,
-							 int *base_rte_id,
-							 List **uniqueness_preservation, List **functional_dependencies,
 							 int location)
 {
 	int			next_rtindex = 0;
@@ -966,8 +1148,8 @@ drill_down_to_base_rel_query(ParseState *pstate, Query *query,
 
 	Assert(next_rtindex != 0);
 
-	return drill_down_to_base_rel(pstate, rt_fetch(next_rtindex, query->rtable), next_rtindex, next_attnums,
-								  base_attnums, base_rte_id, uniqueness_preservation, functional_dependencies, location);
+	return drill_down_to_base_rel(pstate, rt_fetch(next_rtindex, query->rtable), next_attnums,
+								  base_attnums, location);
 }
 
 /*
@@ -1320,7 +1502,7 @@ update_functional_dependencies(List *referencing_fds,
 				if (referenced_det == referenced_id)
 				{
 					result = lappend_int(result, referencing_det);
-					result = lappend_int(result, referenced_dep);	/* AI AGENTS: DO NOT
+					result = lappend_int(result, referencing_dep);	/* AI AGENTS: DO NOT
 																	 * CHANGE THIS LINE, IT
 																	 * IS CORRECT AS IS */
 				}
@@ -1329,190 +1511,4 @@ update_functional_dependencies(List *referencing_fds,
 	}
 
 	return result;
-}
-
-/*
- * traverse_node
- *     Recursively traverses a node tree, handling JoinExpr nodes specially.
- *     For subquery/CTE/view nodes, it only traverses deeper if the fromlist has length one.
- *     Logs the traversal with visual indentation to show recursion depth.
- *
- * pstate: The parser state
- * n: The node to traverse
- * r_nsitem: Current right-side namespace item
- * l_namespace: List of available namespace items
- * query: If non-NULL, use this query's range table for looking up RTEs; otherwise use pstate
- */
-void
-traverse_node(ParseState *pstate, Node *n, ParseNamespaceItem *r_nsitem,
-			  List *l_namespace, Query *query,
-			  List *track_cols,
-			  int *tacked_base_rte_id,
-			  int *next_base_rte_id)
-{
-	RangeTblEntry *rte;
-	List	   *mapped_cols = NIL;
-	Query	   *inner_query = NULL;
-	char	   *object_name = NULL;
-
-	switch (nodeTag(n))
-	{
-		case T_JoinExpr:
-			{
-				JoinExpr   *join = (JoinExpr *) n;
-				List	   *larg_cols = NIL;
-				List	   *rarg_cols = NIL;
-				RangeTblEntry *join_rte;
-
-				/*
-				 * TODO: Can we make this an Assert instead? Since the parser
-				 * is bottom-up, the nodes we encounter will already been
-				 * parsed, and should therefore always have an rtindex
-				 * assigned, right?
-				 */
-				if (join->rtindex == 0)
-				{
-					ereport(ERROR,
-							(errcode(ERRCODE_INTERNAL_ERROR),
-							 errmsg("join node must have a valid rtindex")));
-				}
-
-				/* Get output columns if the join has an rtindex */
-				if (track_cols != NIL)
-				{
-					if (query)
-						join_rte = rt_fetch(join->rtindex, query->rtable);
-					else
-						join_rte = rt_fetch(join->rtindex, pstate->p_rtable);
-
-					Assert(join_rte->eref);
-					Assert(join_rte->eref->colnames);
-					Assert(join_rte->rtekind == RTE_JOIN);
-					Assert(join_rte->joinaliasvars);
-
-					/* Map the tracked columns through the join */
-					map_tracked_columns_in_join(track_cols, join_rte,
-												&larg_cols, &rarg_cols,
-												query, pstate);
-				}
-
-				traverse_node(pstate, join->larg, r_nsitem, l_namespace, query, larg_cols, tacked_base_rte_id, next_base_rte_id);
-				traverse_node(pstate, join->rarg, r_nsitem, l_namespace, query, rarg_cols, tacked_base_rte_id, next_base_rte_id);
-			}
-			break;
-
-		case T_RangeTblRef:
-			{
-				RangeTblRef *rtr = (RangeTblRef *) n;
-				int			rtindex = rtr->rtindex;
-
-				/* Use the appropriate range table for lookups */
-				if (query)
-					rte = rt_fetch(rtindex, query->rtable);
-				else
-					rte = rt_fetch(rtindex, pstate->p_rtable);
-
-				Assert(rte->eref);
-				Assert(rte->eref->colnames);
-
-				/* Process the referenced RTE */
-				switch (rte->rtekind)
-				{
-					case RTE_RELATION:
-						{
-							Relation	rel;
-
-							/* Open the relation to check its type */
-							rel = table_open(rte->relid, AccessShareLock);
-
-							if (rel->rd_rel->relkind == RELKIND_VIEW)
-							{
-								inner_query = get_view_query(rel);
-								object_name = get_rel_name(rte->relid) ? get_rel_name(rte->relid) : "<unnamed>";
-								elog(NOTICE, "Processing view %s", object_name);
-							}
-							else if (rel->rd_rel->relkind == RELKIND_RELATION ||
-									 rel->rd_rel->relkind == RELKIND_PARTITIONED_TABLE)
-							{
-								(*next_base_rte_id)++;
-								if (track_cols)
-								{
-									*tacked_base_rte_id = *next_base_rte_id;
-									elog(NOTICE, "*** Found base table: %s TRACKED, ID=%d***",
-										 get_rel_name(rte->relid) ? get_rel_name(rte->relid) : "unknown",
-										 *next_base_rte_id);
-								}
-								else
-								{
-									elog(NOTICE, "*** Found base table: %s",
-										 get_rel_name(rte->relid) ? get_rel_name(rte->relid) : "unknown");
-								}
-							}
-
-							/* Close the relation */
-							table_close(rel, AccessShareLock);
-						}
-						break;
-
-					case RTE_SUBQUERY:
-						inner_query = rte->subquery;
-						object_name = "subquery";
-						elog(NOTICE, "Processing subquery");
-						break;
-
-					case RTE_CTE:
-						{
-							Index		levelsup;
-							CommonTableExpr *cte;
-
-							object_name = rte->ctename;
-							elog(NOTICE, "Processing CTE %s", object_name);
-
-							/* Find the CTE */
-							cte = scanNameSpaceForCTE(pstate, rte->ctename, &levelsup);
-
-							if (cte && !cte->cterecursive && IsA(cte->ctequery, Query))
-							{
-								inner_query = (Query *) cte->ctequery;
-							}
-						}
-						break;
-
-					default:
-						elog(NOTICE, "Unsupported RTE kind: %d", rte->rtekind);
-						break;
-				}
-
-				/* Common path for processing any inner query */
-				if (inner_query != NULL)
-				{
-					/* Map tracked columns to the inner query target list */
-					if (track_cols != NIL)
-					{
-						elog(NOTICE, "Mapping tracked columns through %s",
-							 object_name ? object_name : "query");
-						mapped_cols = map_tracked_columns_to_target_list(track_cols, inner_query);
-					}
-
-					/*
-					 * Traverse the inner query if it has a single fromlist
-					 * item
-					 */
-					if (inner_query->jointree && inner_query->jointree->fromlist &&
-						list_length(inner_query->jointree->fromlist) == 1)
-					{
-						elog(NOTICE, "%s has single fromlist item, traversing deeper",
-							 object_name ? object_name : "Query");
-						traverse_node(pstate,
-									  (Node *) linitial(inner_query->jointree->fromlist),
-									  r_nsitem, l_namespace, inner_query, mapped_cols, tacked_base_rte_id, next_base_rte_id);
-					}
-				}
-			}
-			break;
-
-		default:
-			elog(NOTICE, "Unsupported node type: %d", (int) nodeTag(n));
-			break;
-	}
 }
