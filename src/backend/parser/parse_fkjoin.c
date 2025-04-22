@@ -34,9 +34,6 @@
 #include "utils/rel.h"
 #include "utils/syscache.h"
 
-/* Static variable for global base relation indexing */
-static Index next_baserelindex = 1;
-
 static Node *build_fk_join_on_clause(ParseState *pstate,
 									 ParseNamespaceColumn *l_nscols, List *l_attnums,
 									 ParseNamespaceColumn *r_nscols, List *r_attnums);
@@ -61,70 +58,6 @@ static List *update_functional_dependencies(List *referencing_fds,
 											bool fk_cols_not_null,
 											JoinType join_type,
 											ForeignKeyDirection fk_dir);
-
-static List *
-map_tracked_attnums_to_source_attnums(List *track_attnums, Query *inner_query, Index *source_varno)
-{
-	List	   *mapped_attnums = NIL;
-	ListCell   *attnum_lc;
-	int			current_varno = 0;	/* 0 indicates unset */
-
-	*source_varno = 0;
-
-	if (!track_attnums || !inner_query)
-		return NIL;
-
-	foreach(attnum_lc, track_attnums)
-	{
-		int			attno = lfirst_int(attnum_lc);
-		TargetEntry *te;
-		Var		   *var;
-
-		if (attno <= 0 || attno > list_length(inner_query->targetList))
-			ereport(ERROR,
-					(errcode(ERRCODE_INVALID_COLUMN_REFERENCE),
-					 errmsg("invalid attribute number %d in query target list", attno)));
-
-		te = list_nth(inner_query->targetList, attno - 1);
-
-		/* We can only map through simple Var references */
-		if (!IsA(te->expr, Var))
-		{
-			/*
-			 * Can't map through this expression. Depending on requirements,
-			 * we might error out or just return NIL for this column or the
-			 * whole list. Let's error for now, as FK joins require base
-			 * columns.
-			 */
-			ereport(ERROR,
-					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-					 errmsg("cannot map through expression in target list entry for attribute %d", attno),
-					 errdetail("Target entry expression: %s", nodeToString(te->expr))));
-			return NIL;			/* Not reachable, but keeps compiler happy */
-		}
-
-		var = (Var *) te->expr;
-
-		/* Check if all tracked columns map to the same source relation */
-		if (current_varno == 0)
-		{
-			current_varno = var->varno;
-			*source_varno = var->varno;
-		}
-		else if (current_varno != var->varno)
-		{
-			ereport(ERROR,
-					(errcode(ERRCODE_UNDEFINED_TABLE),
-					 errmsg("tracked columns must all come from the same source relation"),
-			/* TODO: Add location info if possible */
-					 errdetail("Found columns mapping to varno %d and varno %d.", current_varno, var->varno)));
-		}
-
-		mapped_attnums = lappend_int(mapped_attnums, var->varattno);
-	}
-
-	return mapped_attnums;
-}
 
 /*
  * map_tracked_attnums_in_join
@@ -257,14 +190,14 @@ map_tracked_attnums_in_join(List *track_attnums, RangeTblEntry *join_rte,
 static void
 traverse_node(ParseState *pstate, Node *n, ParseNamespaceItem *r_nsitem,
 			  List *l_namespace, Query *query,
-			  List *track_attnums,	/* <<< Renamed parameter */
-			  List **base_attnums,	/* <<< New output parameter */
-			  int *found_base_rte_id,	/* Renamed for clarity */
-			  Oid *found_base_relid,	/* Renamed for clarity */
+			  List *track_attnums,
+			  List **base_attnums,
+			  int *found_base_rte_id,
+			  Oid *found_base_relid,
 			  int *next_base_rteid)
 {
 	RangeTblEntry *rte;
-	List	   *mapped_attnums = NIL;	/* <<< Renamed variable */
+	List	   *mapped_attnums = NIL;
 	Query	   *inner_query = NULL;
 	char	   *object_name = NULL;
 	int			location = -1;	/* For error reporting */
@@ -274,8 +207,8 @@ traverse_node(ParseState *pstate, Node *n, ParseNamespaceItem *r_nsitem,
 		case T_JoinExpr:
 			{
 				JoinExpr   *join = (JoinExpr *) n;
-				List	   *larg_attnums = NIL; /* <<< Renamed variable */
-				List	   *rarg_attnums = NIL; /* <<< Renamed variable */
+				List	   *larg_attnums = NIL;
+				List	   *rarg_attnums = NIL;
 				RangeTblEntry *join_rte;
 
 
@@ -286,8 +219,8 @@ traverse_node(ParseState *pstate, Node *n, ParseNamespaceItem *r_nsitem,
 							 errmsg("join node must have a valid rtindex")));
 				}
 
-				/* Get output columns if the join has an rtindex */
-				if (track_attnums != NIL)	/* <<< Changed check */
+				/* Map join inputs if we are tracking attributes */
+				if (track_attnums != NIL)
 				{
 					if (query)
 						join_rte = rt_fetch(join->rtindex, query->rtable);
@@ -304,10 +237,9 @@ traverse_node(ParseState *pstate, Node *n, ParseNamespaceItem *r_nsitem,
 
 
 					/* Map the tracked attnums through the join */
-					map_tracked_attnums_in_join(track_attnums, join_rte,	/* <<< Changed call */
-												&larg_attnums, &rarg_attnums,	/* <<< Changed args */
-												pstate, location);	/* <<< Pass pstate &
-																	 * location */
+					map_tracked_attnums_in_join(track_attnums, join_rte,
+												&larg_attnums, &rarg_attnums,
+												pstate, location);
 				}
 
 				/* Pass mapped attnums down */
@@ -353,8 +285,8 @@ traverse_node(ParseState *pstate, Node *n, ParseNamespaceItem *r_nsitem,
 							else if (rel->rd_rel->relkind == RELKIND_RELATION ||
 									 rel->rd_rel->relkind == RELKIND_PARTITIONED_TABLE)
 							{
-								(*next_base_rteid)++;
-								if (track_attnums)	/* <<< Changed check */
+								(*next_base_rteid)++; /* Assign next ID */
+								if (track_attnums)
 								{
 									/*
 									 * Check if tracked attnums actually match
@@ -460,60 +392,78 @@ traverse_node(ParseState *pstate, Node *n, ParseNamespaceItem *r_nsitem,
 													 * mapping */
 
 					/* Map tracked attnums to the inner query target list */
-					if (track_attnums != NIL)	/* <<< Changed check */
+					if (track_attnums != NIL)
 					{
-						elog(NOTICE, "Mapping tracked attnums through %s",	/* Changed log */
-							 object_name ? object_name : "query");
-						/* <<< Changed call and variable */
-						mapped_attnums = map_tracked_attnums_to_source_attnums(track_attnums, inner_query, &source_varno);
-
-						/* Check if mapping was successful */
-						if (mapped_attnums == NIL && list_length(track_attnums) > 0)
-						{
-							/*
-							 * Error already raised inside
-							 * map_tracked_attnums_to_source_attnums
-							 */
-							/* Should not get here */
-							elog(ERROR, "Failed to map attnums through %s", object_name ? object_name : "query");
-						}
-						if (source_varno == 0 && list_length(track_attnums) > 0)
-						{
-							/*
-							 * Should not happen if
-							 * map_tracked_attnums_to_source_attnums works
-							 */
-							elog(ERROR, "Mapped attnums but did not get source varno from %s", object_name ? object_name : "query");
-						}
-					}
-
-					/*
-					 * If mapping was successful, continue traversal from the
-					 * specific source relation within the inner query,
-					 * identified by source_varno. We construct a synthetic
-					 * RangeTblRef to pass down.
-					 */
-					if (mapped_attnums != NIL && source_varno > 0)
-					{
+						ListCell   *attnum_lc;
+						int			current_varno = 0;	/* 0 indicates unset */
 						RangeTblRef *source_rtr = makeNode(RangeTblRef);
+
+						elog(NOTICE, "Mapping tracked attnums through %s",
+							 object_name ? object_name : "query");
+
+						foreach(attnum_lc, track_attnums)
+						{
+							int			attno = lfirst_int(attnum_lc);
+							TargetEntry *te;
+							Var		   *var;
+
+							if (attno <= 0 || attno > list_length(inner_query->targetList))
+								ereport(ERROR,
+										(errcode(ERRCODE_INVALID_COLUMN_REFERENCE),
+										errmsg("invalid attribute number %d in query target list", attno)));
+
+							te = list_nth(inner_query->targetList, attno - 1);
+
+							/* We can only map through simple Var references */
+							if (!IsA(te->expr, Var))
+							{
+								/*
+								* Can't map through this expression. Depending on requirements,
+								* we might error out or just return NIL for this column or the
+								* whole list. Let's error for now, as FK joins require base
+								* columns.
+								*/
+								ereport(ERROR,
+										(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+										errmsg("cannot map through expression in target list entry for attribute %d", attno),
+										errdetail("Target entry expression: %s", nodeToString(te->expr))));
+							}
+
+							var = (Var *) te->expr;
+
+							/* Check if all tracked columns map to the same source relation */
+							if (current_varno == 0)
+							{
+								current_varno = var->varno;
+								source_varno = var->varno;
+							}
+							else if (current_varno != var->varno)
+							{
+								ereport(ERROR,
+										(errcode(ERRCODE_UNDEFINED_TABLE),
+										errmsg("tracked columns must all come from the same source relation"),
+										errdetail("Found columns mapping to varno %d and varno %d.", current_varno, var->varno)));
+							}
+
+							mapped_attnums = lappend_int(mapped_attnums, var->varattno);
+						}
+						/*
+						* Continue traversal from the
+						* specific source relation within the inner query,
+						* identified by source_varno. We construct a synthetic
+						* RangeTblRef to pass down.
+						*/
 
 						source_rtr->rtindex = source_varno;
 
 						elog(NOTICE, "Traversing into %s source (RTE %d)",
-							 object_name ? object_name : "query", source_varno);
+							object_name ? object_name : "query", source_varno);
 
 						traverse_node(pstate,
-									  (Node *) source_rtr,	/* Recurse on the
-															 * specific source */
-									  r_nsitem, l_namespace, inner_query,
-									  mapped_attnums, base_attnums,
-									  found_base_rte_id, found_base_relid, next_base_rteid);
-					}
-					else if (track_attnums != NIL)
-					{
-						/* Mapping failed or produced no result */
-						elog(NOTICE, "Stopping traversal at %s: could not map attributes or find source varno",
-							 object_name ? object_name : "query");
+									(Node *) source_rtr,
+									r_nsitem, l_namespace, inner_query,
+									mapped_attnums, base_attnums,
+									found_base_rte_id, found_base_relid, next_base_rteid);
 					}
 				}
 			}
@@ -698,15 +648,29 @@ transformAndValidateForeignKeyJoin(ParseState *pstate, JoinExpr *join,
 
 	/* Traverse the referencing side */
 	traverse_node(pstate, referencing_arg, r_nsitem, l_namespace, NULL,
-				  referencing_attnums,	/* <<< Pass attnums */
-				  &referencing_base_attnums,	/* <<< Pass base attnums ptr */
+				  referencing_attnums,
+				  &referencing_base_attnums,
 				  &referencing_id, &referencing_relid, &next_base_rte_id);
 
 	/* Traverse the referenced side */
 	traverse_node(pstate, referenced_arg, r_nsitem, l_namespace, NULL,
-				  referenced_attnums,	/* <<< Pass attnums */
-				  &referenced_base_attnums, /* <<< Pass base attnums ptr */
+				  referenced_attnums,
+				  &referenced_base_attnums,
 				  &referenced_id, &referenced_relid, &next_base_rte_id);
+
+	/*
+	 * traverse_node should now correctly find the base relations and
+	 * attribute numbers, making drill_down_to_base_rel redundant for this
+	 * purpose.
+	 */
+	/* base_referencing_rte = drill_down_to_base_rel(pstate, referencing_rte, */
+	/* referencing_attnums, */
+	/* &referencing_base_attnums, */
+	/* fkjn->location); */
+	/* base_referenced_rte = drill_down_to_base_rel(pstate, referenced_rte, */
+	/* referenced_attnums, */
+	/* &referenced_base_attnums, */
+	/* fkjn->location); */
 
 	/*
 	 * elog(NOTICE, "referencing_base_attnums: %s (traverse_node)",
