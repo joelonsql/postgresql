@@ -1565,14 +1565,6 @@ transformFromClauseItem(ParseState *pstate, Node *n,
 										   j->alias,
 										   true);
 
-		if (j->fkJoin)
-		{
-			ForeignKeyJoinNode *fkjn = castNode(ForeignKeyJoinNode, j->fkJoin);
-
-			nsitem->p_rte->uniqueness_preservation = list_copy(fkjn->uniqueness_preservation);
-			nsitem->p_rte->functional_dependencies = list_copy(fkjn->functional_dependencies);
-		}
-
 		/* Verify that we correctly predicted the join's RT index */
 		Assert(j->rtindex == nsitem->p_rtindex);
 		/* Cross-check number of columns, too */

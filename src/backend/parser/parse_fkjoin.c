@@ -58,6 +58,13 @@ static List *update_functional_dependencies(List *referencing_fds,
 											bool fk_cols_not_null,
 											JoinType join_type,
 											ForeignKeyDirection fk_dir);
+static void analyze_join_tree(ParseState *pstate, Node *n,
+							  Query *query,
+							  RTEId *rte_id,
+							  List **uniqueness_preservation,
+							  List **functional_dependencies,
+							  bool *found,
+							  int location);
 
 void
 transformAndValidateForeignKeyJoin(ParseState *pstate, JoinExpr *join,
@@ -75,6 +82,12 @@ transformAndValidateForeignKeyJoin(ParseState *pstate, JoinExpr *join,
 			   *other_rel = NULL;
 	List	   *referencing_cols,
 			   *referenced_cols;
+	List	   *referencing_uniqueness_preservation = NIL;
+	List	   *referencing_functional_dependencies = NIL;
+	List	   *referenced_uniqueness_preservation = NIL;
+	List	   *referenced_functional_dependencies = NIL;
+	Node	   *referencing_arg;
+	Node	   *referenced_arg;
 	List	   *referencing_base_attnums;
 	List	   *referenced_base_attnums;
 	Oid			fkoid;
@@ -83,11 +96,10 @@ transformAndValidateForeignKeyJoin(ParseState *pstate, JoinExpr *join,
 	List	   *referenced_attnums = NIL;
 	Oid			referencing_relid;
 	Oid			referenced_relid;
-	RTEId	   *referencing_id;
 	RTEId	   *referenced_id;
 	bool		found_fd = false;
-	bool		fk_cols_unique;
-	bool		fk_cols_not_null;
+	bool		referencing_found = false;
+	bool		referenced_found = false;
 
 	foreach(lc, l_namespace)
 	{
@@ -122,6 +134,8 @@ transformAndValidateForeignKeyJoin(ParseState *pstate, JoinExpr *join,
 		referenced_rel = r_nsitem;
 		referencing_cols = fkjn->refCols;
 		referenced_cols = fkjn->localCols;
+		referencing_arg = join->larg;
+		referenced_arg = join->rarg;
 	}
 	else
 	{
@@ -129,6 +143,8 @@ transformAndValidateForeignKeyJoin(ParseState *pstate, JoinExpr *join,
 		referencing_rel = r_nsitem;
 		referenced_cols = fkjn->refCols;
 		referencing_cols = fkjn->localCols;
+		referenced_arg = join->larg;
+		referencing_arg = join->rarg;
 	}
 
 	referencing_rte = rt_fetch(referencing_rel->p_rtindex, pstate->p_rtable);
@@ -211,7 +227,6 @@ transformAndValidateForeignKeyJoin(ParseState *pstate, JoinExpr *join,
 
 	referencing_relid = base_referencing_rte->relid;
 	referenced_relid = base_referenced_rte->relid;
-	referencing_id = base_referencing_rte->rteid;
 	referenced_id = base_referenced_rte->rteid;
 
 	Assert(referencing_relid != InvalidOid && referenced_relid != InvalidOid);
@@ -233,8 +248,11 @@ transformAndValidateForeignKeyJoin(ParseState *pstate, JoinExpr *join,
 						column_list_to_string(referenced_cols)),
 				 parser_errposition(pstate, fkjn->location)));
 
+	analyze_join_tree(pstate, referencing_arg, NULL, referencing_rte->rteid, &referencing_uniqueness_preservation, &referencing_functional_dependencies, &referencing_found, fkjn->location);
+	analyze_join_tree(pstate, referenced_arg, NULL, referenced_rte->rteid, &referenced_uniqueness_preservation, &referenced_functional_dependencies, &referenced_found, fkjn->location);
+
 	/* Check uniqueness preservation */
-	if (!list_member(referenced_rte->uniqueness_preservation, referenced_id))
+	if (!list_member(referenced_uniqueness_preservation, referenced_id))
 	{
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_FOREIGN_KEY),
@@ -247,10 +265,10 @@ transformAndValidateForeignKeyJoin(ParseState *pstate, JoinExpr *join,
 	 * Check functional dependencies - looking for (referenced_id,
 	 * referenced_id) pairs
 	 */
-	for (int i = 0; i < list_length(referenced_rte->functional_dependencies); i += 2)
+	for (int i = 0; i < list_length(referenced_functional_dependencies); i += 2)
 	{
-		RTEId	   *fd_dep = (RTEId *) list_nth(referenced_rte->functional_dependencies, i);
-		RTEId	   *fd_dcy = (RTEId *) list_nth(referenced_rte->functional_dependencies, i + 1);
+		RTEId	   *fd_dep = (RTEId *) list_nth(referenced_functional_dependencies, i);
+		RTEId	   *fd_dcy = (RTEId *) list_nth(referenced_functional_dependencies, i + 1);
 
 		if (equal(fd_dep, referenced_id) && equal(fd_dcy, referenced_id))
 		{
@@ -276,9 +294,6 @@ transformAndValidateForeignKeyJoin(ParseState *pstate, JoinExpr *join,
 				 parser_errposition(pstate, fkjn->location)));
 	}
 
-	fk_cols_unique = is_referencing_cols_unique(referencing_relid, referencing_base_attnums);
-	fk_cols_not_null = is_referencing_cols_not_null(referencing_relid, referencing_base_attnums);
-
 	join->quals = build_fk_join_on_clause(pstate, referencing_rel->p_nscolumns, referencing_attnums, referenced_rel->p_nscolumns, referenced_attnums);
 
 	fkjn_node = makeNode(ForeignKeyJoinNode);
@@ -288,22 +303,210 @@ transformAndValidateForeignKeyJoin(ParseState *pstate, JoinExpr *join,
 	fkjn_node->referencedVarno = referenced_rel->p_rtindex;
 	fkjn_node->referencedAttnums = referenced_attnums;
 	fkjn_node->constraint = fkoid;
-	fkjn_node->uniqueness_preservation = update_uniqueness_preservation(
-																		referencing_rte->uniqueness_preservation,
-																		referenced_rte->uniqueness_preservation,
-																		fk_cols_unique
-		);
-	fkjn_node->functional_dependencies = update_functional_dependencies(
-																		referencing_rte->functional_dependencies,
-																		referencing_id,
-																		referenced_rte->functional_dependencies,
-																		referenced_id,
-																		fk_cols_not_null,
-																		join->jointype,
-																		fkjn->fkdir
-		);
 
 	join->fkJoin = (Node *) fkjn_node;
+}
+
+static void
+analyze_join_tree(ParseState *pstate, Node *n,
+				  Query *query,
+				  RTEId *rte_id,
+				  List **uniqueness_preservation,
+				  List **functional_dependencies,
+				  bool *found,
+				  int location)
+{
+	RangeTblEntry *rte;
+	Query	   *inner_query = NULL;
+	List	   *referencing_uniqueness_preservation = NIL;
+	List	   *referencing_functional_dependencies = NIL;
+	List	   *referenced_uniqueness_preservation = NIL;
+	List	   *referenced_functional_dependencies = NIL;
+	List	   *referencing_base_attnums;
+	List	   *referenced_base_attnums;
+	RangeTblEntry *base_referencing_rte;
+	RangeTblEntry *base_referenced_rte;
+	Oid			referencing_relid;
+	RTEId	   *referencing_id;
+	RTEId	   *referenced_id;
+	bool		referencing_found = false;
+	bool		referenced_found = false;
+
+	switch (nodeTag(n))
+	{
+		case T_JoinExpr:
+			{
+				JoinExpr   *join = (JoinExpr *) n;
+				List	   *rtable;
+				Node	   *referencing_arg;
+				Node	   *referenced_arg;
+				RangeTblEntry *referencing_rte;
+				RangeTblEntry *referenced_rte;
+				ForeignKeyJoinNode *fkjn = castNode(ForeignKeyJoinNode, join->fkJoin);
+				bool		fk_cols_unique;
+				bool		fk_cols_not_null;
+
+				if (query)
+					rtable = query->rtable;
+				else
+					rtable = pstate->p_rtable;
+
+				if (fkjn->fkdir == FKDIR_FROM)
+				{
+					referencing_arg = join->larg;
+					referenced_arg = join->rarg;
+				}
+				else
+				{
+					referenced_arg = join->larg;
+					referencing_arg = join->rarg;
+				}
+
+				referencing_rte = rt_fetch(fkjn->referencingVarno, rtable);
+				referenced_rte = rt_fetch(fkjn->referencedVarno, rtable);
+
+				analyze_join_tree(pstate, referencing_arg, query, rte_id, &referencing_uniqueness_preservation, &referencing_functional_dependencies, &referencing_found, location);
+				if (referencing_found || equal(referencing_rte->rteid, rte_id))
+				{
+					*found = true;
+					*uniqueness_preservation = referencing_uniqueness_preservation;
+					*functional_dependencies = referencing_functional_dependencies;
+					break;
+				}
+
+				analyze_join_tree(pstate, referenced_arg, query, rte_id, &referenced_uniqueness_preservation, &referenced_functional_dependencies, &referenced_found, location);
+				if (referenced_found || equal(referenced_rte->rteid, rte_id))
+				{
+					*found = true;
+					*uniqueness_preservation = referenced_uniqueness_preservation;
+					*functional_dependencies = referenced_functional_dependencies;
+					break;
+				}
+
+				base_referencing_rte = drill_down_to_base_rel(pstate, referencing_rte,
+															  fkjn->referencingAttnums,
+															  &referencing_base_attnums,
+															  location);
+				base_referenced_rte = drill_down_to_base_rel(pstate, referenced_rte,
+															 fkjn->referencedAttnums,
+															 &referenced_base_attnums,
+															 location);
+
+				referencing_relid = base_referencing_rte->relid;
+				referencing_id = base_referencing_rte->rteid;
+				referenced_id = base_referenced_rte->rteid;
+
+				fk_cols_unique = is_referencing_cols_unique(referencing_relid, referencing_base_attnums);
+				fk_cols_not_null = is_referencing_cols_not_null(referencing_relid, referencing_base_attnums);
+
+				*uniqueness_preservation = update_uniqueness_preservation(
+																		  referencing_uniqueness_preservation,
+																		  referenced_uniqueness_preservation,
+																		  fk_cols_unique
+					);
+				*functional_dependencies = update_functional_dependencies(
+																		  referencing_functional_dependencies,
+																		  referencing_id,
+																		  referenced_functional_dependencies,
+																		  referenced_id,
+																		  fk_cols_not_null,
+																		  join->jointype,
+																		  fkjn->fkdir
+					);
+
+			}
+			break;
+
+		case T_RangeTblRef:
+			{
+				RangeTblRef *rtr = (RangeTblRef *) n;
+				int			rtindex = rtr->rtindex;
+
+				/* Use the appropriate range table for lookups */
+				if (query)
+					rte = rt_fetch(rtindex, query->rtable);
+				else
+					rte = rt_fetch(rtindex, pstate->p_rtable);
+
+				/* Process the referenced RTE */
+				switch (rte->rtekind)
+				{
+					case RTE_RELATION:
+						{
+							Relation	rel;
+
+							/* Open the relation to check its type */
+							rel = table_open(rte->relid, AccessShareLock);
+
+							if (rel->rd_rel->relkind == RELKIND_VIEW)
+							{
+								inner_query = get_view_query(rel);
+							}
+							else if (rel->rd_rel->relkind == RELKIND_RELATION ||
+									 rel->rd_rel->relkind == RELKIND_PARTITIONED_TABLE)
+							{
+								*uniqueness_preservation = list_make1(rte->rteid);
+								if (!rel->rd_rel->relrowsecurity)
+									*functional_dependencies = list_make2(rte->rteid, rte->rteid);
+							}
+
+							/* Close the relation */
+							table_close(rel, AccessShareLock);
+						}
+						break;
+
+					case RTE_SUBQUERY:
+						inner_query = rte->subquery;
+						break;
+
+					case RTE_CTE:
+						{
+							Index		levelsup;
+							CommonTableExpr *cte;
+
+							/* Find the CTE */
+							cte = scanNameSpaceForCTE(pstate, rte->ctename, &levelsup);
+
+							if (cte && !cte->cterecursive && IsA(cte->ctequery, Query))
+							{
+								inner_query = (Query *) cte->ctequery;
+							}
+						}
+						break;
+
+					default:
+						ereport(ERROR,
+								(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+								 errmsg("foreign key joins involving this RTE kind are not supported"),
+								 parser_errposition(pstate, location)));
+						break;
+				}
+
+				/* Common path for processing any inner query */
+				if (inner_query != NULL)
+				{
+					/*
+					 * Traverse the inner query if it has a single fromlist
+					 * item
+					 */
+					if (inner_query->jointree && inner_query->jointree->fromlist &&
+						list_length(inner_query->jointree->fromlist) == 1)
+					{
+						analyze_join_tree(pstate,
+										  (Node *) linitial(inner_query->jointree->fromlist),
+										  inner_query, rte_id, uniqueness_preservation, functional_dependencies, found, location);
+					}
+				}
+			}
+			break;
+
+		default:
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("unsupported node type in foreign key join traversal"),
+					 parser_errposition(pstate, location)));
+			break;
+	}
 }
 
 /*
@@ -987,6 +1190,7 @@ update_functional_dependencies(List *referencing_fds,
 	 * functional dependencies Let r = referencing_id Let s = referenced_id
 	 *
 	 * The new transitive dependencies are defined as:
+	 *
 	 * T = {(X, B) | (X, r) ∈ R ∧ (s, B) ∈ S}
 	 *
 	 * The correctness of this derivation relies on the fact that
