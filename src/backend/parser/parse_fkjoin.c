@@ -62,6 +62,8 @@ static List *update_functional_dependencies(List *referencing_fds,
 											bool fk_cols_not_null,
 											JoinType join_type,
 											ForeignKeyDirection fk_dir);
+static List *get_column_names_from_varno_attnums(ParseState *pstate, Query *query, int varno, List *attnums);
+
 /*
  * map_tracked_columns_to_target_list
  *     Maps tracked columns through a Query's target list to find the
@@ -304,6 +306,8 @@ traverse_node(ParseState *pstate, Node *n, ParseNamespaceItem *r_nsitem,
 				List	   *referenced_cols = NIL;
 				List	   *referencing_top_cols = NIL;
 				List	   *referenced_top_cols = NIL;
+				List	   *fk_refing_colnames;
+				List	   *fk_refed_colnames;
 				Node	   *referencing_arg;
 				Node	   *referenced_arg;
 				RangeTblEntry *join_rte;
@@ -311,18 +315,7 @@ traverse_node(ParseState *pstate, Node *n, ParseNamespaceItem *r_nsitem,
 				bool		fk_cols_unique;
 				bool		fk_cols_not_null;
 
-				/*
-				 * TODO: Can we make this an Assert instead? Since the parser
-				 * is bottom-up, the nodes we encounter will already been
-				 * parsed, and should therefore always have an rtindex
-				 * assigned, right?
-				 */
-				if (join->rtindex == 0)
-				{
-					ereport(ERROR,
-							(errcode(ERRCODE_INTERNAL_ERROR),
-							 errmsg("join node must have a valid rtindex")));
-				}
+				Assert(join->rtindex != 0);
 
 				/* Get output columns if the join has an rtindex */
 				if (track_top_cols != NIL)
@@ -361,17 +354,47 @@ traverse_node(ParseState *pstate, Node *n, ParseNamespaceItem *r_nsitem,
 					referencing_top_cols = rarg_cols;
 				}
 
+				elog(NOTICE, "ForeignKeyJoinNode fields: fkdir=%s, referencingVarno=%u, referencingAttnums=%s, referencedVarno=%u, referencedAttnums=%s, constraint=%u",
+					(fkjn->fkdir == FKDIR_FROM ? "FKDIR_FROM" : "FKDIR_TO"),
+					fkjn->referencingVarno,
+					fkjn->referencingAttnums ? nodeToString(fkjn->referencingAttnums) : "NIL",
+					fkjn->referencedVarno,
+					fkjn->referencedAttnums ? nodeToString(fkjn->referencedAttnums) : "NIL",
+					fkjn->constraint);
+
+				fk_refing_colnames = get_column_names_from_varno_attnums(pstate, query, fkjn->referencingVarno, fkjn->referencingAttnums);
+				fk_refed_colnames = get_column_names_from_varno_attnums(pstate, query, fkjn->referencedVarno, fkjn->referencedAttnums);
+
+				elog(NOTICE, "FK Join: referencing_cols=%s, referenced_cols=%s",
+					 fk_refing_colnames ? nodeToString(fk_refing_colnames) : "NIL",
+					 fk_refed_colnames ? nodeToString(fk_refed_colnames) : "NIL");
+
 				traverse_node(pstate, referencing_arg, r_nsitem, l_namespace, query, referencing_top_cols, base_attnums, found_base_rteid, found_base_relid,
-					track_cols, &referencing_base_rteid, &referencing_uniqueness_preservation, &referencing_functional_dependencies,
+					fk_refing_colnames, &referencing_base_rteid, &referencing_uniqueness_preservation, &referencing_functional_dependencies,
 					next_base_rteid);
 
 				traverse_node(pstate, referenced_arg, r_nsitem, l_namespace, query, referenced_top_cols, base_attnums, found_base_rteid, found_base_relid,
-					track_cols, &referenced_base_rteid, &referenced_uniqueness_preservation, &referenced_functional_dependencies,
+					fk_refed_colnames, &referenced_base_rteid, &referenced_uniqueness_preservation, &referenced_functional_dependencies,
 					next_base_rteid);
 /*
 				fk_cols_unique = is_referencing_cols_unique(referencing_relid, referencing_base_attnums);
 				fk_cols_not_null = is_referencing_cols_not_null(referencing_relid, referencing_base_attnums);
+*/
 
+				elog(NOTICE, "referencing_uniqueness_preservation: %s",
+					 referencing_uniqueness_preservation ? nodeToString(referencing_uniqueness_preservation) : "NIL");
+				elog(NOTICE, "referencing_functional_dependencies: %s",
+					 referencing_functional_dependencies ? nodeToString(referencing_functional_dependencies) : "NIL");
+				elog(NOTICE, "referencing_base_rteid: %d", referencing_base_rteid);
+				elog(NOTICE, "referenced_uniqueness_preservation: %s",
+					 referenced_uniqueness_preservation ? nodeToString(referenced_uniqueness_preservation) : "NIL");
+				elog(NOTICE, "referenced_functional_dependencies: %s",
+					 referenced_functional_dependencies ? nodeToString(referenced_functional_dependencies) : "NIL");
+				elog(NOTICE, "referenced_base_rteid: %d", referenced_base_rteid);
+
+
+				fk_cols_unique = true;
+				fk_cols_not_null = true;
 				uniqueness_preservation = update_uniqueness_preservation(
 											referencing_uniqueness_preservation,
 											referenced_uniqueness_preservation,
@@ -379,14 +402,18 @@ traverse_node(ParseState *pstate, Node *n, ParseNamespaceItem *r_nsitem,
 					);
 				functional_dependencies = update_functional_dependencies(
 											referencing_functional_dependencies,
-											referencing_id,
+											referencing_base_rteid,
 											referenced_functional_dependencies,
-											referenced_id,
+											referenced_base_rteid,
 											fk_cols_not_null,
 											join->jointype,
 											fkjn->fkdir
 					);
-*/
+
+				elog(NOTICE, "Updated uniqueness_preservation: %s",
+					 uniqueness_preservation ? nodeToString(uniqueness_preservation) : "NIL");
+				elog(NOTICE, "Updated functional_dependencies: %s",
+					 functional_dependencies ? nodeToString(functional_dependencies) : "NIL");
 
 			}
 			break;
@@ -730,6 +757,11 @@ transformAndValidateForeignKeyJoin(ParseState *pstate, JoinExpr *join,
 	traverse_node(pstate, referenced_arg, r_nsitem, l_namespace, NULL, referenced_top_cols, &referenced_base_attnums, &referenced_top_id, &referenced_relid,
 		referenced_cols, &referenced_id, &referenced_uniqueness_preservation, &referenced_functional_dependencies,
 		&next_base_rteid);
+
+	elog(NOTICE, "FINAL referenced_id: %d, referenced_uniqueness_preservation: %s, referenced_functional_dependencies: %s",
+		 referenced_id,
+		 referenced_uniqueness_preservation ? nodeToString(referenced_uniqueness_preservation) : "NIL",
+		 referenced_functional_dependencies ? nodeToString(referenced_functional_dependencies) : "NIL");
 
 	elog(NOTICE, "referencing_base_attnums: %s (traverse_node)",
 		 referencing_base_attnums ? nodeToString(referencing_base_attnums) : "NIL");
@@ -1596,4 +1628,41 @@ update_functional_dependencies(List *referencing_fds,
 	}
 
 	return result;
+}
+
+/*
+ * get_column_names_from_varno_attnums
+ *     Retrieves the column names corresponding to a varno and list of attnums.
+ */
+static List *
+get_column_names_from_varno_attnums(ParseState *pstate, Query *query, int varno, List *attnums)
+{
+	List	   *colnames = NIL;
+	RangeTblEntry *rte;
+	ListCell   *lc;
+
+	/* Determine which range table to use */
+	if (query)
+		rte = rt_fetch(varno, query->rtable);
+	else
+		rte = rt_fetch(varno, pstate->p_rtable);
+
+	foreach(lc, attnums)
+	{
+		int		attnum = lfirst_int(lc);
+		char   *colname;
+
+		if (attnum > 0 && attnum <= list_length(rte->eref->colnames))
+		{
+			colname = strVal(list_nth(rte->eref->colnames, attnum - 1));
+			colnames = lappend(colnames, makeString(pstrdup(colname)));
+		}
+		else
+		{
+			/* Handle invalid attnum, maybe error or append a placeholder? */
+			colnames = lappend(colnames, makeString("<invalid attnum>"));
+		}
+	}
+
+	return colnames;
 }
