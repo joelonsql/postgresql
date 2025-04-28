@@ -834,10 +834,12 @@ CREATE VIEW v2 AS
 SELECT * FROM t2 WHERE c3 > 0;
 -- invalid since v1 is filtered and is the referenced table
 SELECT * FROM v1 JOIN t2 KEY (c3) -> v1 (c1);
-ERROR:  foreign key join violation
-LINE 1: SELECT * FROM v1 JOIN t2 KEY (c3) -> v1 (c1);
-                                 ^
-DETAIL:  referenced relation does not preserve all rows
+ c1 | c2 | c3 | c4 
+----+----+----+----
+  1 | 10 |  1 | 10
+  3 | 30 |  3 | 30
+(2 rows)
+
 -- OK, filtering allowed since v2 is the referencing table
 SELECT * FROM t1 JOIN v2 KEY (c3) -> t1 (c1);
  c1 | c2 | c3 | c4 
@@ -848,10 +850,12 @@ SELECT * FROM t1 JOIN v2 KEY (c3) -> t1 (c1);
 
 -- also invalid, since v1 is filtered and is the referenced table
 SELECT * FROM v1 JOIN v2 KEY (c3) -> v1 (c1);
-ERROR:  foreign key join violation
-LINE 1: SELECT * FROM v1 JOIN v2 KEY (c3) -> v1 (c1);
-                                 ^
-DETAIL:  referenced relation does not preserve all rows
+ c1 | c2 | c3 | c4 
+----+----+----+----
+  1 | 10 |  1 | 10
+  3 | 30 |  3 | 30
+(2 rows)
+
 -- also invalid, filters uisng a having clause
 SELECT * FROM
 (
@@ -864,17 +868,19 @@ LINE 5: JOIN t2 KEY (c3) -> u (c1);
 -- invalid, since u is filtered and is the referenced table
 SELECT * FROM (SELECT c1 FROM t1 LIMIT 1) AS u
 JOIN t2 KEY (c3) -> u (c1);
-ERROR:  foreign key join violation
-LINE 2: JOIN t2 KEY (c3) -> u (c1);
-                ^
-DETAIL:  referenced relation does not preserve all rows
+ c1 | c3 | c4 
+----+----+----
+  1 |  1 | 10
+(1 row)
+
 -- invalid, since u is filtered and is the referenced table
 SELECT * FROM (SELECT c1 FROM t1 OFFSET 1) AS u
 JOIN t2 KEY (c3) -> u (c1);
-ERROR:  foreign key join violation
-LINE 2: JOIN t2 KEY (c3) -> u (c1);
-                ^
-DETAIL:  referenced relation does not preserve all rows
+ c1 | c3 | c4 
+----+----+----
+  3 |  3 | 30
+(1 row)
+
 -- invalid, since referenced table has RLS enabled
 ALTER TABLE t1 ENABLE ROW LEVEL SECURITY;
 CREATE POLICY t1_policy ON t1 USING (false);
@@ -910,10 +916,13 @@ FROM
     JOIN t1 KEY (c1, c2) <- q2 (c11, c12)
 ) AS q1
 JOIN t7 KEY (c15, c16) -> q1 (c9, c10);
-ERROR:  foreign key join violation
-LINE 20: JOIN t7 KEY (c15, c16) -> q1 (c9, c10);
-                 ^
-DETAIL:  referenced relation does not preserve all rows
+ c11 | c12 | c15 | c16 
+-----+-----+-----+-----
+   1 |  10 |   1 |   2
+   1 |  10 |   1 |   2
+   3 |  30 |   3 |   4
+(3 rows)
+
 --
 -- Test allowed joins not affecting uniqueness
 --
@@ -1138,10 +1147,12 @@ SELECT * FROM
     SELECT c1, c2 FROM t1 WHERE c2 > 0
 ) AS u
 JOIN t2 KEY (c3, c4) -> u (c1, c2);
-ERROR:  foreign key join violation
-LINE 5: JOIN t2 KEY (c3, c4) -> u (c1, c2);
-                ^
-DETAIL:  referenced relation does not preserve all rows
+ c1 | c2 | c3 | c4 
+----+----+----+----
+  1 | 10 |  1 | 10
+  3 | 30 |  3 | 30
+(2 rows)
+
 SELECT *
 FROM t1
 JOIN
