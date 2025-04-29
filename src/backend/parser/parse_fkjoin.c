@@ -446,7 +446,15 @@ analyze_join_tree(ParseState *pstate, Node *n,
 									 rel->rd_rel->relkind == RELKIND_PARTITIONED_TABLE)
 							{
 								*uniqueness_preservation = list_make1(rte->rteid);
-								if (!rel->rd_rel->relrowsecurity)
+
+								/*
+								 * Check if filtered, either by RLS or
+								 * WHERE/OFFSET/LIMIT
+								 */
+								if (!rel->rd_rel->relrowsecurity &&
+									(!query || (!query->jointree->quals &&
+												!query->limitOffset &&
+												!query->limitCount)))
 									*functional_dependencies = list_make2(rte->rteid, rte->rteid);
 							}
 
