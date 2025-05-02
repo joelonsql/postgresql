@@ -40,10 +40,11 @@ static Node *build_fk_join_on_clause(ParseState *pstate,
 static Oid	find_foreign_key(Oid referencing_relid, Oid referenced_relid,
 							 List *referencing_attnums, List *referenced_attnums);
 static char *column_list_to_string(const List *columns);
-static RangeTblEntry *drill_down_to_base_rel(ParseState *pstate, RangeTblEntry *rte,
-											 List *attnos, List **base_attnums,
+static RangeTblEntry *drill_down_to_base_rel(ParseState *pstate, Query *current_query,
+											 RangeTblEntry *rte,
+											 List *attnums, List **base_attnums,
 											 int location);
-static RangeTblEntry *drill_down_to_base_rel_query(ParseState *pstate, Query *query,
+static RangeTblEntry *drill_down_to_base_rel_query(ParseState *pstate, Query *subquery,
 												   List *attnos, List **base_attnums,
 												   int location);
 static bool is_referencing_cols_unique(Oid referencing_relid, List *referencing_base_attnums);
@@ -59,12 +60,14 @@ static List *update_functional_dependencies(List *referencing_fds,
 											JoinType join_type,
 											ForeignKeyDirection fk_dir);
 static void analyze_join_tree(ParseState *pstate, Node *n,
-							  Query *query,
+							  Query *current_query,
 							  RTEId *rte_id,
 							  List **uniqueness_preservation,
 							  List **functional_dependencies,
 							  bool *found,
 							  int location);
+static CommonTableExpr *find_cte_in_query(Query *query, const char *ctename);
+static List *adjust_rteid_levelsup(List *rteids, int levelsup_offset);
 
 void
 transformAndValidateForeignKeyJoin(ParseState *pstate, JoinExpr *join,
@@ -216,11 +219,13 @@ transformAndValidateForeignKeyJoin(ParseState *pstate, JoinExpr *join,
 		referenced_attnums = lappend_int(referenced_attnums, col_index + 1);
 	}
 
-	base_referencing_rte = drill_down_to_base_rel(pstate, referencing_rte,
+	base_referencing_rte = drill_down_to_base_rel(pstate, pstate->p_query,
+												  referencing_rte,
 												  referencing_attnums,
 												  &referencing_base_attnums,
 												  fkjn->location);
-	base_referenced_rte = drill_down_to_base_rel(pstate, referenced_rte,
+	base_referenced_rte = drill_down_to_base_rel(pstate, pstate->p_query,
+												 referenced_rte,
 												 referenced_attnums,
 												 &referenced_base_attnums,
 												 fkjn->location);
@@ -248,8 +253,15 @@ transformAndValidateForeignKeyJoin(ParseState *pstate, JoinExpr *join,
 						column_list_to_string(referenced_cols)),
 				 parser_errposition(pstate, fkjn->location)));
 
-	analyze_join_tree(pstate, referencing_arg, NULL, referencing_rte->rteid, &referencing_uniqueness_preservation, &referencing_functional_dependencies, &referencing_found, fkjn->location);
-	analyze_join_tree(pstate, referenced_arg, NULL, referenced_rte->rteid, &referenced_uniqueness_preservation, &referenced_functional_dependencies, &referenced_found, fkjn->location);
+	/* Analyze join tree properties using the current query context */
+	analyze_join_tree(pstate, referencing_arg, pstate->p_query, referencing_rte->rteid,
+					  &referencing_uniqueness_preservation,
+					  &referencing_functional_dependencies,
+					  &referencing_found, fkjn->location);
+	analyze_join_tree(pstate, referenced_arg, pstate->p_query, referenced_rte->rteid,
+					  &referenced_uniqueness_preservation,
+					  &referenced_functional_dependencies,
+					  &referenced_found, fkjn->location);
 
 	/* Check uniqueness preservation */
 	if (!list_member(referenced_uniqueness_preservation, referenced_id))
@@ -309,7 +321,7 @@ transformAndValidateForeignKeyJoin(ParseState *pstate, JoinExpr *join,
 
 static void
 analyze_join_tree(ParseState *pstate, Node *n,
-				  Query *query,
+				  Query *current_query,
 				  RTEId *rte_id,
 				  List **uniqueness_preservation,
 				  List **functional_dependencies,
@@ -338,34 +350,37 @@ analyze_join_tree(ParseState *pstate, Node *n,
 			{
 				JoinExpr   *join = (JoinExpr *) n;
 				List	   *rtable;
-				Node	   *referencing_arg;
-				Node	   *referenced_arg;
+				Node	   *left_arg;
+				Node	   *right_arg;
 				RangeTblEntry *referencing_rte;
 				RangeTblEntry *referenced_rte;
 				ForeignKeyJoinNode *fkjn = castNode(ForeignKeyJoinNode, join->fkJoin);
 				bool		fk_cols_unique;
 				bool		fk_cols_not_null;
 
-				if (query)
-					rtable = query->rtable;
+				Query	   *local_query_context = current_query ? current_query : pstate->p_query;
+
+				if (local_query_context)
+					rtable = local_query_context->rtable;
 				else
 					rtable = pstate->p_rtable;
 
 				if (fkjn->fkdir == FKDIR_FROM)
 				{
-					referencing_arg = join->larg;
-					referenced_arg = join->rarg;
+					left_arg = join->larg;
+					right_arg = join->rarg;
 				}
 				else
 				{
-					referenced_arg = join->larg;
-					referencing_arg = join->rarg;
+					right_arg = join->larg;
+					left_arg = join->rarg;
 				}
 
 				referencing_rte = rt_fetch(fkjn->referencingVarno, rtable);
 				referenced_rte = rt_fetch(fkjn->referencedVarno, rtable);
 
-				analyze_join_tree(pstate, referencing_arg, query, rte_id, &referencing_uniqueness_preservation, &referencing_functional_dependencies, &referencing_found, location);
+				/* Analyze left side */
+				analyze_join_tree(pstate, left_arg, local_query_context, rte_id, &referencing_uniqueness_preservation, &referencing_functional_dependencies, &referencing_found, location);
 				if (referencing_found || equal(referencing_rte->rteid, rte_id))
 				{
 					*found = true;
@@ -374,7 +389,8 @@ analyze_join_tree(ParseState *pstate, Node *n,
 					break;
 				}
 
-				analyze_join_tree(pstate, referenced_arg, query, rte_id, &referenced_uniqueness_preservation, &referenced_functional_dependencies, &referenced_found, location);
+				/* Analyze right side */
+				analyze_join_tree(pstate, right_arg, local_query_context, rte_id, &referenced_uniqueness_preservation, &referenced_functional_dependencies, &referenced_found, location);
 				if (referenced_found || equal(referenced_rte->rteid, rte_id))
 				{
 					*found = true;
@@ -383,11 +399,14 @@ analyze_join_tree(ParseState *pstate, Node *n,
 					break;
 				}
 
-				base_referencing_rte = drill_down_to_base_rel(pstate, referencing_rte,
+				/* Drill down to base relations using the current query context */
+				base_referencing_rte = drill_down_to_base_rel(pstate, local_query_context,
+															  referencing_rte,
 															  fkjn->referencingAttnums,
 															  &referencing_base_attnums,
 															  location);
-				base_referenced_rte = drill_down_to_base_rel(pstate, referenced_rte,
+				base_referenced_rte = drill_down_to_base_rel(pstate, local_query_context,
+															 referenced_rte,
 															 fkjn->referencedAttnums,
 															 &referenced_base_attnums,
 															 location);
@@ -421,10 +440,13 @@ analyze_join_tree(ParseState *pstate, Node *n,
 			{
 				RangeTblRef *rtr = (RangeTblRef *) n;
 				int			rtindex = rtr->rtindex;
+				bool		cte_found_locally = false;
+				Index		cte_levelsup = 0;
+				Query	   *local_query_context = current_query ? current_query : pstate->p_query;
 
 				/* Use the appropriate range table for lookups */
-				if (query)
-					rte = rt_fetch(rtindex, query->rtable);
+				if (local_query_context)
+					rte = rt_fetch(rtindex, local_query_context->rtable);
 				else
 					rte = rt_fetch(rtindex, pstate->p_rtable);
 
@@ -452,16 +474,26 @@ analyze_join_tree(ParseState *pstate, Node *n,
 								 * WHERE/OFFSET/LIMIT
 								 */
 								if (!rel->rd_rel->relrowsecurity &&
-									(!query || (!query->jointree->quals &&
-												!query->limitOffset &&
-												!query->limitCount)))
+									(!local_query_context || (!local_query_context->jointree->quals &&
+															   !local_query_context->limitOffset &&
+															   !local_query_context->limitCount)))
 									*functional_dependencies = list_make2(rte->rteid, rte->rteid);
 							}
 
 							/* Close the relation */
 							table_close(rel, AccessShareLock);
+
+							/* If this base relation matches the target, mark found */
+							if (!*found && equal(rte->rteid, rte_id))
+							{
+								*found = true;
+								/* Properties already assigned above */
+							}
+
+							/* Prevent falling through to common inner_query handling */
+							inner_query = NULL;
+							break;
 						}
-						break;
 
 					case RTE_SUBQUERY:
 						inner_query = rte->subquery;
@@ -469,11 +501,26 @@ analyze_join_tree(ParseState *pstate, Node *n,
 
 					case RTE_CTE:
 						{
-							Index		levelsup;
-							CommonTableExpr *cte;
+							CommonTableExpr *cte = NULL;
 
-							/* Find the CTE */
-							cte = scanNameSpaceForCTE(pstate, rte->ctename, &levelsup);
+							/* First, try the local query context */
+							if (local_query_context)
+							{
+								cte = find_cte_in_query(local_query_context, rte->ctename);
+								if (cte)
+									cte_found_locally = true;
+							}
+
+							/* If not found locally, search upwards using pstate */
+							if (!cte)
+								cte = scanNameSpaceForCTE(pstate, rte->ctename, &cte_levelsup);
+
+							/* If still not found, it's an error */
+							if (!cte)
+								ereport(ERROR,
+										(errcode(ERRCODE_UNDEFINED_TABLE), /* Or internal error? */
+										 errmsg("could not find CTE definition for \"%s\"", rte->ctename),
+										 parser_errposition(pstate, location)));
 
 							if (cte && !cte->cterecursive && IsA(cte->ctequery, Query))
 							{
@@ -490,21 +537,71 @@ analyze_join_tree(ParseState *pstate, Node *n,
 						break;
 				}
 
-				/* Common path for processing any inner query */
+				/* Common path for processing inner query (from VIEW, SUBQUERY, CTE) */
 				if (inner_query != NULL)
 				{
-					/*
-					 * Traverse the inner query if it has a single fromlist
-					 * item
-					 */
+					List *inner_uniqueness = NIL;
+					List *inner_fds = NIL;
+					bool inner_found = false; /* Track if rte_id was found inside */
+
+					/* Traverse the inner query if it has a single fromlist item */
 					if (inner_query->jointree && inner_query->jointree->fromlist &&
 						list_length(inner_query->jointree->fromlist) == 1)
 					{
 						analyze_join_tree(pstate,
 										  (Node *) linitial(inner_query->jointree->fromlist),
-										  inner_query, rte_id, uniqueness_preservation, functional_dependencies, found, location);
+										  inner_query, /* Pass inner query as new context */
+										  rte_id,
+										  &inner_uniqueness, /* Collect results */
+										  &inner_fds,
+										  &inner_found,
+										  location);
+
+						/* If the target RTE was found inside, propagate results */
+						if (inner_found)
+						{
+							*found = true;
+							/* Adjust levelsup if CTE was found via scanNameSpaceForCTE */
+							if (rte->rtekind == RTE_CTE && !cte_found_locally)
+							{
+								*uniqueness_preservation = adjust_rteid_levelsup(inner_uniqueness, cte_levelsup);
+								*functional_dependencies = adjust_rteid_levelsup(inner_fds, cte_levelsup);
+								/* Free the original lists returned by the recursive call */
+								list_free_deep(inner_uniqueness);
+								list_free_deep(inner_fds);
+							}
+							else /* Subquery, View or locally found CTE */
+							{
+								/*
+								 * Assign directly. The lists are already copies or
+								 * fresh lists from the recursive call or helper.
+								 */
+								*uniqueness_preservation = inner_uniqueness;
+								*functional_dependencies = inner_fds;
+							}
+						}
+						else
+						{
+							/* Target not found in this branch, free temporary lists */
+							list_free_deep(inner_uniqueness);
+							list_free_deep(inner_fds);
+						}
+					}
+					else
+					{
+						/*
+						 * Cannot analyze complex inner queries (e.g., joins,
+						 * multiple FROM items) yet. Properties cannot be determined.
+						 * Free lists if they were somehow allocated.
+						 */
+						list_free_deep(inner_uniqueness);
+						list_free_deep(inner_fds);
 					}
 				}
+
+				/* If target found (either base rel or via recursion), break out */
+				if (*found)
+					break;
 			}
 			break;
 
@@ -655,6 +752,30 @@ find_foreign_key(Oid referencing_relid, Oid referenced_relid,
 	return fkoid;
 }
 
+/*
+ * find_cte_in_query
+ *      Finds a CommonTableExpr definition within a specific Query's cteList.
+ */
+static CommonTableExpr *
+find_cte_in_query(Query *query, const char *ctename)
+{
+	ListCell   *lc;
+
+	/* Handle cases where the query or cteList might be NULL */
+	if (!query || !query->cteList)
+		return NULL;
+
+	foreach(lc, query->cteList)
+	{
+		CommonTableExpr *cte = (CommonTableExpr *) lfirst(lc);
+
+		if (strcmp(cte->ctename, ctename) == 0)
+			return cte;
+	}
+
+	/* CTE not found in this query level's list */
+	return NULL;
+}
 
 /*
  * column_list_to_string
@@ -689,7 +810,8 @@ column_list_to_string(const List *columns)
  *		Resolves the base relation from a potentially derived relation
  */
 static RangeTblEntry *
-drill_down_to_base_rel(ParseState *pstate, RangeTblEntry *rte,
+drill_down_to_base_rel(ParseState *pstate, Query *current_query,
+					   RangeTblEntry *rte,
 					   List *attnums, List **base_attnums,
 					   int location)
 {
@@ -737,10 +859,24 @@ drill_down_to_base_rel(ParseState *pstate, RangeTblEntry *rte,
 
 		case RTE_CTE:
 			{
-				Index		levelsup;
-				CommonTableExpr *cte = scanNameSpaceForCTE(pstate, rte->ctename, &levelsup);
+				/* Look for the CTE definition in the current query's cteList */
+				CommonTableExpr *cte = NULL;
+				Index		levelsup = 0; /* For scanNameSpaceForCTE */
 
-				Assert(cte != NULL);
+				/* First, try the local query context */
+				if (current_query)
+					cte = find_cte_in_query(current_query, rte->ctename);
+
+				/* If not found locally, search upwards using pstate */
+				if (!cte)
+					cte = scanNameSpaceForCTE(pstate, rte->ctename, &levelsup);
+
+				/* If still not found, it's an error */
+				if (!cte)
+					ereport(ERROR,
+							(errcode(ERRCODE_UNDEFINED_TABLE), /* Or internal error? */
+							 errmsg("could not find CTE definition for \"%s\"", rte->ctename),
+							 parser_errposition(pstate, location)));
 
 				if (cte->cterecursive)
 					ereport(ERROR,
@@ -792,7 +928,8 @@ drill_down_to_base_rel(ParseState *pstate, RangeTblEntry *rte,
 				Assert(next_rtindex != 0);
 
 				base_rte = drill_down_to_base_rel(pstate,
-												  rt_fetch(next_rtindex, pstate->p_rtable),
+												  current_query,
+												  rt_fetch(next_rtindex, current_query->rtable),
 												  next_attnums,
 												  base_attnums,
 												  location);
@@ -815,7 +952,7 @@ drill_down_to_base_rel(ParseState *pstate, RangeTblEntry *rte,
  *		Resolves the base relation from a query
  */
 static RangeTblEntry *
-drill_down_to_base_rel_query(ParseState *pstate, Query *query,
+drill_down_to_base_rel_query(ParseState *pstate, Query *subquery,
 							 List *attnums, List **base_attnums,
 							 int location)
 {
@@ -823,19 +960,19 @@ drill_down_to_base_rel_query(ParseState *pstate, Query *query,
 	List	   *next_attnums = NIL;
 	ListCell   *lc;
 
-	if (query->setOperations != NULL)
+	if (subquery->setOperations != NULL)
 		ereport(ERROR,
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 				 errmsg("foreign key joins involving set operations are not supported"),
 				 parser_errposition(pstate, location)));
 
 	/* XXX: Overly aggressive disallowing */
-	if (query->commandType != CMD_SELECT ||
-		query->groupClause ||
-		query->distinctClause ||
-		query->groupingSets ||
-		query->hasTargetSRFs ||
-		query->havingQual)
+	if (subquery->commandType != CMD_SELECT ||
+		subquery->groupClause ||
+		subquery->distinctClause ||
+		subquery->groupingSets ||
+		subquery->hasTargetSRFs ||
+		subquery->havingQual)
 		ereport(ERROR,
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 				 errmsg("foreign key joins not supported for these relations"),
@@ -847,7 +984,7 @@ drill_down_to_base_rel_query(ParseState *pstate, Query *query,
 		TargetEntry *matching_tle;
 		Var		   *var;
 
-		matching_tle = list_nth(query->targetList, attno - 1);
+		matching_tle = list_nth(subquery->targetList, attno - 1);
 
 		if (!IsA(matching_tle->expr, Var))
 			ereport(ERROR,
@@ -873,7 +1010,8 @@ drill_down_to_base_rel_query(ParseState *pstate, Query *query,
 
 	Assert(next_rtindex != 0);
 
-	return drill_down_to_base_rel(pstate, rt_fetch(next_rtindex, query->rtable), next_attnums,
+	return drill_down_to_base_rel(pstate, subquery,
+								  rt_fetch(next_rtindex, subquery->rtable), next_attnums,
 								  base_attnums, location);
 }
 
@@ -1231,4 +1369,31 @@ update_functional_dependencies(List *referencing_fds,
 	}
 
 	return result;
+}
+
+/*
+ * adjust_rteid_levelsup
+ *      Create a new list of RTEIds with sublevelsup adjusted by an offset.
+ *
+ * Note: Does not free the input list.
+ */
+static List *
+adjust_rteid_levelsup(List *rteids, int levelsup_offset)
+{
+	List	   *new_list = NIL;
+	ListCell   *lc;
+
+	if (levelsup_offset == 0)
+		return list_copy(rteids); /* No adjustment needed, but must copy */
+
+	foreach(lc, rteids)
+	{
+		RTEId	   *orig_id = (RTEId *) lfirst(lc);
+		RTEId	   *new_id = makeNode(RTEId);
+
+		new_id->rtindex = orig_id->rtindex;
+		new_id->sublevelsup = orig_id->sublevelsup + levelsup_offset;
+		new_list = lappend(new_list, new_id);
+	}
+	return new_list;
 }
