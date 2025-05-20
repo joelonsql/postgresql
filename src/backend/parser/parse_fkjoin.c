@@ -41,12 +41,12 @@ static Oid	find_foreign_key(Oid referencing_relid, Oid referenced_relid,
 							 List *referencing_attnums, List *referenced_attnums);
 static char *column_list_to_string(const List *columns);
 static RangeTblEntry *drill_down_to_base_rel(ParseState *pstate, Query *query,
-                                           RangeTblEntry *rte,
+											 RangeTblEntry *rte,
 
-                                           List *attnos, List **base_attnums,
-                                           int location);
+											 List *attnos, List **base_attnums,
+											 int location);
 static CommonTableExpr *find_cte_for_rte(ParseState *pstate, Query *query,
-                                                                          RangeTblEntry *rte);
+										 RangeTblEntry *rte);
 static RangeTblEntry *drill_down_to_base_rel_query(ParseState *pstate, Query *query,
 												   List *attnos, List **base_attnums,
 												   int location);
@@ -472,17 +472,17 @@ analyze_join_tree(ParseState *pstate, Node *n,
 						break;
 
 					case RTE_CTE:
-					{
-						CommonTableExpr *cte;
+						{
+							CommonTableExpr *cte;
 
-						cte = find_cte_for_rte(pstate, query, rte);
-						if (!cte)
-							elog(ERROR, "could not find CTE \"%s\"", rte->ctename);
+							cte = find_cte_for_rte(pstate, query, rte);
+							if (!cte)
+								elog(ERROR, "could not find CTE \"%s\"", rte->ctename);
 
-						if (!cte->cterecursive && IsA(cte->ctequery, Query))
-							inner_query = (Query *) cte->ctequery;
-					}
-					break;
+							if (!cte->cterecursive && IsA(cte->ctequery, Query))
+								inner_query = (Query *) cte->ctequery;
+						}
+						break;
 
 					default:
 						ereport(ERROR,
@@ -683,7 +683,7 @@ column_list_to_string(const List *columns)
 		first = false;
 	}
 
-       return string.data;
+	return string.data;
 }
 
 /*
@@ -694,32 +694,32 @@ column_list_to_string(const List *columns)
 static CommonTableExpr *
 find_cte_for_rte(ParseState *pstate, Query *query, RangeTblEntry *rte)
 {
-        ListCell   *lc;
-        Index           levelsup;
+	ListCell   *lc;
+	Index		levelsup;
 
-        Assert(rte->rtekind == RTE_CTE);
+	Assert(rte->rtekind == RTE_CTE);
 
-        if (query != NULL && rte->ctelevelsup == 0)
-        {
-                foreach(lc, query->cteList)
-                {
-                        CommonTableExpr *cte = (CommonTableExpr *) lfirst(lc);
+	if (query != NULL && rte->ctelevelsup == 0)
+	{
+		foreach(lc, query->cteList)
+		{
+			CommonTableExpr *cte = (CommonTableExpr *) lfirst(lc);
 
-                        if (strcmp(cte->ctename, rte->ctename) == 0)
-                                return cte;
-                }
-        }
+			if (strcmp(cte->ctename, rte->ctename) == 0)
+				return cte;
+		}
+	}
 
-        if (pstate != NULL)
-        {
-                CommonTableExpr *cte = scanNameSpaceForCTE(pstate, rte->ctename,
-                                                                                         &levelsup);
+	if (pstate != NULL)
+	{
+		CommonTableExpr *cte = scanNameSpaceForCTE(pstate, rte->ctename,
+												   &levelsup);
 
-                if (cte && levelsup == rte->ctelevelsup)
-                        return cte;
-        }
+		if (cte && levelsup == rte->ctelevelsup)
+			return cte;
+	}
 
-        return NULL;
+	return NULL;
 }
 
 /*
@@ -788,10 +788,10 @@ drill_down_to_base_rel(ParseState *pstate, Query *query, RangeTblEntry *rte,
 							 parser_errposition(pstate, location)));
 
 				base_rte = drill_down_to_base_rel_query(pstate,
-							 castNode(Query, cte->ctequery),
-							 attnums,
-							 base_attnums,
-							 location);
+														castNode(Query, cte->ctequery),
+														attnums,
+														base_attnums,
+														location);
 			}
 			break;
 
@@ -831,7 +831,7 @@ drill_down_to_base_rel(ParseState *pstate, Query *query, RangeTblEntry *rte,
 				Assert(next_rtindex != 0);
 
 				base_rte = drill_down_to_base_rel(pstate, query,
-                                             rt_fetch(next_rtindex, (query ? query->rtable : pstate->p_rtable)),
+												  rt_fetch(next_rtindex, (query ? query->rtable : pstate->p_rtable)),
 												  next_attnums,
 												  base_attnums,
 												  location);
