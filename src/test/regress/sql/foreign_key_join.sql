@@ -950,3 +950,11 @@ SELECT * FROM t1 JOIN pt2_1 KEY (c3) -> t1 (c1);
 
 DROP TABLE pt3;
 DROP TABLE pt2;
+
+SELECT *
+FROM (SELECT * FROM (SELECT c1, c2 FROM t1) AS q1(q1_c1, q1_c2)) q
+JOIN t2 KEY (c3, c4) -> q (q1_c1, q1_c2);
+-- equivalent to:
+SELECT *
+FROM (WITH q1 (q1_c1, q1_c2) AS (SELECT c1, c2 FROM t1) SELECT * FROM q1) q
+JOIN t2 KEY (c3, c4) -> q (q1_c1, q1_c2);
