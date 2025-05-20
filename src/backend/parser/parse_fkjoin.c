@@ -42,7 +42,9 @@ static Oid	find_foreign_key(Oid referencing_relid, Oid referenced_relid,
 static char *column_list_to_string(const List *columns);
 static RangeTblEntry *drill_down_to_base_rel(ParseState *pstate, RangeTblEntry *rte,
 											 List *attnos, List **base_attnums,
-											 int location);
+  int location);
+static CommonTableExpr *find_cte_for_rte(ParseState *pstate, Query *query,
+                                                                          RangeTblEntry *rte);
 static RangeTblEntry *drill_down_to_base_rel_query(ParseState *pstate, Query *query,
 												   List *attnos, List **base_attnums,
 												   int location);
@@ -468,19 +470,17 @@ analyze_join_tree(ParseState *pstate, Node *n,
 						break;
 
 					case RTE_CTE:
-						{
-							Index		levelsup;
-							CommonTableExpr *cte;
+					{
+						CommonTableExpr *cte;
 
-							/* Find the CTE */
-							cte = scanNameSpaceForCTE(pstate, rte->ctename, &levelsup);
+						cte = find_cte_for_rte(pstate, query, rte);
+						if (!cte)
+							elog(ERROR, "could not find CTE \"%s\"", rte->ctename);
 
-							if (cte && !cte->cterecursive && IsA(cte->ctequery, Query))
-							{
-								inner_query = (Query *) cte->ctequery;
-							}
-						}
-						break;
+						if (!cte->cterecursive && IsA(cte->ctequery, Query))
+							inner_query = (Query *) cte->ctequery;
+					}
+					break;
 
 					default:
 						ereport(ERROR,
@@ -681,7 +681,43 @@ column_list_to_string(const List *columns)
 		first = false;
 	}
 
-	return string.data;
+       return string.data;
+}
+
+/*
+ * find_cte_for_rte
+ *              Locate the CTE referenced by an RTE either in the supplied Query
+ *              or, failing that, in the ParseState's CTE namespace.
+ */
+static CommonTableExpr *
+find_cte_for_rte(ParseState *pstate, Query *query, RangeTblEntry *rte)
+{
+        ListCell   *lc;
+        Index           levelsup;
+
+        Assert(rte->rtekind == RTE_CTE);
+
+        if (query != NULL && rte->ctelevelsup == 0)
+        {
+                foreach(lc, query->cteList)
+                {
+                        CommonTableExpr *cte = (CommonTableExpr *) lfirst(lc);
+
+                        if (strcmp(cte->ctename, rte->ctename) == 0)
+                                return cte;
+                }
+        }
+
+        if (pstate != NULL)
+        {
+                CommonTableExpr *cte = scanNameSpaceForCTE(pstate, rte->ctename,
+                                                                                         &levelsup);
+
+                if (cte && levelsup == rte->ctelevelsup)
+                        return cte;
+        }
+
+        return NULL;
 }
 
 /*
@@ -737,10 +773,11 @@ drill_down_to_base_rel(ParseState *pstate, RangeTblEntry *rte,
 
 		case RTE_CTE:
 			{
-				Index		levelsup;
-				CommonTableExpr *cte = scanNameSpaceForCTE(pstate, rte->ctename, &levelsup);
+				CommonTableExpr *cte;
 
-				Assert(cte != NULL);
+				cte = find_cte_for_rte(pstate, NULL, rte);
+				if (!cte)
+					elog(ERROR, "could not find CTE \"%s\"", rte->ctename);
 
 				if (cte->cterecursive)
 					ereport(ERROR,
@@ -749,10 +786,10 @@ drill_down_to_base_rel(ParseState *pstate, RangeTblEntry *rte,
 							 parser_errposition(pstate, location)));
 
 				base_rte = drill_down_to_base_rel_query(pstate,
-														castNode(Query, cte->ctequery),
-														attnums,
-														base_attnums,
-														location);
+							 castNode(Query, cte->ctequery),
+							 attnums,
+							 base_attnums,
+							 location);
 			}
 			break;
 
