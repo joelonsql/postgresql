@@ -11,6 +11,8 @@
 # required setup steps
 test: test_setup
 
+test: foreign_key_join_cte
+
 # ----------
 # The first group of parallel tests
 # ----------
