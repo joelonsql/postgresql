@@ -1672,6 +1672,11 @@ CREATE DATABASE foo WITH TEMPLATE template0;
   </para>
 
   <para>
+   Objects manually added to extension tables (such as indexes or constraints)
+   are not preserved by <application>pg_dump</application>.
+  </para>
+
+  <para>
    When a dump without schema is chosen and the option <option>--disable-triggers</option>
    is used, <application>pg_dump</application> emits commands
    to disable triggers on user tables before inserting the data,

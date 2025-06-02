@@ -610,7 +610,12 @@ RETURNS anycompatible AS ...
     such objects, if it does so they will not be tracked as part of the
     extension.)  Also notice that while a table can be a member of an
     extension, its subsidiary objects such as indexes are not directly
-    considered members of the extension.
+    considered members of the extension. Consequently, such objects added
+    manually to extension tables will not be preserved by
+    <application>pg_dump</application>.
+   </para>
+
+   <para>
     Another important point is that schemas can belong to extensions, but not
     vice versa: an extension as such has an unqualified name and does not
     exist <quote>within</quote> any schema.  The extension's member objects,
