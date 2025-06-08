@@ -107,9 +107,34 @@ INSERT INTO t7 (c15, c16, c17, c18, c19, c20, c21, c22) VALUES
 (17, 18, 80, 81, 700, 701, 950, 951),
 (19, 20, 90, 91, 500, 501, 800, 801);
 
+--
+-- Example 1
+--
+WITH topcte AS
+(
+    SELECT * FROM t4 JOIN t2 KEY (c3) <- t4 (c8)
+)
 SELECT * FROM
 (
-    WITH t7_cte (t7_c15, t7_c16, t7_c17, t7_c18, t7_c19, t7_c20, t7_c21, t7_c22) AS (SELECT c15, c16, c17, c18, c19, c20, c21, c22 FROM t7)
+    SELECT *
+    FROM topcte
+    JOIN t7 KEY (c17, c18) -> topcte (c6, c7)
+);
+
+--
+-- Example 2
+--
+SELECT * FROM
+(
+    WITH
+    t7_cte (t7_c15, t7_c16, t7_c17, t7_c18, t7_c19, t7_c20, t7_c21, t7_c22) AS
+    (
+        SELECT c15, c16, c17, c18, c19, c20, c21, c22 FROM t7
+    ),
+    t2_cte AS
+    (
+        SELECT * FROM t2
+    )
     SELECT
         t7_cte.t7_c15,
         t7_cte.t7_c16,
@@ -120,7 +145,7 @@ SELECT * FROM
     JOIN
     (
         WITH t4_cte (t4_c6, t4_c7, t4_c8, t4_c9, t4_c10) AS (SELECT c6, c7, c8, c9, c10 FROM t4)
-        SELECT * FROM t4_cte
+        SELECT * FROM t4_cte JOIN t2_cte KEY (c3) <- t4_cte (t4_c8)
     ) AS t4_q KEY (t4_c6, t4_c7) <- t7_cte (t7_c17, t7_c18)
     JOIN
     (
@@ -159,6 +184,7 @@ SELECT * FROM
     JOIN
     (
         SELECT * FROM (SELECT c6, c7, c8, c9, c10 FROM t4) AS t4_cte (t4_c6, t4_c7, t4_c8, t4_c9, t4_c10)
+        JOIN (SELECT * FROM t2) AS t2_cte KEY (c3) <- t4_cte (t4_c8)
     ) AS t4_q KEY (t4_c6, t4_c7) <- t7_cte (t7_c17, t7_c18)
     JOIN
     (
