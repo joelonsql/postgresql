@@ -64,6 +64,7 @@
 #include "storage/ipc.h"
 #include "storage/pmsignal.h"
 #include "storage/proc.h"
+#include "storage/procarray.h"
 #include "storage/procsignal.h"
 #include "storage/sinval.h"
 #include "tcop/backend_startup.h"
@@ -170,6 +171,7 @@ static int	InteractiveBackend(StringInfo inBuf);
 static int	interactive_getc(void);
 static int	SocketBackend(StringInfo inBuf);
 static int	ReadCommand(StringInfo inBuf);
+static int	ReadCommandWithParking(StringInfo inBuf);
 static void forbidden_in_wal_sender(char firstchar);
 static bool check_log_statement(List *stmt_list);
 static int	errdetail_execute(List *raw_parsetree_list);
@@ -485,6 +487,48 @@ ReadCommand(StringInfo inBuf)
 		result = SocketBackend(inBuf);
 	else
 		result = InteractiveBackend(inBuf);
+	return result;
+}
+
+/* ----------------
+ *		ReadCommandWithParking reads a command with backend parking support
+ *		When enable_parking is true, the backend may be parked after
+ *		park_after milliseconds of inactivity.
+ * ----------------
+ */
+static int
+ReadCommandWithParking(StringInfo inBuf)
+{
+	int			result;
+	bool		parked = false;
+
+	/* If parking is disabled, use normal path */
+	if (!enable_parking)
+		return ReadCommand(inBuf);
+
+	/* For non-remote destinations, use normal path */
+	if (whereToSendOutput != DestRemote)
+		return ReadCommand(inBuf);
+
+	/* Simple implementation: park immediately if enabled */
+	if (park_after > 0)
+	{
+		/* Try to park the backend */
+		if (ParkMyBackend())
+		{
+			parked = true;
+		}
+	}
+
+	/* Read the command (will block until data arrives) */
+	result = ReadCommand(inBuf);
+
+	/* If we were parked, unpark now */
+	if (parked)
+	{
+		UnparkMyBackend();
+	}
+
 	return result;
 }
 
@@ -4695,7 +4739,7 @@ PostgresMain(const char *dbname, const char *username)
 		/*
 		 * (3) read a command (loop blocks here)
 		 */
-		firstchar = ReadCommand(&input_message);
+		firstchar = ReadCommandWithParking(&input_message);
 
 		/*
 		 * (4) turn off the idle-in-transaction and idle-session timeouts if

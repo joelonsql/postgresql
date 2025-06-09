@@ -12556,4 +12556,8 @@
   proargnames => '{pid,io_id,io_generation,state,operation,off,length,target,handle_data_len,raw_result,result,target_desc,f_sync,f_localmem,f_buffered}',
   prosrc => 'pg_get_aios' },
 
+{ oid => '9300', descr => 'park the current backend',
+  proname => 'pg_park', prorettype => 'bool', proargtypes => '',
+  prosrc => 'pg_park' },
+
 ]

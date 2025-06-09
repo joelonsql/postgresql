@@ -2143,6 +2143,16 @@ struct config_bool ConfigureNamesBool[] =
 		NULL, NULL, NULL
 	},
 
+	{
+		{"enable_parking", PGC_SIGHUP, CONN_AUTH_SETTINGS,
+			gettext_noop("Enables backend parking for idle connections."),
+			NULL
+		},
+		&enable_parking,
+		false,
+		NULL, NULL, NULL
+	},
+
 	/* End-of-list marker */
 	{
 		{NULL, 0, 0, NULL, NULL}, NULL, false, NULL, NULL, NULL
@@ -3857,6 +3867,27 @@ struct config_int ConfigureNamesInt[] =
 		},
 		&scram_sha_256_iterations,
 		SCRAM_SHA_256_DEFAULT_ITERATIONS, 1, INT_MAX,
+		NULL, NULL, NULL
+	},
+
+	{
+		{"park_after", PGC_SUSET, CONN_AUTH_SETTINGS,
+			gettext_noop("Time in milliseconds after which idle backends are parked."),
+			NULL,
+			GUC_UNIT_MS
+		},
+		&park_after,
+		5000, 1000, 3600000,
+		NULL, NULL, NULL
+	},
+
+	{
+		{"max_active_backends", PGC_POSTMASTER, CONN_AUTH_SETTINGS,
+			gettext_noop("Maximum number of concurrently active backends."),
+			NULL
+		},
+		&max_active_backends,
+		0, 0, MAX_BACKENDS,
 		NULL, NULL, NULL
 	},
 

@@ -1,0 +1,19 @@
+--
+-- Test backend parking functionality
+--
+-- Test pg_park function exists and can be called
+SELECT pg_park();
+ pg_park 
+---------
+ f
+(1 row)
+
+-- Test that we can still execute queries after pg_park
+SELECT 1 as test_after_park;
+ test_after_park 
+-----------------
+               1
+(1 row)
+
+-- Test parking with different configurations
+-- (These would need enable_parking to be on for full testing)

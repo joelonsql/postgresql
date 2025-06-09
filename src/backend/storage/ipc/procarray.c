@@ -61,8 +61,10 @@
 #include "storage/proc.h"
 #include "storage/procarray.h"
 #include "utils/acl.h"
+#include "utils/backend_status.h"
 #include "utils/builtins.h"
 #include "utils/rel.h"
+#include "utils/resowner.h"
 #include "utils/snapmgr.h"
 
 #define UINT32_ACCESS_ONCE(var)		 ((uint32)(*((volatile uint32 *)&(var))))
@@ -94,6 +96,11 @@ typedef struct ProcArrayStruct
 	TransactionId replication_slot_xmin;
 	/* oldest catalog xmin of any replication slot */
 	TransactionId replication_slot_catalog_xmin;
+
+	/* Backend parking: dual linked lists for active vs parked backends */
+	PGPROC	   *activeProcs;		/* head of active singly-linked list */
+	PGPROC	   *parkedProcs;		/* head of parked singly-linked list */
+	int			numActiveProcs;		/* number of active backends */
 
 	/* indexes into allProcs[], has PROCARRAY_MAXPROCS entries */
 	int			pgprocnos[FLEXIBLE_ARRAY_MEMBER];
@@ -369,6 +376,11 @@ static inline FullTransactionId FullXidRelativeTo(FullTransactionId rel,
 												  TransactionId xid);
 static void GlobalVisUpdateApply(ComputeXidHorizonsResult *horizons);
 
+/* Backend parking helper functions */
+static inline void LinkIntoActiveList(ProcArrayStruct *array, PGPROC *proc);
+static inline void LinkIntoParkedList(ProcArrayStruct *array, PGPROC *proc);
+static void RemoveFromParkingLists(ProcArrayStruct *array, PGPROC *proc);
+
 /*
  * Report shared-memory space needed by ProcArrayShmemInit
  */
@@ -441,6 +453,9 @@ ProcArrayShmemInit(void)
 		procArray->lastOverflowedXid = InvalidTransactionId;
 		procArray->replication_slot_xmin = InvalidTransactionId;
 		procArray->replication_slot_catalog_xmin = InvalidTransactionId;
+		procArray->activeProcs = NULL;
+		procArray->parkedProcs = NULL;
+		procArray->numActiveProcs = 0;
 		TransamVariables->xactCompletionCount = 1;
 	}
 
@@ -529,6 +544,10 @@ ProcArrayAdd(PGPROC *proc)
 	ProcGlobal->subxidStates[index] = proc->subxidStatus;
 	ProcGlobal->statusFlags[index] = proc->statusFlags;
 
+	/* Initialize parking fields and add to active list */
+	proc->parkingNext = NULL;
+	LinkIntoActiveList(arrayP, proc);
+
 	arrayP->numProcs++;
 
 	/* adjust pgxactoff for all following PGPROCs */
@@ -608,6 +627,9 @@ ProcArrayRemove(PGPROC *proc, TransactionId latestXid)
 	Assert(ProcGlobal->subxidStates[myoff].overflowed == false);
 
 	ProcGlobal->statusFlags[myoff] = 0;
+
+	/* Remove proc from parking lists */
+	RemoveFromParkingLists(arrayP, proc);
 
 	/* Keep the PGPROC array sorted. See notes above */
 	movecount = arrayP->numProcs - myoff - 1;
@@ -5264,4 +5286,157 @@ KnownAssignedXidsReset(void)
 	pArray->headKnownAssignedXids = 0;
 
 	LWLockRelease(ProcArrayLock);
+}
+
+/*
+ * LinkIntoActiveList
+ *		Add proc to the head of the active procs list
+ */
+static inline void
+LinkIntoActiveList(ProcArrayStruct *array, PGPROC *proc)
+{
+	proc->parkingNext = array->activeProcs;
+	array->activeProcs = proc;
+	array->numActiveProcs++;
+	proc->backend_state = PROC_STATE_ACTIVE;
+}
+
+/*
+ * LinkIntoParkedList
+ *		Add proc to the head of the parked procs list
+ */
+static inline void
+LinkIntoParkedList(ProcArrayStruct *array, PGPROC *proc)
+{
+	proc->parkingNext = array->parkedProcs;
+	array->parkedProcs = proc;
+	proc->backend_state = PROC_STATE_PARKED;
+}
+
+/*
+ * RemoveFromParkingLists
+ *		Remove proc from active or parked list
+ */
+static void
+RemoveFromParkingLists(ProcArrayStruct *array, PGPROC *proc)
+{
+	PGPROC	   *curr;
+	PGPROC	   *prev;
+
+	/* Remove from active list */
+	if (proc->backend_state == PROC_STATE_ACTIVE)
+	{
+		if (array->activeProcs == proc)
+		{
+			array->activeProcs = proc->parkingNext;
+			array->numActiveProcs--;
+		}
+		else
+		{
+			prev = NULL;
+			for (curr = array->activeProcs; curr; curr = curr->parkingNext)
+			{
+				if (curr == proc)
+				{
+					if (prev)
+						prev->parkingNext = curr->parkingNext;
+					array->numActiveProcs--;
+					break;
+				}
+				prev = curr;
+			}
+		}
+	}
+	/* Remove from parked list */
+	else if (proc->backend_state == PROC_STATE_PARKED)
+	{
+		if (array->parkedProcs == proc)
+		{
+			array->parkedProcs = proc->parkingNext;
+		}
+		else
+		{
+			prev = NULL;
+			for (curr = array->parkedProcs; curr; curr = curr->parkingNext)
+			{
+				if (curr == proc)
+				{
+					if (prev)
+						prev->parkingNext = curr->parkingNext;
+					break;
+				}
+				prev = curr;
+			}
+		}
+	}
+
+	proc->parkingNext = NULL;
+	proc->backend_state = PROC_STATE_ACTIVE;
+}
+
+/*
+ * ParkMyBackend
+ *		Park the current backend, removing it from critical shared structures
+ *
+ * Returns true if successfully parked, false if parking was vetoed.
+ */
+bool
+ParkMyBackend(void)
+{
+	ProcArrayStruct *arrayP = procArray;
+
+	/* Safety checks */
+	if (IsTransactionState())
+		ereport(ERROR,
+				(errcode(ERRCODE_ACTIVE_SQL_TRANSACTION),
+				 errmsg("cannot park while a transaction is active")));
+
+	/* Check if any extension wants to veto parking */
+	if (parking_hook && !parking_hook())
+		return false;
+
+	/* Acquire exclusive lock on ProcArray */
+	LWLockAcquire(ProcArrayLock, LW_EXCLUSIVE);
+
+	/* Move from active to parked list */
+	RemoveFromParkingLists(arrayP, MyProc);
+	LinkIntoParkedList(arrayP, MyProc);
+
+	LWLockRelease(ProcArrayLock);
+
+	/* Release resources for parking (placeholder for future implementation) */
+	/* TODO: ResourceOwnerReleaseAll(RESOURCE_RELEASE_PARK); */
+
+	/* Report parked state to stats collector */
+	pgstat_report_activity(STATE_PARKED, NULL);
+
+	return true;
+}
+
+/*
+ * UnparkMyBackend
+ *		Unpark the current backend, adding it back to active structures
+ */
+void
+UnparkMyBackend(void)
+{
+	ProcArrayStruct *arrayP = procArray;
+
+	/* Only unpark if we're actually parked */
+	if (MyProc->backend_state != PROC_STATE_PARKED)
+		return;
+
+	/* Acquire exclusive lock on ProcArray */
+	LWLockAcquire(ProcArrayLock, LW_EXCLUSIVE);
+
+	/* Move from parked to active list */
+	RemoveFromParkingLists(arrayP, MyProc);
+	LinkIntoActiveList(arrayP, MyProc);
+
+	LWLockRelease(ProcArrayLock);
+
+	/* TODO: RebuildTopTransactionContext(); */
+
+	/* Report active state to stats collector */
+	pgstat_report_activity(STATE_IDLE, NULL);
 }

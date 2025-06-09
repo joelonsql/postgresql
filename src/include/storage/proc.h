@@ -134,6 +134,12 @@ extern PGDLLIMPORT int FastPathLockGroupsPerBackend;
 #define DELAY_CHKPT_START		(1<<0)
 #define DELAY_CHKPT_COMPLETE	(1<<1)
 
+/*
+ * Backend parking states
+ */
+#define PROC_STATE_ACTIVE		0
+#define PROC_STATE_PARKED		1
+
 typedef enum
 {
 	PROC_WAIT_STATUS_OK,
@@ -319,9 +325,24 @@ struct PGPROC
 	PGPROC	   *lockGroupLeader;	/* lock group leader, if I'm a member */
 	dlist_head	lockGroupMembers;	/* list of members, if I'm a leader */
 	dlist_node	lockGroupLink;	/* my member link, if I'm a member */
+
+	/*
+	 * Backend parking state
+	 */
+	uint8		backend_state;		/* PROC_STATE_ACTIVE or PROC_STATE_PARKED */
+	PGPROC	   *parkingNext;		/* next proc in active/parked list */
 };
 
 /* NOTE: "typedef struct PGPROC PGPROC" appears in storage/lock.h. */
+
+/*
+ * Backend parking inline function
+ */
+static inline bool
+IS_PROC_PARKED(const PGPROC *p)
+{
+	return p->backend_state == PROC_STATE_PARKED;
+}
 
 
 extern PGDLLIMPORT PGPROC *MyProc;

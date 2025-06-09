@@ -64,6 +64,7 @@ backend_sources += files(
   'oid.c',
   'oracle_compat.c',
   'orderedsetaggs.c',
+  'parkfuncs.c',
   'partitionfuncs.c',
   'pg_locale.c',
   'pg_locale_builtin.c',

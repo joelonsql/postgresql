@@ -1840,6 +1840,9 @@ bool		process_shared_preload_libraries_done = false;
 shmem_request_hook_type shmem_request_hook = NULL;
 bool		process_shmem_requests_in_progress = false;
 
+/* Hook for extensions to veto backend parking */
+parking_hook_type parking_hook = NULL;
+
 /*
  * load the shared libraries listed in 'libraries'
  *

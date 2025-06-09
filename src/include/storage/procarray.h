@@ -100,4 +100,8 @@ extern void ProcArraySetReplicationSlotXmin(TransactionId xmin,
 extern void ProcArrayGetReplicationSlotXmin(TransactionId *xmin,
 											TransactionId *catalog_xmin);
 
+/* Backend parking functions */
+extern bool ParkMyBackend(void);
+extern void UnparkMyBackend(void);
+
 #endif							/* PROCARRAY_H */

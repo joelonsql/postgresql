@@ -287,6 +287,11 @@ extern PGDLLIMPORT double VacuumCostDelay;
 extern PGDLLIMPORT int VacuumCostBalance;
 extern PGDLLIMPORT bool VacuumCostActive;
 
+/* Backend parking configuration */
+extern PGDLLIMPORT bool enable_parking;
+extern PGDLLIMPORT int park_after;
+extern PGDLLIMPORT int max_active_backends;
+
 
 /* in utils/misc/stack_depth.c */
 
@@ -531,6 +536,9 @@ extern bool has_rolreplication(Oid roleid);
 
 typedef void (*shmem_request_hook_type) (void);
 extern PGDLLIMPORT shmem_request_hook_type shmem_request_hook;
+
+typedef bool (*parking_hook_type) (void);
+extern PGDLLIMPORT parking_hook_type parking_hook;
 
 extern Size EstimateClientConnectionInfoSpace(void);
 extern void SerializeClientConnectionInfo(Size maxsize, char *start_address);

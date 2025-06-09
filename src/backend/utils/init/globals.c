@@ -133,6 +133,11 @@ double		hash_mem_multiplier = 2.0;
 int			maintenance_work_mem = 65536;
 int			max_parallel_maintenance_workers = 2;
 
+/* Backend parking configuration */
+bool		enable_parking = false;
+int			park_after = 5000;
+int			max_active_backends = 0;
+
 /*
  * Primary determinants of sizes of shared-memory structures.
  *
