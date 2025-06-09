@@ -17,5 +17,3 @@
 
 /* Functions for backend parking */
 extern Datum pg_park(PG_FUNCTION_ARGS);
-
-#endif							/* PARKFUNCS_H */

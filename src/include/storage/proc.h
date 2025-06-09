@@ -329,8 +329,8 @@ struct PGPROC
 	/*
 	 * Backend parking state
 	 */
-	uint8		backend_state;		/* PROC_STATE_ACTIVE or PROC_STATE_PARKED */
-	PGPROC	   *parkingNext;		/* next proc in active/parked list */
+	uint8		backend_state;	/* PROC_STATE_ACTIVE or PROC_STATE_PARKED */
+	PGPROC	   *parkingNext;	/* next proc in active/parked list */
 };
 
 /* NOTE: "typedef struct PGPROC PGPROC" appears in storage/lock.h. */

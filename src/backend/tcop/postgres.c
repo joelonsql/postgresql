@@ -62,6 +62,7 @@
 #include "rewrite/rewriteHandler.h"
 #include "storage/bufmgr.h"
 #include "storage/ipc.h"
+#include "storage/latch.h"
 #include "storage/pmsignal.h"
 #include "storage/proc.h"
 #include "storage/procarray.h"
@@ -501,6 +502,10 @@ ReadCommandWithParking(StringInfo inBuf)
 {
 	int			result;
 	bool		parked = false;
+	TimestampTz start_time;
+	long		elapsed_ms;
+	int			timeout_ms;
+	int			wait_result;
 
 	/* If parking is disabled, use normal path */
 	if (!enable_parking)
@@ -510,17 +515,78 @@ ReadCommandWithParking(StringInfo inBuf)
 	if (whereToSendOutput != DestRemote)
 		return ReadCommand(inBuf);
 
-	/* Simple implementation: park immediately if enabled */
-	if (park_after > 0)
+	/* Record when we started waiting */
+	start_time = GetCurrentTimestamp();
+
+	/*
+	 * Wait for input with timeout. If park_after milliseconds pass without
+	 * input, park the backend.
+	 */
+	for (;;)
 	{
-		/* Try to park the backend */
-		if (ParkMyBackend())
+		/* Calculate remaining timeout before parking */
+		if (!parked && park_after > 0)
 		{
-			parked = true;
+			elapsed_ms = (long) ((GetCurrentTimestamp() - start_time) / 1000);
+			timeout_ms = park_after - elapsed_ms;
+
+			if (timeout_ms <= 0)
+			{
+				/* Time to park */
+				if (ParkMyBackend())
+				{
+					parked = true;
+					/* Continue waiting for input while parked */
+				}
+			}
 		}
+
+		/* Wait for input */
+		if (parked)
+		{
+			/* Already parked - wait indefinitely for input */
+			wait_result = WaitLatchOrSocket(MyLatch,
+											WL_SOCKET_READABLE | WL_EXIT_ON_PM_DEATH,
+											MyProcPort->sock,
+											-1, /* no timeout */
+											WAIT_EVENT_CLIENT_READ);
+		}
+		else if (park_after > 0 && timeout_ms > 0)
+		{
+			/* Not yet parked - wait with timeout until parking time */
+			wait_result = WaitLatchOrSocket(MyLatch,
+											WL_SOCKET_READABLE | WL_TIMEOUT | WL_EXIT_ON_PM_DEATH,
+											MyProcPort->sock,
+											timeout_ms,
+											WAIT_EVENT_CLIENT_READ);
+		}
+		else
+		{
+			/* Parking disabled or timeout expired - wait indefinitely */
+			wait_result = WaitLatchOrSocket(MyLatch,
+											WL_SOCKET_READABLE | WL_EXIT_ON_PM_DEATH,
+											MyProcPort->sock,
+											-1, /* no timeout */
+											WAIT_EVENT_CLIENT_READ);
+		}
+
+		/* Reset the latch if it was set */
+		ResetLatch(MyLatch);
+
+		/* Check for interrupts */
+		CHECK_FOR_INTERRUPTS();
+
+		/* If socket is readable, we have input */
+		if (wait_result & WL_SOCKET_READABLE)
+		{
+			/* Input is available, break out of wait loop */
+			break;
+		}
+
+		/* Loop continues if we got timeout or latch set */
 	}
 
-	/* Read the command (will block until data arrives) */
+	/* Read the command (data is now available) */
 	result = ReadCommand(inBuf);
 
 	/* If we were parked, unpark now */

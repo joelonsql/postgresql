@@ -98,9 +98,9 @@ typedef struct ProcArrayStruct
 	TransactionId replication_slot_catalog_xmin;
 
 	/* Backend parking: dual linked lists for active vs parked backends */
-	PGPROC	   *activeProcs;		/* head of active singly-linked list */
-	PGPROC	   *parkedProcs;		/* head of parked singly-linked list */
-	int			numActiveProcs;		/* number of active backends */
+	PGPROC	   *activeProcs;	/* head of active singly-linked list */
+	PGPROC	   *parkedProcs;	/* head of parked singly-linked list */
+	int			numActiveProcs; /* number of active backends */
 
 	/* indexes into allProcs[], has PROCARRAY_MAXPROCS entries */
 	int			pgprocnos[FLEXIBLE_ARRAY_MEMBER];
