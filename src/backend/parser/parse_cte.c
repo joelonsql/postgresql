@@ -110,10 +110,14 @@ List *
 transformWithClause(ParseState *pstate, WithClause *withClause)
 {
 	ListCell   *lc;
+	CteState	cstate;
+	int			i;
 
 	/* Only one WITH clause per query level */
 	Assert(pstate->p_ctenamespace == NIL);
 	Assert(pstate->p_future_ctes == NIL);
+
+	printf("DEBUG: transformWithClause processing WITH clause with %d CTEs\n", list_length(withClause->ctes));
 
 	/*
 	 * For either type of WITH, there must not be duplicate CTE names in the
@@ -126,6 +130,8 @@ transformWithClause(ParseState *pstate, WithClause *withClause)
 	{
 		CommonTableExpr *cte = (CommonTableExpr *) lfirst(lc);
 		ListCell   *rest;
+
+		printf("DEBUG: Processing CTE: %s\n", cte->ctename);
 
 		for_each_cell(rest, withClause->ctes, lnext(withClause->ctes, lc))
 		{
@@ -156,14 +162,13 @@ transformWithClause(ParseState *pstate, WithClause *withClause)
 
 	if (withClause->recursive)
 	{
+		printf("DEBUG: Processing RECURSIVE WITH clause\n");
+
 		/*
 		 * For WITH RECURSIVE, we rearrange the list elements if needed to
 		 * eliminate forward references.  First, build a work array and set up
 		 * the data structure needed by the tree walkers.
 		 */
-		CteState	cstate;
-		int			i;
-
 		cstate.pstate = pstate;
 		cstate.numitems = list_length(withClause->ctes);
 		cstate.items = (CteItem *) palloc0(cstate.numitems * sizeof(CteItem));
@@ -206,11 +211,14 @@ transformWithClause(ParseState *pstate, WithClause *withClause)
 		{
 			CommonTableExpr *cte = cstate.items[i].cte;
 
+			printf("DEBUG: Analyzing recursive CTE: %s\n", cte->ctename);
 			analyzeCTE(pstate, cte);
 		}
 	}
 	else
 	{
+		printf("DEBUG: Processing non-recursive WITH clause\n");
+
 		/*
 		 * For non-recursive WITH, just analyze each CTE in sequence and then
 		 * add it to the ctenamespace.  This corresponds to the spec's
@@ -224,12 +232,14 @@ transformWithClause(ParseState *pstate, WithClause *withClause)
 		{
 			CommonTableExpr *cte = (CommonTableExpr *) lfirst(lc);
 
+			printf("DEBUG: Analyzing non-recursive CTE: %s\n", cte->ctename);
 			analyzeCTE(pstate, cte);
 			pstate->p_ctenamespace = lappend(pstate->p_ctenamespace, cte);
 			pstate->p_future_ctes = list_delete_first(pstate->p_future_ctes);
 		}
 	}
 
+	printf("DEBUG: transformWithClause completed processing\n");
 	return pstate->p_ctenamespace;
 }
 
