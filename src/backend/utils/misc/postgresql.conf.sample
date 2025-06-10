@@ -65,6 +65,15 @@
 #max_connections = 100			# (change requires restart)
 #reserved_connections = 0		# (change requires restart)
 #superuser_reserved_connections = 3	# (change requires restart)
+
+# - Backend Parking -
+# Backend parking allows idle connections to be "parked" to reduce system load
+
+#enable_parking = off			# enable backend parking feature
+#park_after = 5min			# time before idle backend is parked
+#max_active_backends = 0		# max active (non-parked) backends; 0 = no limit
+					# (change requires restart)
+
 #unix_socket_directories = '/tmp'	# comma-separated list of directories
 					# (change requires restart)
 #unix_socket_group = ''			# (change requires restart)

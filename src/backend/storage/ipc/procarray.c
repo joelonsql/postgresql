@@ -2719,7 +2719,6 @@ GetRunningTransactionData(void)
 	TransactionId oldestRunningXid;
 	TransactionId oldestDatabaseRunningXid;
 	TransactionId *xids;
-	int			index;
 	int			count;
 	int			subcount;
 	bool		suboverflowed;
@@ -2899,7 +2898,6 @@ GetOldestActiveTransactionId(void)
 	ProcArrayStruct *arrayP = procArray;
 	TransactionId *other_xids = ProcGlobal->xids;
 	TransactionId oldestRunningXid;
-	int			index;
 
 	Assert(!RecoveryInProgress());
 
@@ -2964,7 +2962,6 @@ GetOldestSafeDecodingTransactionId(bool catalogOnly)
 {
 	ProcArrayStruct *arrayP = procArray;
 	TransactionId oldestSafeXid;
-	int			index;
 	bool		recovery_in_progress = RecoveryInProgress();
 
 	Assert(LWLockHeldByMe(ProcArrayLock));
@@ -5492,6 +5489,20 @@ UnparkMyBackend(void)
 
 	/* Acquire exclusive lock on ProcArray */
 	LWLockAcquire(ProcArrayLock, LW_EXCLUSIVE);
+
+	/*
+	 * Backend parking: check max_active_backends limit before unparking.
+	 * If unparking would exceed the limit, raise an ERROR.
+	 */
+	if (max_active_backends > 0 && arrayP->numActiveProcs >= max_active_backends)
+	{
+		LWLockRelease(ProcArrayLock);
+		ereport(ERROR,
+				(errcode(ERRCODE_CONFIGURATION_LIMIT_EXCEEDED),
+				 errmsg("cannot unpark backend: would exceed max_active_backends limit (%d)",
+						max_active_backends),
+				 errhint("Consider increasing max_active_backends or waiting for other backends to park.")));
+	}
 
 	/* Move from parked to active list */
 	RemoveFromParkingLists(arrayP, MyProc);
