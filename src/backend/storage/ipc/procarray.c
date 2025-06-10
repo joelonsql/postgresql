@@ -63,6 +63,7 @@
 #include "utils/acl.h"
 #include "utils/backend_status.h"
 #include "utils/builtins.h"
+#include "utils/memutils.h"
 #include "utils/rel.h"
 #include "utils/resowner.h"
 #include "utils/snapmgr.h"
@@ -1811,16 +1812,19 @@ ComputeXidHorizons(ComputeXidHorizonsResult *h)
 	h->slot_xmin = procArray->replication_slot_xmin;
 	h->slot_catalog_xmin = procArray->replication_slot_catalog_xmin;
 
-	for (int index = 0; index < arrayP->numProcs; index++)
+	/*
+	 * Backend parking optimization: iterate only over active backends
+	 * instead of all backends for xmin horizon computation.
+	 */
+	for (PGPROC *proc = arrayP->activeProcs; proc != NULL; proc = proc->parkingNext)
 	{
-		int			pgprocno = arrayP->pgprocnos[index];
-		PGPROC	   *proc = &allProcs[pgprocno];
-		int8		statusFlags = ProcGlobal->statusFlags[index];
+		int			pgxactoff = proc->pgxactoff;
+		int8		statusFlags = ProcGlobal->statusFlags[pgxactoff];
 		TransactionId xid;
 		TransactionId xmin;
 
 		/* Fetch xid just once - see GetNewTransactionId */
-		xid = UINT32_ACCESS_ONCE(other_xids[index]);
+		xid = UINT32_ACCESS_ONCE(other_xids[pgxactoff]);
 		xmin = UINT32_ACCESS_ONCE(proc->xmin);
 
 		/*
@@ -2282,23 +2286,21 @@ GetSnapshotData(Snapshot snapshot)
 
 	if (!snapshot->takenDuringRecovery)
 	{
-		int			numProcs = arrayP->numProcs;
 		TransactionId *xip = snapshot->xip;
-		int		   *pgprocnos = arrayP->pgprocnos;
 		XidCacheStatus *subxidStates = ProcGlobal->subxidStates;
 		uint8	   *allStatusFlags = ProcGlobal->statusFlags;
 
 		/*
-		 * First collect set of pgxactoff/xids that need to be included in the
-		 * snapshot.
+		 * Backend parking optimization: iterate only over active backends
+		 * instead of all backends. This converts the snapshot building from
+		 * O(N = all connections) to O(A = active connections).
 		 */
-		for (int pgxactoff = 0; pgxactoff < numProcs; pgxactoff++)
+		for (PGPROC *proc = arrayP->activeProcs; proc != NULL; proc = proc->parkingNext)
 		{
+			int			pgxactoff = proc->pgxactoff;
 			/* Fetch xid just once - see GetNewTransactionId */
 			TransactionId xid = UINT32_ACCESS_ONCE(other_xids[pgxactoff]);
 			uint8		statusFlags;
-
-			Assert(allProcs[arrayP->pgprocnos[pgxactoff]].pgxactoff == pgxactoff);
 
 			/*
 			 * If the transaction has no XID assigned, we can skip it; it
@@ -2371,9 +2373,6 @@ GetSnapshotData(Snapshot snapshot)
 
 					if (nsubxids > 0)
 					{
-						int			pgprocno = pgprocnos[pgxactoff];
-						PGPROC	   *proc = &allProcs[pgprocno];
-
 						pg_read_barrier();	/* pairs with GetNewTransactionId */
 
 						memcpy(snapshot->subxip + subcount,
@@ -2767,14 +2766,16 @@ GetRunningTransactionData(void)
 		XidFromFullTransactionId(TransamVariables->nextXid);
 
 	/*
-	 * Spin over procArray collecting all xids
+	 * Backend parking optimization: iterate only over active backends
+	 * instead of all backends when collecting running transaction data.
 	 */
-	for (index = 0; index < arrayP->numProcs; index++)
+	for (PGPROC *proc = arrayP->activeProcs; proc != NULL; proc = proc->parkingNext)
 	{
+		int			pgxactoff = proc->pgxactoff;
 		TransactionId xid;
 
 		/* Fetch xid just once - see GetNewTransactionId */
-		xid = UINT32_ACCESS_ONCE(other_xids[index]);
+		xid = UINT32_ACCESS_ONCE(other_xids[pgxactoff]);
 
 		/*
 		 * We don't need to store transactions that don't have a TransactionId
@@ -2792,20 +2793,15 @@ GetRunningTransactionData(void)
 			oldestRunningXid = xid;
 
 		/*
-		 * Also, update the oldest running xid within the current database. As
-		 * fetching pgprocno and PGPROC could cause cache misses, we do cheap
-		 * TransactionId comparison first.
+		 * Also, update the oldest running xid within the current database.
 		 */
 		if (TransactionIdPrecedes(xid, oldestDatabaseRunningXid))
 		{
-			int			pgprocno = arrayP->pgprocnos[index];
-			PGPROC	   *proc = &allProcs[pgprocno];
-
 			if (proc->databaseId == MyDatabaseId)
 				oldestDatabaseRunningXid = xid;
 		}
 
-		if (ProcGlobal->subxidStates[index].overflowed)
+		if (ProcGlobal->subxidStates[pgxactoff].overflowed)
 			suboverflowed = true;
 
 		/*
@@ -2820,24 +2816,23 @@ GetRunningTransactionData(void)
 	}
 
 	/*
-	 * Spin over procArray collecting all subxids, but only if there hasn't
-	 * been a suboverflow.
+	 * Backend parking optimization: iterate only over active backends
+	 * when collecting subxids, but only if there hasn't been a suboverflow.
 	 */
 	if (!suboverflowed)
 	{
 		XidCacheStatus *other_subxidstates = ProcGlobal->subxidStates;
 
-		for (index = 0; index < arrayP->numProcs; index++)
+		for (PGPROC *proc = arrayP->activeProcs; proc != NULL; proc = proc->parkingNext)
 		{
-			int			pgprocno = arrayP->pgprocnos[index];
-			PGPROC	   *proc = &allProcs[pgprocno];
+			int			pgxactoff = proc->pgxactoff;
 			int			nsubxids;
 
 			/*
 			 * Save subtransaction XIDs. Other backends can't add or remove
 			 * entries while we're holding XidGenLock.
 			 */
-			nsubxids = other_subxidstates[index].count;
+			nsubxids = other_subxidstates[pgxactoff].count;
 			if (nsubxids > 0)
 			{
 				/* barrier not really required, as XidGenLock is held, but ... */
@@ -2920,15 +2915,16 @@ GetOldestActiveTransactionId(void)
 	LWLockRelease(XidGenLock);
 
 	/*
-	 * Spin over procArray collecting all xids and subxids.
+	 * Backend parking optimization: iterate only over active backends
+	 * instead of all backends when collecting oldest active transaction ID.
 	 */
 	LWLockAcquire(ProcArrayLock, LW_SHARED);
-	for (index = 0; index < arrayP->numProcs; index++)
+	for (PGPROC *proc = arrayP->activeProcs; proc != NULL; proc = proc->parkingNext)
 	{
 		TransactionId xid;
 
 		/* Fetch xid just once - see GetNewTransactionId */
-		xid = UINT32_ACCESS_ONCE(other_xids[index]);
+		xid = UINT32_ACCESS_ONCE(other_xids[proc->pgxactoff]);
 
 		if (!TransactionIdIsNormal(xid))
 			continue;
@@ -3019,14 +3015,15 @@ GetOldestSafeDecodingTransactionId(bool catalogOnly)
 		TransactionId *other_xids = ProcGlobal->xids;
 
 		/*
-		 * Spin over procArray collecting min(ProcGlobal->xids[i])
+		 * Backend parking optimization: iterate only over active backends
+		 * instead of all backends when collecting min(ProcGlobal->xids[i])
 		 */
-		for (index = 0; index < arrayP->numProcs; index++)
+		for (PGPROC *proc = arrayP->activeProcs; proc != NULL; proc = proc->parkingNext)
 		{
 			TransactionId xid;
 
 			/* Fetch xid just once - see GetNewTransactionId */
-			xid = UINT32_ACCESS_ONCE(other_xids[index]);
+			xid = UINT32_ACCESS_ONCE(other_xids[proc->pgxactoff]);
 
 			if (!TransactionIdIsNormal(xid))
 				continue;
@@ -5375,6 +5372,36 @@ RemoveFromParkingLists(ProcArrayStruct *array, PGPROC *proc)
 }
 
 /*
+ * ReleaseResourcesForPark
+ *		Release resources when parking a backend
+ *
+ * This function releases various resources that are not needed while
+ * a backend is parked, freeing up memory and other system resources.
+ */
+static void
+ReleaseResourcesForPark(void)
+{
+	/*
+	 * Release resources in the standard three-phase order.
+	 * We use the same phases as transaction cleanup, but we're
+	 * not actually ending a transaction - just releasing resources
+	 * that we don't need while parked.
+	 */
+	if (CurrentResourceOwner)
+	{
+		ResourceOwnerRelease(CurrentResourceOwner,
+							 RESOURCE_RELEASE_BEFORE_LOCKS,
+							 false, false);
+		ResourceOwnerRelease(CurrentResourceOwner,
+							 RESOURCE_RELEASE_LOCKS,
+							 false, false);
+		ResourceOwnerRelease(CurrentResourceOwner,
+							 RESOURCE_RELEASE_AFTER_LOCKS,
+							 false, false);
+	}
+}
+
+/*
  * ParkMyBackend
  *		Park the current backend, removing it from critical shared structures
  *
@@ -5404,13 +5431,50 @@ ParkMyBackend(void)
 
 	LWLockRelease(ProcArrayLock);
 
-	/* Release resources for parking (placeholder for future implementation) */
-	/* TODO: ResourceOwnerReleaseAll(RESOURCE_RELEASE_PARK); */
+	/* Release resources for parking */
+	ReleaseResourcesForPark();
 
 	/* Report parked state to stats collector */
 	pgstat_report_activity(STATE_PARKED, NULL);
 
 	return true;
+}
+
+/*
+ * RebuildTopTransactionContext
+ *		Rebuild the transaction memory context after unparking
+ *
+ * When a backend is parked, its transaction memory contexts may have been
+ * released. This function ensures they are recreated before the backend
+ * resumes normal operation.
+ */
+static void
+RebuildTopTransactionContext(void)
+{
+	/*
+	 * Ensure TopTransactionContext exists. This follows the same pattern
+	 * as AtStart_Memory() in xact.c
+	 */
+	if (TopTransactionContext == NULL)
+	{
+		TopTransactionContext =
+			AllocSetContextCreate(TopMemoryContext,
+								  "TopTransactionContext",
+								  ALLOCSET_DEFAULT_SIZES);
+	}
+
+	/*
+	 * Make sure CurrentMemoryContext is valid. If it was pointing to
+	 * a context that was freed during parking, reset it to TopMemoryContext.
+	 */
+	if (!MemoryContextIsValid(CurrentMemoryContext))
+		CurrentMemoryContext = TopMemoryContext;
+
+	/*
+	 * Set CurTransactionContext to TopTransactionContext, as would be done
+	 * at the start of a new transaction.
+	 */
+	CurTransactionContext = TopTransactionContext;
 }
 
 /*
@@ -5435,7 +5499,8 @@ UnparkMyBackend(void)
 
 	LWLockRelease(ProcArrayLock);
 
-	/* TODO: RebuildTopTransactionContext(); */
+	/* Rebuild transaction context after unparking */
+	RebuildTopTransactionContext();
 
 	/* Report active state to stats collector */
 	pgstat_report_activity(STATE_IDLE, NULL);
