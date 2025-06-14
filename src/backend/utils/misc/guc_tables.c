@@ -2465,6 +2465,19 @@ struct config_int ConfigureNamesInt[] =
 	},
 
 	{
+		{"notify_multicast_threshold", PGC_POSTMASTER, RESOURCES_MEM,
+			gettext_noop("Sets the maximum number of listeners to track per channel for multicast signaling."),
+			gettext_noop("When the number of listeners on a channel exceeds this threshold, "
+						 "NOTIFY will signal all listening backends rather than just those "
+						 "listening on the specific channel. Setting to 0 disables multicast "
+						 "signaling entirely."),
+		},
+		&notify_multicast_threshold,
+		16, 0, MAX_BACKENDS,
+		check_notify_multicast_threshold, NULL, NULL
+	},
+
+	{
 		{"serializable_buffers", PGC_POSTMASTER, RESOURCES_MEM,
 			gettext_noop("Sets the size of the dedicated buffer pool used for the serializable transaction cache."),
 			NULL,
