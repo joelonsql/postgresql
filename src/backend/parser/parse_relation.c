@@ -20,6 +20,7 @@
 #include "access/relation.h"
 #include "access/sysattr.h"
 #include "access/table.h"
+#include "access/xact.h"
 #include "catalog/heap.h"
 #include "catalog/namespace.h"
 #include "catalog/pg_type.h"
@@ -36,7 +37,10 @@
 #include "utils/rel.h"
 #include "utils/syscache.h"
 #include "utils/varlena.h"
+#include "rewrite/rewriteHandler.h"
 
+/* Static variable for global base relation indexing */
+static Index next_baserelindex = 1;
 
 /*
  * Support for fuzzily matching columns.
@@ -1546,6 +1550,18 @@ addRangeTableEntry(ParseState *pstate,
 	 * appropriate.
 	 */
 	pstate->p_rtable = lappend(pstate->p_rtable, rte);
+
+	if (rte->relkind == RELKIND_RELATION || rte->relkind == RELKIND_PARTITIONED_TABLE)
+	{
+		/* Create default RTEId for any relation type */
+		RTEId	   *rteid = makeNode(RTEId);
+		FullTransactionId fxid = ReadNextFullTransactionId();
+
+		rteid->fxid = fxid.value;
+		rteid->procnumber = (int) MyProcNumber;
+		rteid->baserelindex = next_baserelindex++;
+		rte->rteid = rteid;
+	}
 
 	/*
 	 * Build a ParseNamespaceItem, but don't add it to the pstate's namespace

@@ -15,8 +15,11 @@
 #include "postgres.h"
 
 #include "access/relation.h"
+#include "access/table.h"
 #include "access/xact.h"
 #include "catalog/namespace.h"
+#include "catalog/pg_depend.h"
+#include "catalog/pg_rewrite.h"
 #include "commands/tablecmds.h"
 #include "commands/view.h"
 #include "nodes/makefuncs.h"
@@ -27,10 +30,14 @@
 #include "rewrite/rewriteHandler.h"
 #include "rewrite/rewriteSupport.h"
 #include "utils/builtins.h"
+#include "utils/fmgroids.h"
 #include "utils/lsyscache.h"
 #include "utils/rel.h"
+#include "parser/parser.h"
+#include "parser/parse_fkjoin.h"
 
 static void checkViewColumns(TupleDesc newdesc, TupleDesc olddesc);
+static void revalidateDependentViews(Oid viewOid);
 
 /*---------------------------------------------------------------------
  * DefineVirtualRelation
@@ -514,4 +521,139 @@ StoreViewQuery(Oid viewOid, Query *viewParse, bool replace)
 	 * Now create the rules associated with the view.
 	 */
 	DefineViewRules(viewOid, viewParse, replace);
+
+	/*
+	 * If replacing an existing view, revalidate dependent views.
+	 */
+	if (replace)
+		revalidateDependentViews(viewOid);
+}
+
+/*
+ * revalidateDependentViews
+ *		Revalidates all views that depend on a specified view
+ */
+static void
+revalidateDependentViews(Oid viewOid)
+{
+	Relation	depRel;
+	ScanKeyData key[2];
+	SysScanDesc scan;
+	HeapTuple	tup;
+	HTAB	   *seen_views;
+	HASHCTL		hash_ctl;
+
+	hash_ctl.keysize = sizeof(Oid);
+	hash_ctl.entrysize = sizeof(Oid);
+	hash_ctl.hcxt = CurrentMemoryContext;
+	seen_views = hash_create("Dependent view tracking", 32,
+							 &hash_ctl, HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
+
+	depRel = table_open(DependRelationId, AccessShareLock);
+
+	ScanKeyInit(&key[0],
+				Anum_pg_depend_refclassid,
+				BTEqualStrategyNumber, F_OIDEQ,
+				ObjectIdGetDatum(RelationRelationId));
+	ScanKeyInit(&key[1],
+				Anum_pg_depend_refobjid,
+				BTEqualStrategyNumber, F_OIDEQ,
+				ObjectIdGetDatum(viewOid));
+
+	scan = systable_beginscan(depRel, DependReferenceIndexId, true,
+							  NULL, 2, key);
+
+	while (HeapTupleIsValid(tup = systable_getnext(scan)))
+	{
+		Form_pg_depend depform = (Form_pg_depend) GETSTRUCT(tup);
+		Oid			dependentViewOid;
+		bool		found;
+		Relation	rewriteRel;
+		ScanKeyData rewritescankey[1];
+		SysScanDesc rewritescan;
+		HeapTuple	rewriteTuple;
+		Form_pg_rewrite ruleform;
+
+		if (depform->deptype != DEPENDENCY_NORMAL)
+			continue;
+
+		if (depform->classid != RewriteRelationId)
+			continue;
+
+		rewriteRel = table_open(RewriteRelationId, AccessShareLock);
+
+		ScanKeyInit(&rewritescankey[0],
+					Anum_pg_rewrite_oid,
+					BTEqualStrategyNumber, F_OIDEQ,
+					ObjectIdGetDatum(depform->objid));
+
+		rewritescan = systable_beginscan(rewriteRel, RewriteOidIndexId, true,
+										 NULL, 1, rewritescankey);
+
+		rewriteTuple = systable_getnext(rewritescan);
+		if (!HeapTupleIsValid(rewriteTuple))
+		{
+			systable_endscan(rewritescan);
+			table_close(rewriteRel, AccessShareLock);
+			continue;
+		}
+
+		ruleform = (Form_pg_rewrite) GETSTRUCT(rewriteTuple);
+		dependentViewOid = ruleform->ev_class;
+
+		(void) hash_search(seen_views, &dependentViewOid, HASH_ENTER, &found);
+
+		/*
+		 * If we haven't seen this view before, parse and analyze it.
+		 */
+		if (!found)
+		{
+			Datum		viewdef;
+			char	   *viewdef_str;
+			List	   *parsetree_list;
+			RawStmt    *parsetree;
+			ParseState *pstate;
+
+			CommandCounterIncrement();
+
+			viewdef = DirectFunctionCall1(pg_get_viewdef, ObjectIdGetDatum(dependentViewOid));
+			if (DatumGetPointer(viewdef) == NULL)
+				elog(ERROR, "could not get definition for view with OID %u", dependentViewOid);
+
+			viewdef_str = text_to_cstring(DatumGetTextPP(viewdef));
+
+			parsetree_list = raw_parser(viewdef_str, RAW_PARSE_DEFAULT);
+			if (list_length(parsetree_list) != 1)
+				elog(ERROR, "view definition should contain exactly one SELECT statement");
+
+			parsetree = linitial_node(RawStmt, parsetree_list);
+
+			pstate = make_parsestate(NULL);
+			pstate->p_sourcetext = viewdef_str;
+
+			PG_TRY();
+			{
+				(void) parse_sub_analyze((Node *) parsetree->stmt, pstate, NULL, false, 0);
+			}
+			PG_CATCH();
+			{
+				ereport(ERROR,
+						(errcode(ERRCODE_INTEGRITY_CONSTRAINT_VIOLATION),
+						 errmsg("virtual foreign key constraint violation while re-validating view \"%s.%s\"",
+								get_namespace_name(get_rel_namespace(dependentViewOid)),
+								get_rel_name(dependentViewOid))));
+			}
+			PG_END_TRY();
+
+			free_parsestate(pstate);
+			pfree(viewdef_str);
+		}
+
+		systable_endscan(rewritescan);
+		table_close(rewriteRel, AccessShareLock);
+	}
+
+	systable_endscan(scan);
+	table_close(depRel, AccessShareLock);
+	hash_destroy(seen_views);
 }
