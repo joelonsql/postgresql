@@ -89,6 +89,14 @@ ALTER TABLE t2 DROP CONSTRAINT t2_c3_fkey; -- error
 DROP VIEW v1;
 ALTER TABLE t2 DROP CONSTRAINT t2_c3_fkey;
 
+/* Recreate contraint and view to test DROP CASCADE */
+ALTER TABLE t2 ADD CONSTRAINT t2_c3_fkey FOREIGN KEY (c3) REFERENCES t1 (c1);
+CREATE VIEW v1 AS
+SELECT *
+FROM t1
+JOIN t2 KEY (c3) -> t1 (c1);
+ALTER TABLE t2 DROP CONSTRAINT t2_c3_fkey CASCADE; -- ok
+
 SELECT * FROM t1 JOIN t2 KEY (c3) -> t1 (c1); -- error
 SELECT * FROM t2 JOIN t1 KEY (c1) <- t2 (c3); -- error
 
@@ -198,7 +206,7 @@ FROM t1
 JOIN t2 KEY (c3,c4) -> t1 (c1,c2)
 RIGHT JOIN t4 KEY (c7,c8) -> t1 (c1,c2);
 
--- Recrate stuff for pg_dump tests
+-- Recreate stuff for pg_dump tests
 ALTER TABLE t2
     ADD CONSTRAINT t2_c3_fkey FOREIGN KEY (c3) REFERENCES t1 (c1);
 CREATE VIEW v1 AS
@@ -736,9 +744,8 @@ SELECT * FROM t1 JOIN t2 KEY (c3, c4, c5) -> t1 (c1, c2);
 
 CREATE FUNCTION t2() RETURNS TABLE (c3 INTEGER, c4 INTEGER)
 LANGUAGE sql
-BEGIN ATOMIC
-    SELECT 1, 2;
-END;
+RETURN (1, 2);
+
 SELECT * FROM t1 JOIN t2() KEY (c3, c4) -> t1 (c1, c2);
 
 SELECT * FROM t1 JOIN t2 KEY (c3, c4) -> t1 (c1, c5);
@@ -756,6 +763,7 @@ SELECT * FROM v1 JOIN t2 KEY (c3, c4) -> v1 (c1_1, nonexistent);
 /*
  * We don't need to check for duplicate columns,
  * since there is already such a check for foreign key constraints.
+ * Let's test it anyway.
  */
 SELECT * FROM v1 JOIN t2 KEY (c3, c3) -> v1 (c1_1, c1_1);
 
@@ -809,7 +817,7 @@ JOIN
 ) AS q1 KEY (c23, c24) -> t1 (c1, c2);
 
 --
--- Test materialized views (not supported)
+-- Test materialized views (not supported yet)
 --
 
 CREATE MATERIALIZED VIEW mv1 AS
