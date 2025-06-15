@@ -112,11 +112,10 @@ transformAndValidateForeignKeyJoin(ParseState *pstate, JoinExpr *join,
 		if (!nsi->p_rel_visible)
 			continue;
 
-		Assert(nsi->p_names->aliasname != NULL);
 		if (strcmp(nsi->p_names->aliasname, fkjn->refAlias) == 0)
 		{
-			Assert(other_rel == NULL);
 			other_rel = nsi;
+			break;
 		}
 	}
 
@@ -128,8 +127,8 @@ transformAndValidateForeignKeyJoin(ParseState *pstate, JoinExpr *join,
 
 	if (list_length(fkjn->refCols) != list_length(fkjn->localCols))
 		ereport(ERROR,
-				(errcode(ERRCODE_SYNTAX_ERROR),
-				 errmsg("number of referencing and referenced columns must be the same"),
+				(errcode(ERRCODE_INVALID_FOREIGN_KEY),
+				 errmsg("number of referencing and referenced columns for foriegn key disagree"),
 				 parser_errposition(pstate, fkjn->location)));
 
 	if (fkjn->fkdir == FKDIR_FROM)
@@ -822,7 +821,7 @@ drill_down_to_base_rel(ParseState *pstate, Query *query, RangeTblEntry *rte,
 					else if (next_rtindex != var->varno)
 						ereport(ERROR,
 								(errcode(ERRCODE_UNDEFINED_TABLE),
-								 errmsg("key columns must all come from the same table"),
+								 errmsg("all key columns must belong to the same table"),
 								 parser_errposition(pstate, location)));
 
 					next_attnums = lappend_int(next_attnums, var->varattno);
@@ -903,7 +902,7 @@ drill_down_to_base_rel_query(ParseState *pstate, Query *query,
 		else if (next_rtindex != var->varno)
 			ereport(ERROR,
 					(errcode(ERRCODE_UNDEFINED_TABLE),
-					 errmsg("key columns must all come from the same table"),
+					 errmsg("all key columns must belong to the same table"),
 					 parser_errposition(pstate,
 										exprLocation((Node *) matching_tle->expr))));
 
@@ -1209,8 +1208,7 @@ update_functional_dependencies(List *referencing_fds,
 
 	/*
 	 * Step 6: Establish transitive functional dependencies by applying the
-	 * transitivity axiom across the foreign key relationship. This identifies
-	 * additional relations that will preserve all their rows after the join.
+	 * transitivity axiom across the foreign key relationship.
 	 *
 	 * By the Armstrong's axioms of functional dependencies, specifically
 	 * transitivity: If X → Y and Y → Z, then X → Z
