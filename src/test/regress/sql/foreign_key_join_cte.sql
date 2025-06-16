@@ -208,3 +208,62 @@ KEY (t3_c4, t3_c5) <- t7_q (t4_c9, t4_c10)
 ORDER BY 1,2,3,4,5;
 
 DROP TABLE t1, t2, t3, t4, t5, t6, t7;
+
+-- Tables
+CREATE TABLE t1 (
+   t1_a int PRIMARY KEY
+);
+
+CREATE TABLE t2 (
+   t2_a int PRIMARY KEY,
+   FOREIGN KEY (t2_a) REFERENCES t1
+);
+
+CREATE TABLE t3 (
+   t3_a int PRIMARY KEY,
+   FOREIGN KEY (t3_a) REFERENCES t2
+);
+
+INSERT INTO t1 (t1_a) VALUES (1), (2), (3);
+INSERT INTO t2 (t2_a) VALUES (1), (2);
+INSERT INTO t3 (t3_a) VALUES (1);
+
+-- Complex example
+WITH c3 AS (SELECT * FROM t3)
+SELECT * FROM (
+  WITH c2 AS (SELECT * FROM t2)
+  SELECT * FROM (
+    SELECT * FROM c2
+    JOIN c3 KEY (t3_a) -> c2 (t2_a)
+  )
+) q
+JOIN t1 KEY (t1_a) <- q (t2_a);
+
+WITH c3 AS (SELECT * FROM t3)
+SELECT * FROM (
+  WITH c2 AS (SELECT * FROM t2)
+  SELECT * FROM (
+    SELECT * FROM c2
+    JOIN c3 KEY (t3_a) -> c2 (t2_a)
+  )
+) q
+JOIN t1 ON t1.t1_a = q.t2_a;
+
+-- Minimal example
+SELECT * FROM (
+  WITH c2 AS (SELECT * FROM t2)
+  SELECT * FROM (
+    SELECT * FROM c2
+  )
+) q
+JOIN t1 KEY (t1_a) <- q (t2_a);
+
+SELECT * FROM (
+  WITH c2 AS (SELECT * FROM t2)
+  SELECT * FROM (
+    SELECT * FROM c2
+  )
+) q
+JOIN t1 ON t1.t1_a = q.t2_a;
+
+DROP TABLE t1, t2, t3;
