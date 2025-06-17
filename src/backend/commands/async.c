@@ -137,15 +137,18 @@
 #include "commands/async.h"
 #include "common/hashfn.h"
 #include "funcapi.h"
+#include "lib/ilist.h"
 #include "libpq/libpq.h"
 #include "libpq/pqformat.h"
 #include "miscadmin.h"
 #include "storage/ipc.h"
 #include "storage/lmgr.h"
 #include "storage/procsignal.h"
+#include "storage/shmem.h"
 #include "tcop/tcopprot.h"
 #include "utils/builtins.h"
 #include "utils/guc_hooks.h"
+#include "utils/hsearch.h"
 #include "utils/memutils.h"
 #include "utils/ps_status.h"
 #include "utils/snapmgr.h"
@@ -311,6 +314,34 @@ static SlruCtlData NotifyCtlData;
 #define QUEUE_PAGESIZE				BLCKSZ
 
 #define QUEUE_FULL_WARN_INTERVAL	5000	/* warn at most once every 5s */
+
+/*
+ * Subscription registry structures for targeted signaling
+ */
+typedef struct NotifyChannelKey
+{
+	Oid			dboid;				/* database OID */
+	char		channel[NAMEDATALEN];	/* channel name */
+} NotifyChannelKey;
+
+typedef struct NotifyChannelEntry
+{
+	NotifyChannelKey key;			/* hash key - must be first */
+	dlist_head	listeners;			/* list of NotifyListenerNodes */
+} NotifyChannelEntry;
+
+typedef struct NotifyListenerNode
+{
+	ProcNumber	procno;				/* backend's ProcNumber */
+	dlist_node	node;				/* list link */
+} NotifyListenerNode;
+
+/* Hash table for channel->listeners mapping */
+static HTAB *NotifyChannelHash = NULL;
+
+/* Initial and maximum size of the channel hash table */
+#define NOTIFY_CHANNEL_HASH_INIT_SIZE	256
+#define NOTIFY_CHANNEL_HASH_MAX_SIZE	(MaxBackends * 10)
 
 /*
  * listenChannels identifies the channels we are actually listening to
@@ -492,6 +523,13 @@ AsyncShmemSize(void)
 
 	size = add_size(size, SimpleLruShmemSize(notify_buffers, 0));
 
+	/* Add space for the channel->listeners hash table */
+	size = add_size(size, hash_estimate_size(NOTIFY_CHANNEL_HASH_MAX_SIZE,
+											  sizeof(NotifyChannelEntry)));
+
+	/* Add space for listener nodes (estimate: each backend listens to 10 channels) */
+	size = add_size(size, mul_size(MaxBackends * 10, sizeof(NotifyListenerNode)));
+
 	return size;
 }
 
@@ -538,6 +576,22 @@ AsyncShmemInit(void)
 	SimpleLruInit(NotifyCtl, "notify", notify_buffers, 0,
 				  "pg_notify", LWTRANCHE_NOTIFY_BUFFER, LWTRANCHE_NOTIFY_SLRU,
 				  SYNC_HANDLER_NONE, true);
+
+	/*
+	 * Create or attach to the channel->listeners hash table
+	 */
+	{
+		HASHCTL		info;
+
+		info.keysize = sizeof(NotifyChannelKey);
+		info.entrysize = sizeof(NotifyChannelEntry);
+
+		NotifyChannelHash = ShmemInitHash("LISTEN/NOTIFY channel hash",
+										  NOTIFY_CHANNEL_HASH_INIT_SIZE,
+										  NOTIFY_CHANNEL_HASH_MAX_SIZE,
+										  &info,
+										  HASH_ELEM | HASH_BLOBS | HASH_SHARED_MEM);
+	}
 
 	if (!found)
 	{
@@ -1136,6 +1190,10 @@ static void
 Exec_ListenCommit(const char *channel)
 {
 	MemoryContext oldcontext;
+	bool		found;
+	NotifyChannelKey key;
+	NotifyChannelEntry *entry;
+	NotifyListenerNode *listener;
 
 	/* Do nothing if we are already listening on this channel */
 	if (IsListeningOn(channel))
@@ -1152,6 +1210,38 @@ Exec_ListenCommit(const char *channel)
 	oldcontext = MemoryContextSwitchTo(TopMemoryContext);
 	listenChannels = lappend(listenChannels, pstrdup(channel));
 	MemoryContextSwitchTo(oldcontext);
+
+	/*
+	 * Add this backend to the channel's listener list in the subscription registry
+	 */
+	key.dboid = MyDatabaseId;
+	strlcpy(key.channel, channel, NAMEDATALEN);
+
+	/* Get exclusive lock as we're modifying the hash table */
+	LWLockAcquire(NotifyQueueLock, LW_EXCLUSIVE);
+
+	/* Find or create the channel entry */
+	entry = (NotifyChannelEntry *) hash_search(NotifyChannelHash,
+											   &key,
+											   HASH_ENTER,
+											   &found);
+	if (!found)
+	{
+		/* First listener for this channel - initialize the list */
+		dlist_init(&entry->listeners);
+	}
+
+	/* Allocate a listener node in shared memory */
+	listener = (NotifyListenerNode *) ShmemAlloc(sizeof(NotifyListenerNode));
+	if (!listener)
+		ereport(ERROR,
+				(errcode(ERRCODE_OUT_OF_MEMORY),
+				 errmsg("out of shared memory")));
+
+	listener->procno = MyProcNumber;
+	dlist_push_tail(&entry->listeners, &listener->node);
+
+	LWLockRelease(NotifyQueueLock);
 }
 
 /*
@@ -1163,6 +1253,9 @@ static void
 Exec_UnlistenCommit(const char *channel)
 {
 	ListCell   *q;
+	NotifyChannelKey key;
+	NotifyChannelEntry *entry;
+	bool		found_in_list = false;
 
 	if (Trace_notify)
 		elog(DEBUG1, "Exec_UnlistenCommit(%s,%d)", channel, MyProcPid);
@@ -1175,6 +1268,7 @@ Exec_UnlistenCommit(const char *channel)
 		{
 			listenChannels = foreach_delete_current(listenChannels, q);
 			pfree(lchan);
+			found_in_list = true;
 			break;
 		}
 	}
@@ -1183,6 +1277,47 @@ Exec_UnlistenCommit(const char *channel)
 	 * We do not complain about unlistening something not being listened;
 	 * should we?
 	 */
+
+	/* Remove this backend from the channel's listener list if we found it */
+	if (found_in_list)
+	{
+		key.dboid = MyDatabaseId;
+		strlcpy(key.channel, channel, NAMEDATALEN);
+
+		/* Get exclusive lock as we're modifying the hash table */
+		LWLockAcquire(NotifyQueueLock, LW_EXCLUSIVE);
+
+		/* Find the channel entry */
+		entry = (NotifyChannelEntry *) hash_search(NotifyChannelHash,
+												   &key,
+												   HASH_FIND,
+												   NULL);
+		if (entry)
+		{
+			dlist_iter	iter;
+
+			/* Find and remove our backend from the listener list */
+			dlist_foreach(iter, &entry->listeners)
+			{
+				NotifyListenerNode *listener = dlist_container(NotifyListenerNode,
+															   node, iter.cur);
+				if (listener->procno == MyProcNumber)
+				{
+					dlist_delete(&listener->node);
+					pfree(listener);
+					break;
+				}
+			}
+
+			/* If this was the last listener, remove the channel entry */
+			if (dlist_is_empty(&entry->listeners))
+			{
+				hash_search(NotifyChannelHash, &key, HASH_REMOVE, NULL);
+			}
+		}
+
+		LWLockRelease(NotifyQueueLock);
+	}
 }
 
 /*
@@ -1193,8 +1328,61 @@ Exec_UnlistenCommit(const char *channel)
 static void
 Exec_UnlistenAllCommit(void)
 {
+	ListCell   *p;
+
 	if (Trace_notify)
 		elog(DEBUG1, "Exec_UnlistenAllCommit(%d)", MyProcPid);
+
+	/*
+	 * Remove this backend from all channels in the subscription registry.
+	 * We need to iterate through our listenChannels list to know which
+	 * channels to clean up.
+	 */
+	if (listenChannels != NIL)
+	{
+		LWLockAcquire(NotifyQueueLock, LW_EXCLUSIVE);
+
+		foreach(p, listenChannels)
+		{
+			char	   *channel = (char *) lfirst(p);
+			NotifyChannelKey key;
+			NotifyChannelEntry *entry;
+
+			key.dboid = MyDatabaseId;
+			strlcpy(key.channel, channel, NAMEDATALEN);
+
+			/* Find the channel entry */
+			entry = (NotifyChannelEntry *) hash_search(NotifyChannelHash,
+													   &key,
+													   HASH_FIND,
+													   NULL);
+			if (entry)
+			{
+				dlist_iter	iter;
+
+				/* Find and remove our backend from the listener list */
+				dlist_foreach(iter, &entry->listeners)
+				{
+					NotifyListenerNode *listener = dlist_container(NotifyListenerNode,
+																   node, iter.cur);
+					if (listener->procno == MyProcNumber)
+					{
+						dlist_delete(&listener->node);
+						pfree(listener);
+						break;
+					}
+				}
+
+				/* If this was the last listener, remove the channel entry */
+				if (dlist_is_empty(&entry->listeners))
+				{
+					hash_search(NotifyChannelHash, &key, HASH_REMOVE, NULL);
+				}
+			}
+		}
+
+		LWLockRelease(NotifyQueueLock);
+	}
 
 	list_free_deep(listenChannels);
 	listenChannels = NIL;
@@ -1565,12 +1753,15 @@ asyncQueueFillWarning(void)
 /*
  * Send signals to listening backends.
  *
- * Normally we signal only backends in our own database, since only those
- * backends could be interested in notifies we send.  However, if there's
- * notify traffic in our database but no traffic in another database that
- * does have listener(s), those listeners will fall further and further
- * behind.  Waken them anyway if they're far enough behind, so that they'll
- * advance their queue position pointers, allowing the global tail to advance.
+ * This implements a two-phase signaling model:
+ *
+ * Phase 1 (Primary Path): Use the subscription registry to signal only those
+ * backends that are listening on the specific channels we just notified.
+ * This is the common case and provides targeted, efficient signaling.
+ *
+ * Phase 2 (Secondary Path): Periodically scan all backends to find those that
+ * have fallen behind. This ensures the queue can be cleaned up even if some
+ * backends aren't receiving notifications on their channels.
  *
  * Since we know the ProcNumber and the Pid the signaling is quite cheap.
  *
@@ -1582,55 +1773,121 @@ SignalBackends(void)
 {
 	int32	   *pids;
 	ProcNumber *procnos;
+	bool	   *signaled;
 	int			count;
+	ListCell   *p;
+	bool		need_maintenance_scan = false;
 
 	/*
-	 * Identify backends that we need to signal.  We don't want to send
-	 * signals while holding the NotifyQueueLock, so this loop just builds a
-	 * list of target PIDs.
-	 *
+	 * We need arrays to collect the PIDs of backends to signal.
 	 * XXX in principle these pallocs could fail, which would be bad. Maybe
 	 * preallocate the arrays?  They're not that large, though.
 	 */
 	pids = (int32 *) palloc(MaxBackends * sizeof(int32));
 	procnos = (ProcNumber *) palloc(MaxBackends * sizeof(ProcNumber));
+	signaled = (bool *) palloc0(MaxBackends * sizeof(bool));
 	count = 0;
 
 	LWLockAcquire(NotifyQueueLock, LW_EXCLUSIVE);
-	for (ProcNumber i = QUEUE_FIRST_LISTENER; i != INVALID_PROC_NUMBER; i = QUEUE_NEXT_LISTENER(i))
-	{
-		int32		pid = QUEUE_BACKEND_PID(i);
-		QueuePosition pos;
 
-		Assert(pid != InvalidPid);
-		pos = QUEUE_BACKEND_POS(i);
-		if (QUEUE_BACKEND_DBOID(i) == MyDatabaseId)
+	/*
+	 * Phase 1: Targeted signaling using the subscription registry
+	 *
+	 * Iterate through the notifications we just sent and signal only the
+	 * backends that are listening on those specific channels.
+	 */
+	if (pendingNotifies != NULL)
+	{
+		foreach(p, pendingNotifies->events)
 		{
-			/*
-			 * Always signal listeners in our own database, unless they're
-			 * already caught up (unlikely, but possible).
-			 */
-			if (QUEUE_POS_EQUAL(pos, QUEUE_HEAD))
-				continue;
+			Notification *n = (Notification *) lfirst(p);
+			NotifyChannelKey key;
+			NotifyChannelEntry *entry;
+
+			/* Build key for hash lookup */
+			key.dboid = MyDatabaseId;
+			strlcpy(key.channel, n->data, NAMEDATALEN);
+
+			/* Find listeners for this channel */
+			entry = (NotifyChannelEntry *) hash_search(NotifyChannelHash,
+													   &key,
+													   HASH_FIND,
+													   NULL);
+			if (entry)
+			{
+				dlist_iter	iter;
+
+				/* Signal each backend listening on this channel */
+				dlist_foreach(iter, &entry->listeners)
+				{
+					NotifyListenerNode *listener = dlist_container(NotifyListenerNode,
+																   node, iter.cur);
+					ProcNumber	procno = listener->procno;
+
+					/* Skip if we've already signaled this backend */
+					if (signaled[procno])
+						continue;
+
+					/* Skip if backend is already caught up */
+					if (QUEUE_POS_EQUAL(QUEUE_BACKEND_POS(procno), QUEUE_HEAD))
+						continue;
+
+					/* Collect this backend for signaling */
+					pids[count] = QUEUE_BACKEND_PID(procno);
+					procnos[count] = procno;
+					signaled[procno] = true;
+					count++;
+				}
+			}
 		}
-		else
+	}
+
+	/*
+	 * Decide if we need a maintenance scan. We do this periodically when
+	 * the queue head crosses a page boundary.
+	 */
+	if (tryAdvanceTail)
+		need_maintenance_scan = true;
+
+	/*
+	 * Phase 2: Maintenance scan (secondary path)
+	 *
+	 * Periodically scan all backends to find those that have fallen far behind.
+	 * This ensures the queue doesn't grow indefinitely if backends are listening
+	 * but not receiving notifications on their channels.
+	 */
+	if (need_maintenance_scan)
+	{
+		for (ProcNumber i = QUEUE_FIRST_LISTENER; i != INVALID_PROC_NUMBER; i = QUEUE_NEXT_LISTENER(i))
 		{
+			int32		pid = QUEUE_BACKEND_PID(i);
+			QueuePosition pos;
+
+			Assert(pid != InvalidPid);
+
+			/* Skip if we already signaled this backend in phase 1 */
+			if (signaled[i])
+				continue;
+
+			pos = QUEUE_BACKEND_POS(i);
+
 			/*
-			 * Listeners in other databases should be signaled only if they
-			 * are far behind.
+			 * Signal backends that are far behind, regardless of database.
+			 * This helps advance the global tail pointer.
 			 */
 			if (asyncQueuePageDiff(QUEUE_POS_PAGE(QUEUE_HEAD),
-								   QUEUE_POS_PAGE(pos)) < QUEUE_CLEANUP_DELAY)
-				continue;
+								   QUEUE_POS_PAGE(pos)) >= QUEUE_CLEANUP_DELAY)
+			{
+				pids[count] = pid;
+				procnos[count] = i;
+				count++;
+			}
 		}
-		/* OK, need to signal this one */
-		pids[count] = pid;
-		procnos[count] = i;
-		count++;
 	}
+
 	LWLockRelease(NotifyQueueLock);
 
-	/* Now send signals */
+	/* Now send signals to the collected backends */
 	for (int i = 0; i < count; i++)
 	{
 		int32		pid = pids[i];
@@ -1657,6 +1914,7 @@ SignalBackends(void)
 
 	pfree(pids);
 	pfree(procnos);
+	pfree(signaled);
 }
 
 /*
