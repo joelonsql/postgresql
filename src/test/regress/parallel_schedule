@@ -13,6 +13,8 @@ test: test_setup
 
 test: foreign_key_join_cte
 
+test: foreign_key_join_group_by
+
 # ----------
 # The first group of parallel tests
 # ----------
