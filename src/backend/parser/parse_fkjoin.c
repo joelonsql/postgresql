@@ -492,12 +492,13 @@ analyze_join_tree(ParseState *pstate, Node *n,
 
 								/*
 								 * Check if filtered, either by RLS or
-								 * WHERE/OFFSET/LIMIT
+								 * WHERE/OFFSET/LIMIT/HAVING
 								 */
 								if (!rel->rd_rel->relrowsecurity &&
 									(!query || (!query->jointree->quals &&
 												!query->limitOffset &&
-												!query->limitCount)))
+												!query->limitCount &&
+												!query->havingQual)))
 									*functional_dependencies = list_make2(rte->rteid, rte->rteid);
 							}
 
@@ -940,7 +941,6 @@ drill_down_to_base_rel(ParseState *pstate, Query *query, RangeTblEntry *rte,
 				int			next_rtindex = 0;
 				List	   *next_attnums = NIL;
 				ListCell   *lc;
-				ListCell   *grp_lc;
 
 				/*
 				 * For RTE_GROUP, we need to find which base relation the
@@ -951,29 +951,20 @@ drill_down_to_base_rel(ParseState *pstate, Query *query, RangeTblEntry *rte,
 				{
 					int			attno = lfirst_int(lc);
 					Var		   *var = NULL;
+					Node	   *expr;
 
 					/*
-					 * Find the corresponding expression in groupexprs for
-					 * this attribute number. GROUP BY columns should be
-					 * simple Vars.
+					 * For RTE_GROUP, the attribute number corresponds to the
+					 * position in the groupexprs list (1-based). Get the
+					 * expression at that position.
 					 */
-					foreach(grp_lc, rte->groupexprs)
+					if (attno > 0 && attno <= list_length(rte->groupexprs))
 					{
-						Node	   *expr = (Node *) lfirst(grp_lc);
+						expr = (Node *) list_nth(rte->groupexprs, attno - 1);
 
 						if (IsA(expr, Var))
 						{
-							Var		   *group_var = (Var *) expr;
-
-							/*
-							 * If this is the Var we're looking for based on
-							 * the attribute number in the GROUP BY result.
-							 */
-							if (group_var->varattno == attno)
-							{
-								var = group_var;
-								break;
-							}
+							var = (Var *) expr;
 						}
 					}
 
@@ -1060,8 +1051,7 @@ drill_down_to_base_rel_query(ParseState *pstate, Query *query,
 	if (query->commandType != CMD_SELECT ||
 		query->distinctClause ||
 		query->groupingSets ||
-		query->hasTargetSRFs ||
-		query->havingQual)
+		query->hasTargetSRFs)
 	{
 		ereport(ERROR,
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
