@@ -169,6 +169,7 @@ static struct _if_value
 %x xus
 %x xcond
 %x xskip
+%x xleftarrow
 
 /* Additional exclusive states that are specific to ECPG */
 %x C SQL incl def def_ident undef
@@ -464,13 +465,33 @@ cppline			{space}*#([^i][A-Za-z]*|{if}|{ifdef}|{ifndef}|{import})((\/\*[^*/]*\*+
 %%
 
 %{
-		static bool inleftarrow = false;
-
 		/* code to execute during start of each call of yylex() */
 		char *newdefsymbol = NULL;
 
 		token_start = NULL;
 %}
+
+<xleftarrow>{
+"-"			{
+					BEGIN(SQL);
+					return LEFT_ARROW_MINUS;
+				}
+.|\n		{
+					/*
+					 * This should not happen - we enter xleftarrow state only
+					 * after seeing "<" and pushing back "-". The first character
+					 * we see should be that "-". However, if we see something else,
+					 * push it back for rescanning in SQL state to avoid getting
+					 * stuck.
+					 */
+					yyless(0);
+					BEGIN(SQL);
+				}
+<<EOF>>		{
+					BEGIN(SQL);
+					yyterminate();
+				}
+}
 
 <SQL>{
 {whitespace}	{
@@ -878,11 +899,6 @@ cppline			{space}*#([^i][A-Za-z]*|{if}|{ifdef}|{ifndef}|{import})((\/\*[^*/]*\*+
 					 */
 					if (yytext[0] == ';' && struct_level == 0)
 						BEGIN(C);
-					if (yytext[0] == '-' && inleftarrow)
-					{
-						inleftarrow = false;
-						return LEFT_ARROW_MINUS;
-					}
 					return yytext[0];
 				}
 
@@ -912,20 +928,8 @@ cppline			{space}*#([^i][A-Za-z]*|{if}|{ifdef}|{ifndef}|{import})((\/\*[^*/]*\*+
 					{
 						/* Strip the unwanted chars from the token */
 						yyless(1);
-
-						inleftarrow = true;
-
+						BEGIN(xleftarrow);
 						return LEFT_ARROW_LESS;
-					}
-
-					if (nchars == 1 && yytext[0] == '-' && inleftarrow)
-					{
-						/* Strip the unwanted chars from the token */
-						if (nchars < yyleng)
-							yyless(nchars);
-
-						inleftarrow = false;
-						return LEFT_ARROW_MINUS;
 					}
 
 					/*

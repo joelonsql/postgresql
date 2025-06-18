@@ -1,0 +1,123 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+/* test foreign key join syntax parsing of <- and -> operators */
+EXEC SQL INCLUDE ../regression;
+
+int main() {
+  EXEC SQL BEGIN DECLARE SECTION;
+    int result;
+    int c2, c4;
+  EXEC SQL END DECLARE SECTION;
+
+  ECPGdebug(1, stderr);
+  EXEC SQL CONNECT TO REGRESSDB1;
+
+  EXEC SQL SET AUTOCOMMIT TO ON;
+  EXEC SQL WHENEVER SQLWARNING SQLPRINT;
+  EXEC SQL WHENEVER SQLERROR SQLPRINT;
+
+  /* Create tables for testing */
+  EXEC SQL CREATE TABLE t1 (
+    c1 INT NOT NULL,
+    c2 INT NOT NULL,
+    CONSTRAINT t1_pkey PRIMARY KEY (c1)
+  );
+
+  EXEC SQL CREATE TABLE t2 (
+    c3 INT NOT NULL,
+    c4 INT NOT NULL,
+    CONSTRAINT t2_pkey PRIMARY KEY (c3),
+    CONSTRAINT t2_c3_fkey FOREIGN KEY (c3) REFERENCES t1 (c1)
+  );
+
+  /* Insert minimal data for testing */
+  EXEC SQL INSERT INTO t1 (c1, c2) VALUES (1, 10);
+  EXEC SQL INSERT INTO t1 (c1, c2) VALUES (2, 20);
+  EXEC SQL INSERT INTO t2 (c3, c4) VALUES (1, 30);
+
+  printf("Testing foreign key join parser with <- and -> operators\n");
+  printf("=========================================================\n\n");
+
+  /* Test that we didn't break the parser - this should parse as 1 < (-2) */
+  EXEC SQL SELECT (1<-2)::int INTO :result;
+  printf("SELECT (1<-2)::int: result = %d (should be 0confdefs.h)\n", result);
+
+  /* These should all parse successfully */
+  printf("\nTesting valid -> syntax variations:\n");
+
+  EXEC SQL SELECT t1.c2, t2.c4
+           INTO :c2, :c4
+           FROM t1 JOIN t2 KEY (c3) -> t1 (c1);
+  printf("  SELECT * FROM t1 JOIN t2 KEY (c3) -> t1 (c1) -- ok (c2=%d, c4=%d)\n", c2, c4);
+
+  EXEC SQL SELECT t1.c2, t2.c4
+           INTO :c2, :c4
+           FROM t1 JOIN t2 KEY (c3) ->/*comment*/ t1 (c1);
+  printf("  SELECT * FROM t1 JOIN t2 KEY (c3) ->/*comment*/ t1 (c1) -- ok (c2=%d, c4=%d)\n", c2, c4);
+
+  EXEC SQL SELECT t1.c2, t2.c4
+           INTO :c2, :c4
+           FROM t1 JOIN t2 KEY (c3) /*comment*/-> t1 (c1);
+  printf("  SELECT * FROM t1 JOIN t2 KEY (c3) /*comment*/-> t1 (c1) -- ok (c2=%d, c4=%d)\n", c2, c4);
+
+  EXEC SQL SELECT t1.c2, t2.c4
+           INTO :c2, :c4
+           FROM t1 JOIN t2 KEY (c3) /*comment*/->/*comment*/ t1 (c1);
+  printf("  SELECT * FROM t1 JOIN t2 KEY (c3) /*comment*/->/*comment*/ t1 (c1) -- ok (c2=%d, c4=%d)\n", c2, c4);
+
+  /* These should all parse successfully */
+  printf("\nTesting valid <- syntax variations:\n");
+
+  EXEC SQL SELECT t1.c2, t2.c4
+           INTO :c2, :c4
+           FROM t2 JOIN t1 KEY (c1) <- t2 (c3);
+  printf("  SELECT * FROM t2 JOIN t1 KEY (c1) <- t2 (c3) -- ok (c2=%d, c4=%d)\n", c2, c4);
+
+  EXEC SQL SELECT t1.c2, t2.c4
+           INTO :c2, :c4
+           FROM t2 JOIN t1 KEY (c1) <-/*comment*/ t2 (c3);
+  printf("  SELECT * FROM t2 JOIN t1 KEY (c1) <-/*comment*/ t2 (c3) -- ok (c2=%d, c4=%d)\n", c2, c4);
+
+  EXEC SQL SELECT t1.c2, t2.c4
+           INTO :c2, :c4
+           FROM t2 JOIN t1 KEY (c1) /*comment*/<- t2 (c3);
+  printf("  SELECT * FROM t2 JOIN t1 KEY (c1) /*comment*/<- t2 (c3) -- ok (c2=%d, c4=%d)\n", c2, c4);
+
+  EXEC SQL SELECT t1.c2, t2.c4
+           INTO :c2, :c4
+           FROM t2 JOIN t1 KEY (c1) /*comment*/<-/*comment*/ t2 (c3);
+  printf("  SELECT * FROM t2 JOIN t1 KEY (c1) /*comment*/<-/*comment*/ t2 (c3) -- ok (c2=%d, c4=%d)\n", c2, c4);
+
+  /* Test that < and - with space are parsed as separate operators, not <- */
+  printf("\nTesting that < and - with space are separate operators:\n");
+
+  /* This should work as a comparison: 1 < (-2) */
+  EXEC SQL SELECT (1 < - 2)::int INTO :result;
+  printf("  SELECT (1 < - 2)::int: result = %d (should be 0)\n", result);
+
+  /* Test less-than operator followed by negative number */
+  EXEC SQL SELECT (3 < -1)::int INTO :result;
+  printf("  SELECT (3 < -1)::int: result = %d (should be 0)\n", result);
+
+  /* Test the ambiguous case: should parse as 3 < (-2) */
+  EXEC SQL SELECT (3<-2)::int INTO :result;
+  printf("  SELECT (3<-2)::int: result = %d (should be 0)\n", result);
+
+  /* Test some cases that should be true */
+  EXEC SQL SELECT (-1 < 1)::int INTO :result;
+  printf("  SELECT (-1 < 1)::int: result = %d (should be 1)\n", result);
+
+  EXEC SQL SELECT (-3<-2)::int INTO :result;
+  printf("  SELECT (-3<-2)::int: result = %d (should be 1)\n", result);
+
+  /* Clean up */
+  EXEC SQL DROP TABLE t2;
+  EXEC SQL DROP TABLE t1;
+
+  EXEC SQL DISCONNECT ALL;
+
+  printf("\nAll parser tests completed successfully!\n");
+  return 0;
+}

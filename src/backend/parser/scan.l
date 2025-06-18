@@ -170,6 +170,7 @@ static void check_escape_warning(core_yyscan_t yyscanner);
  *  <xui> quoted identifier with Unicode escapes
  *  <xus> quoted string with Unicode escapes
  *  <xeu> Unicode surrogate pair in extended quoted string
+ *  <xleftarrow> left arrow in extended quoted strings
  *
  * Remember to add an <<EOF>> case whenever you add a new exclusive state!
  * The default one is probably not the right thing.
@@ -186,6 +187,7 @@ static void check_escape_warning(core_yyscan_t yyscanner);
 %x xui
 %x xus
 %x xeu
+%x xleftarrow
 
 /*
  * In order to make the world safe for Windows and Mac clients as well as
@@ -440,6 +442,29 @@ other			.
  */
 
 %%
+
+<xleftarrow>{
+"-"			{
+					SET_YYLLOC();
+					BEGIN(INITIAL);
+					return LEFT_ARROW_MINUS;
+				}
+.|\n		{
+					/*
+					 * This should not happen - we enter xleftarrow state only
+					 * after seeing "<" and pushing back "-". The first character
+					 * we see should be that "-". However, if we see something else,
+					 * push it back for rescanning in INITIAL state to avoid getting
+					 * stuck.
+					 */
+					yyless(0);
+					BEGIN(INITIAL);
+				}
+<<EOF>>		{
+					BEGIN(INITIAL);
+					yyterminate();
+				}
+}
 
 {whitespace}	{
 					/* ignore */
@@ -886,11 +911,6 @@ other			.
 
 {self}			{
 					SET_YYLLOC();
-					if (yytext[0] == '-' && yyextra->inleftarrow)
-					{
-						yyextra->inleftarrow = false;
-						return LEFT_ARROW_MINUS;
-					}
 					return yytext[0];
 				}
 
@@ -920,20 +940,8 @@ other			.
 					{
 						/* Strip the unwanted chars from the token */
 						yyless(1);
-
-						yyextra->inleftarrow = true;
-
+						BEGIN(xleftarrow);
 						return LEFT_ARROW_LESS;
-					}
-
-					if (nchars == 1 && yytext[0] == '-' && yyextra->inleftarrow)
-					{
-						/* Strip the unwanted chars from the token */
-						if (nchars < yyleng)
-							yyless(nchars);
-
-						yyextra->inleftarrow = false;
-						return LEFT_ARROW_MINUS;
 					}
 
 					/*
@@ -1312,8 +1320,6 @@ scanner_init(const char *str,
 	yyext->literalalloc = 1024;
 	yyext->literalbuf = (char *) palloc(yyext->literalalloc);
 	yyext->literallen = 0;
-
-	yyext->inleftarrow = false;
 
 	return scanner;
 }
