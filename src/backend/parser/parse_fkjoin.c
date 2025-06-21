@@ -35,39 +35,11 @@
 #include "utils/rel.h"
 #include "utils/syscache.h"
 
-/*
- * search_cte_in_stack
- *		Search for a CTE in our query stack at the specified level
- */
-static CommonTableExpr *
-search_cte_in_stack(const char *name, int levelsup, List *query_stack)
+typedef struct QueryStack
 {
-	ListCell   *lc;
-	int			current_level = 0;
-
-	foreach(lc, query_stack)
-	{
-		Query	   *q = (Query *) lfirst(lc);
-
-		if (current_level == levelsup)
-		{
-			ListCell   *cl;
-
-			foreach(cl, q->cteList)
-			{
-				CommonTableExpr *cte = (CommonTableExpr *) lfirst(cl);
-
-				if (strcmp(cte->ctename, name) == 0)
-					return cte;
-			}
-			/* CTE not found at this level */
-			return NULL;
-		}
-		current_level++;
-	}
-	/* Requested level not in stack */
-	return NULL;
-}
+	struct QueryStack *parent;
+	Query	   *query;
+} QueryStack;
 
 static Node *build_fk_join_on_clause(ParseState *pstate,
 									 ParseNamespaceColumn *l_nscols, List *l_attnums,
@@ -75,16 +47,14 @@ static Node *build_fk_join_on_clause(ParseState *pstate,
 static Oid	find_foreign_key(Oid referencing_relid, Oid referenced_relid,
 							 List *referencing_attnums, List *referenced_attnums);
 static char *column_list_to_string(const List *columns);
-static RangeTblEntry *drill_down_to_base_rel(ParseState *pstate, Query *query,
-											 RangeTblEntry *rte,
-
+static RangeTblEntry *drill_down_to_base_rel(ParseState *pstate, RangeTblEntry *rte,
 											 List *attnos, List **base_attnums,
-											 int location, List *query_stack);
-static CommonTableExpr *find_cte_for_rte(ParseState *pstate, Query *query,
-										 RangeTblEntry *rte, List *query_stack);
+											 int location, QueryStack *query_stack);
+static CommonTableExpr *find_cte_for_rte(ParseState *pstate, QueryStack *query_stack,
+										 RangeTblEntry *rte);
 static RangeTblEntry *drill_down_to_base_rel_query(ParseState *pstate, Query *query,
 												   List *attnos, List **base_attnums,
-												   int location, List *query_stack);
+												   int location, QueryStack *query_stack);
 
 static bool check_group_by_preserves_uniqueness(Query *query, List **uniqueness_preservation);
 static bool check_unique_index_covers_columns(Relation rel, Bitmapset *columns);
@@ -107,7 +77,7 @@ static void analyze_join_tree(ParseState *pstate, Node *n,
 							  List **functional_dependencies,
 							  bool *found,
 							  int location,
-							  List *query_stack);
+							  QueryStack *query_stack);
 
 void
 transformAndValidateForeignKeyJoin(ParseState *pstate, JoinExpr *join,
@@ -258,14 +228,14 @@ transformAndValidateForeignKeyJoin(ParseState *pstate, JoinExpr *join,
 		referenced_attnums = lappend_int(referenced_attnums, col_index + 1);
 	}
 
-	base_referencing_rte = drill_down_to_base_rel(pstate, NULL, referencing_rte,
+	base_referencing_rte = drill_down_to_base_rel(pstate, referencing_rte,
 												  referencing_attnums,
 												  &referencing_base_attnums,
-												  fkjn->location, NIL);
-	base_referenced_rte = drill_down_to_base_rel(pstate, NULL, referenced_rte,
+												  fkjn->location, NULL);
+	base_referenced_rte = drill_down_to_base_rel(pstate, referenced_rte,
 												 referenced_attnums,
 												 &referenced_base_attnums,
-												 fkjn->location, NIL);
+												 fkjn->location, NULL);
 
 	referencing_relid = base_referencing_rte->relid;
 	referenced_relid = base_referenced_rte->relid;
@@ -290,8 +260,8 @@ transformAndValidateForeignKeyJoin(ParseState *pstate, JoinExpr *join,
 						column_list_to_string(referenced_cols)),
 				 parser_errposition(pstate, fkjn->location)));
 
-	analyze_join_tree(pstate, referencing_arg, NULL, referencing_rte->rteid, &referencing_uniqueness_preservation, &referencing_functional_dependencies, &referencing_found, fkjn->location, NIL);
-	analyze_join_tree(pstate, referenced_arg, NULL, referenced_rte->rteid, &referenced_uniqueness_preservation, &referenced_functional_dependencies, &referenced_found, fkjn->location, NIL);
+	analyze_join_tree(pstate, referencing_arg, NULL, referencing_rte->rteid, &referencing_uniqueness_preservation, &referencing_functional_dependencies, &referencing_found, fkjn->location, NULL);
+	analyze_join_tree(pstate, referenced_arg, NULL, referenced_rte->rteid, &referenced_uniqueness_preservation, &referenced_functional_dependencies, &referenced_found, fkjn->location, NULL);
 
 	/* Check uniqueness preservation */
 	if (!list_member(referenced_uniqueness_preservation, referenced_id))
@@ -357,7 +327,7 @@ analyze_join_tree(ParseState *pstate, Node *n,
 				  List **functional_dependencies,
 				  bool *found,
 				  int location,
-				  List *query_stack)
+				  QueryStack *query_stack)
 {
 	RangeTblEntry *rte;
 	Query	   *inner_query = NULL;
@@ -426,11 +396,11 @@ analyze_join_tree(ParseState *pstate, Node *n,
 					break;
 				}
 
-				base_referencing_rte = drill_down_to_base_rel(pstate, NULL, referencing_rte,
+				base_referencing_rte = drill_down_to_base_rel(pstate, referencing_rte,
 															  fkjn->referencingAttnums,
 															  &referencing_base_attnums,
 															  location, query_stack);
-				base_referenced_rte = drill_down_to_base_rel(pstate, NULL, referenced_rte,
+				base_referenced_rte = drill_down_to_base_rel(pstate, referenced_rte,
 															 fkjn->referencedAttnums,
 															 &referenced_base_attnums,
 															 location, query_stack);
@@ -515,9 +485,9 @@ analyze_join_tree(ParseState *pstate, Node *n,
 						{
 							CommonTableExpr *cte;
 
-							cte = find_cte_for_rte(pstate, query, rte, query_stack);
+							cte = find_cte_for_rte(pstate, query_stack, rte);
 							if (!cte)
-								elog(ERROR, "could not find CTE \"%s\"", rte->ctename);
+								elog(ERROR, "could not find CTE \"%s\" (analyze_join_tree)", rte->ctename);
 
 							if (!cte->cterecursive && IsA(cte->ctequery, Query))
 								inner_query = (Query *) cte->ctequery;
@@ -542,18 +512,12 @@ analyze_join_tree(ParseState *pstate, Node *n,
 					if (inner_query->jointree && inner_query->jointree->fromlist &&
 						list_length(inner_query->jointree->fromlist) == 1)
 					{
-						List	   *new_stack;
-
-						/*
-						 * Create a new stack for the recursive call, with the
-						 * inner query at the head.
-						 */
-						new_stack = lcons(inner_query, query_stack);
+						QueryStack	new_stack = {.parent=query_stack, .query=inner_query};
 
 						analyze_join_tree(pstate,
 										  (Node *) linitial(inner_query->jointree->fromlist),
 										  inner_query, rte_id, uniqueness_preservation, functional_dependencies, found, location,
-										  new_stack);
+										  &new_stack);
 
 						/*
 						 * If the inner query has GROUP BY, check if it
@@ -764,50 +728,37 @@ column_list_to_string(const List *columns)
 
 /*
  * find_cte_for_rte
- *              Locate the CTE referenced by an RTE either in the supplied Query
- *              or, failing that, in the ParseState's CTE namespace.
+ *              Locate the CTE referenced by an RTE either in the supplied
+ *              stack of queries or in the ParseState's namespace.
  */
 static CommonTableExpr *
-find_cte_for_rte(ParseState *pstate, Query *query, RangeTblEntry *rte, List *query_stack)
+find_cte_for_rte(ParseState *pstate, QueryStack *query_stack, RangeTblEntry *rte)
 {
-	ListCell   *lc;
-	Index		levelsup;
+	Index		levelsup = rte->ctelevelsup;
 
 	Assert(rte->rtekind == RTE_CTE);
 
-	if (query != NULL && rte->ctelevelsup == 0)
+	for (QueryStack *qs = query_stack; qs; qs = qs->parent)
 	{
-		foreach(lc, query->cteList)
+		if (levelsup == 0)
 		{
-			CommonTableExpr *cte = (CommonTableExpr *) lfirst(lc);
+			ListCell   *lc;
 
-			if (strcmp(cte->ctename, rte->ctename) == 0)
-				return cte;
+			foreach(lc, qs->query->cteList)
+			{
+				CommonTableExpr *cte = castNode(CommonTableExpr, lfirst(lc));
+
+				if (strcmp(cte->ctename, rte->ctename) == 0)
+					return cte;
+			}
+
+			/* shouldn't happen */
+			elog(ERROR, "could not find CTE \"%s\"", rte->ctename);
 		}
+		levelsup--;
 	}
 
-	if (pstate != NULL)
-	{
-		CommonTableExpr *cte = scanNameSpaceForCTE(pstate, rte->ctename,
-												   &levelsup);
-
-		if (cte)
-			return cte;
-	}
-
-	/*
-	 * If we still haven't found the CTE and we have a query stack, search for
-	 * outer-level CTEs in our stack
-	 */
-	if (query_stack != NIL)
-	{
-		CommonTableExpr *cte = search_cte_in_stack(rte->ctename, rte->ctelevelsup, query_stack);
-
-		if (cte)
-			return cte;
-	}
-
-	return NULL;
+	return GetCTEForRTE(pstate, rte, levelsup - rte->ctelevelsup);
 }
 
 /*
@@ -815,9 +766,9 @@ find_cte_for_rte(ParseState *pstate, Query *query, RangeTblEntry *rte, List *que
  *		Resolves the base relation from a potentially derived relation
  */
 static RangeTblEntry *
-drill_down_to_base_rel(ParseState *pstate, Query *query, RangeTblEntry *rte,
+drill_down_to_base_rel(ParseState *pstate, RangeTblEntry *rte,
 					   List *attnums, List **base_attnums,
-					   int location, List *query_stack)
+					   int location, QueryStack *query_stack)
 {
 	RangeTblEntry *base_rte = NULL;
 
@@ -866,9 +817,9 @@ drill_down_to_base_rel(ParseState *pstate, Query *query, RangeTblEntry *rte,
 			{
 				CommonTableExpr *cte;
 
-				cte = find_cte_for_rte(pstate, query, rte, query_stack);
+				cte = find_cte_for_rte(pstate, query_stack, rte);
 				if (!cte)
-					elog(ERROR, "could not find CTE \"%s\"", rte->ctename);
+					elog(ERROR, "could not find CTE \"%s\" (drill_down_to_base_rel)", rte->ctename);
 
 				if (cte->cterecursive)
 					ereport(ERROR,
@@ -920,8 +871,8 @@ drill_down_to_base_rel(ParseState *pstate, Query *query, RangeTblEntry *rte,
 
 				Assert(next_rtindex != 0);
 
-				base_rte = drill_down_to_base_rel(pstate, query,
-												  rt_fetch(next_rtindex, (query ? query->rtable : pstate->p_rtable)),
+				base_rte = drill_down_to_base_rel(pstate,
+												  rt_fetch(next_rtindex, (query_stack ? query_stack->query->rtable : pstate->p_rtable)),
 												  next_attnums,
 												  base_attnums,
 												  location,
@@ -992,8 +943,8 @@ drill_down_to_base_rel(ParseState *pstate, Query *query, RangeTblEntry *rte,
 							 errmsg("no valid columns found in GROUP BY for foreign key join"),
 							 parser_errposition(pstate, location)));
 
-				base_rte = drill_down_to_base_rel(pstate, query,
-												  rt_fetch(next_rtindex, (query ? query->rtable : pstate->p_rtable)),
+				base_rte = drill_down_to_base_rel(pstate,
+												  rt_fetch(next_rtindex, (query_stack ? query_stack->query->rtable : pstate->p_rtable)),
 												  next_attnums,
 												  base_attnums,
 												  location,
@@ -1019,19 +970,13 @@ drill_down_to_base_rel(ParseState *pstate, Query *query, RangeTblEntry *rte,
 static RangeTblEntry *
 drill_down_to_base_rel_query(ParseState *pstate, Query *query,
 							 List *attnums, List **base_attnums,
-							 int location, List *query_stack)
+							 int location, QueryStack *query_stack)
 {
 	int			next_rtindex = 0;
 	List	   *next_attnums = NIL;
 	ListCell   *lc;
 	RangeTblEntry *result;
-	List	   *new_stack;
-
-	/*
-	 * Create a new stack for the recursive call, with the current query at
-	 * the head.
-	 */
-	new_stack = lcons(query, query_stack);
+	QueryStack	new_stack = {.parent=query_stack, .query=query};
 
 	if (query->setOperations != NULL)
 	{
@@ -1095,8 +1040,8 @@ drill_down_to_base_rel_query(ParseState *pstate, Query *query,
 
 	Assert(next_rtindex != 0);
 
-	result = drill_down_to_base_rel(pstate, query, rt_fetch(next_rtindex, query->rtable), next_attnums,
-									base_attnums, location, new_stack);
+	result = drill_down_to_base_rel(pstate, rt_fetch(next_rtindex, query->rtable), next_attnums,
+									base_attnums, location, &new_stack);
 
 	return result;
 }
