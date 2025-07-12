@@ -80,6 +80,9 @@
  *	  signal is sent to every listening backend.
  *	  b) Otherwise, such signals are only sent to each single listening backend
  *	  per channel.
+ *	  Additionally, we use a "wake only tail" optimization: we always signal
+ *	  the backend furthest behind in the queue to help prevent backends from
+ *	  getting far behind and create a chain reaction of wake-ups.
  *	  We can exclude backends that are already up to date, though, and if not,
  *	  we detect if they are way behind and should be kicked to make them
  *	  advance their pointers.
@@ -1730,6 +1733,7 @@ SignalBackends(void)
 	ListCell   *p;
 	bool	   *signaled;
 	bool		broadcast_mode = false;
+	bool		tail_woken = false;
 
 	/*
 	 * Identify backends that we need to signal.  We don't want to send
@@ -1773,18 +1777,19 @@ SignalBackends(void)
 	if (broadcast_mode)
 	{
 		/*
-		 * In broadcast mode, we iterate over all listening backends and signal
-		 * the ones in our database that are not already caught up.
+		 * In broadcast mode, we iterate over all listening backends and
+		 * signal the ones in our database that are not already caught up.
 		 */
 		for (ProcNumber i = QUEUE_FIRST_LISTENER; i != INVALID_PROC_NUMBER; i = QUEUE_NEXT_LISTENER(i))
 		{
-			int32       pid;
+			int32		pid;
 			QueuePosition pos;
 
 			if (QUEUE_BACKEND_DBOID(i) != MyDatabaseId)
 				continue;
 
 			pos = QUEUE_BACKEND_POS(i);
+
 			/*
 			 * Always signal listeners in our own database, unless they're
 			 * already caught up.
@@ -1868,10 +1873,19 @@ SignalBackends(void)
 			continue;
 
 		/*
-		 * Skip signaling listeners if they are not far behind.
+		 * Wake only tail optimization: Signal the backend that is furthest
+		 * behind to help prevent backends from getting far behind in the
+		 * first place. This creates a chain reaction where each backend
+		 * eventually wakes up the next one as notifications are processed,
+		 * avoiding thundering herd.
+		 *
+		 * Otherwise, only skip signaling listeners if they are not far
+		 * behind.
 		 */
-		if (asyncQueuePageDiff(QUEUE_POS_PAGE(QUEUE_HEAD),
-							   QUEUE_POS_PAGE(pos)) < QUEUE_CLEANUP_DELAY)
+		if (!tail_woken && asyncQueuePageDiff(QUEUE_POS_PAGE(QUEUE_TAIL),
+											  QUEUE_POS_PAGE(pos)) == 0)
+			tail_woken = true;
+		else
 			continue;
 
 		pid = QUEUE_BACKEND_PID(i);
@@ -2865,6 +2879,7 @@ GetPendingNotifyChannels(void)
 		foreach(q, channels)
 		{
 			char	   *existing = (char *) lfirst(q);
+
 			if (strcmp(existing, channel) == 0)
 			{
 				found = true;
