@@ -24,8 +24,11 @@
  *	  All notification messages are placed in the queue and later read out
  *	  by listening backends.
  *
- *	  There is no central knowledge of which backend listens on which channel;
- *	  every backend has its own list of interesting channels.
+ *	  In addition to each backend maintaining its own list of channels, we also
+ *	  maintain a central hash table that tracks channels with single listeners.
+ *	  When a channel has exactly one listening backend, we can signal just that
+ *	  backend. For channels with multiple listeners, we signal all listening
+ *	  backends.
  *
  *	  Although there is only one queue, notifications are treated as being
  *	  database-local; this is done by including the sender's database OID
@@ -71,13 +74,15 @@
  *	  make any actual updates to the effective listen state (listenChannels).
  *	  Then we signal any backends that may be interested in our messages
  *	  (including our own backend, if listening).  This is done by
- *	  SignalBackends(), which scans the list of listening backends and sends a
- *	  PROCSIG_NOTIFY_INTERRUPT signal to every listening backend (we don't
- *	  know which backend is listening on which channel so we must signal them
- *	  all).  We can exclude backends that are already up to date, though, and
- *	  we can also exclude backends that are in other databases (unless they
- *	  are way behind and should be kicked to make them advance their
- *	  pointers).
+ *	  SignalBackends(), which has two modes of operation, depending on
+ *	  if any of our channels have multiple listening backends or not:
+ *	  a) If there are multiple listening backends, a PROCSIG_NOTIFY_INTERRUPT
+ *	  signal is sent to every listening backend.
+ *	  b) Otherwise, such signals are only sent to each single listening backend
+ *	  per channel.
+ *	  We can exclude backends that are already up to date, though, and if not,
+ *	  we detect if they are way behind and should be kicked to make them
+ *	  advance their pointers.
  *
  *	  Finally, after we are out of the transaction altogether and about to go
  *	  idle, we scan the queue for messages that need to be sent to our
@@ -166,31 +171,54 @@
 /*
  * Channel hash table definitions
  *
- * We maintain a hash table mapping channel names to a single listening
- * backend. This allows O(1) notification delivery when there is exactly
- * one listener per channel. If multiple backends listen on the same channel,
- * we fall back to the O(N) algorithm.
+ * This hash table provides an optimization by tracking which backend is
+ * listening on each channel. Channels are identified by database OID and
+ * channel name, making them database-specific.
  *
- * The maximum size (CHANNEL_HASH_MAX_SIZE) matches the typical port range
- * on operating systems, which is a natural upper bound for channel counts
- * in systems using per-connection channels. If this limit is exceeded,
- * new channels gracefully fall back to O(N) delivery.
+ * When exactly one backend listens on a channel, we signal that specific
+ * backend, avoiding unnecessary signals to all listening backends.
+ *
+ * We fall back to broadcast mode and signal all listening backends when:
+ * 1) Multiple backends listen on the same channel, OR
+ * 2) The hash table runs out of shared memory for new entries
+ *
+ * Note that CHANNEL_HASH_MAX_SIZE is not a hard limit - the hash table can
+ * store more entries than this, but performance will degrade due to bucket
+ * overflow. The actual fallback to broadcast mode occurs only when shared
+ * memory is exhausted and we cannot allocate new hash entries.
+ *
+ * The maximum size (CHANNEL_HASH_MAX_SIZE) is based on the typical OS port
+ * range. This provides a reasonable upper bound for systems that use
+ * per-connection channels.
+ *
  */
-#define CHANNEL_HASH_INIT_SIZE		256		/* initial hash table size */
-#define CHANNEL_HASH_MAX_SIZE		65535	/* maximum number of distinct channels */
+#define CHANNEL_HASH_INIT_SIZE		256
+#define CHANNEL_HASH_MAX_SIZE		65535
 
 /*
- * Entry in the channel hash table. Each entry contains a channel name
- * and a single backend ProcNumber that is listening on that channel.
- * If multiple backends try to listen on the same channel, we mark it
- * as having multiple listeners and fall back to O(N) behavior.
+ * Key structure for the channel hash table.
+ * Channels are database-specific, so we need both the database OID
+ * and the channel name to uniquely identify a channel.
+ */
+typedef struct ChannelHashKey
+{
+	Oid			dboid;
+	char		channel[NAMEDATALEN];
+}			ChannelHashKey;
+
+/*
+ * Each entry contains a channel key (database OID + channel name) and a
+ * single backend ProcNumber that is listening on that channel. If multiple
+ * backends try to listen on the same channel, we mark it as having multiple
+ * listeners and fall back to broadcast behavior.
  */
 typedef struct ChannelEntry
 {
-	char		channel[NAMEDATALEN];	/* channel name */
-	ProcNumber	listener;				/* single backend ID, or INVALID_PROC_NUMBER if multiple */
-	bool		has_multiple_listeners;	/* true if more than one backend listens */
-} ChannelEntry;
+	ChannelHashKey key;
+	ProcNumber	listener;		/* single backend ID, or INVALID_PROC_NUMBER
+								 * if multiple */
+	bool		has_multiple_listeners;
+}			ChannelEntry;
 
 /*
  * Struct representing an entry in the global notify queue
@@ -323,27 +351,8 @@ typedef struct AsyncQueueControl
 
 static AsyncQueueControl *asyncQueueControl;
 
-/* Channel hash table for O(1) notification delivery */
+/* Channel hash table for single listening backend signalling */
 static HTAB *channelHash = NULL;
-
-/*
- * Lock Ordering
- * -------------
- * The channel hash table is protected by NotifyQueueLock rather than its
- * own lock. This simplifies the locking model but requires careful attention
- * to lock ordering to prevent deadlocks.
- *
- * Lock ordering rules:
- * 1. If both NotifyQueueLock and a channel hash partition lock are needed,
- *    NotifyQueueLock MUST be acquired first.
- * 2. In practice, we always hold NotifyQueueLock when accessing the channel
- *    hash, so we don't need to worry about partition locks.
- * 3. NotifyQueueLock is always acquired at the outermost level - never while
- *    holding any other locks that might be used in this module.
- *
- * This ordering is consistently followed throughout this file, which prevents
- * any possibility of deadlock between these locks.
- */
 
 /*
  * GetChannelHash
@@ -362,18 +371,14 @@ GetChannelHash(void)
 
 		/* Set up to attach to the existing shared hash table */
 		MemSet(&hash_ctl, 0, sizeof(hash_ctl));
-		hash_ctl.keysize = NAMEDATALEN;
+		hash_ctl.keysize = sizeof(ChannelHashKey);
 		hash_ctl.entrysize = sizeof(ChannelEntry);
-		hash_ctl.num_partitions = 16;  /* Must match AsyncShmemInit */
 
 		channelHash = ShmemInitHash("Channel Hash",
 									CHANNEL_HASH_INIT_SIZE,
 									CHANNEL_HASH_MAX_SIZE,
 									&hash_ctl,
-									HASH_ELEM | HASH_BLOBS | HASH_PARTITION);
-
-		if (channelHash == NULL)
-			elog(ERROR, "could not find channel hash table");
+									HASH_ELEM | HASH_BLOBS);
 	}
 
 	return channelHash;
@@ -545,11 +550,11 @@ static int	notification_match(const void *key1, const void *key2, Size keysize);
 static void ClearPendingActionsAndNotifies(void);
 
 /* Channel hash table management functions */
-static inline void prepare_channel_key(char *key, const char *channel);
-static void AddChannelListener(const char *channel, ProcNumber procno);
-static void RemoveChannelListener(const char *channel, ProcNumber procno);
-static void RemoveListenerFromAllChannels(ProcNumber procno);
-static ChannelEntry *GetChannelListeners(const char *channel);
+static inline void ChannelHashPrepareKey(ChannelHashKey * key, Oid dboid, const char *channel);
+static void ChannelHashAddListener(const char *channel, ProcNumber procno);
+static void ChannelHashRemoveListener(const char *channel, ProcNumber procno);
+static void ChannelHashRemoveBackendFromAll(ProcNumber procno);
+static ChannelEntry * ChannelHashLookup(const char *channel);
 static List *GetPendingNotifyChannels(void);
 
 /*
@@ -586,14 +591,8 @@ AsyncShmemSize(void)
 
 	size = add_size(size, SimpleLruShmemSize(notify_buffers, 0));
 
-	/*
-	 * Add space for channel hash table. Note that hash_estimate_size()
-	 * automatically includes the space needed for partitioning (if any).
-	 * We create 16 partitions in AsyncShmemInit, and that overhead is
-	 * accounted for here.
-	 */
 	size = add_size(size, hash_estimate_size(CHANNEL_HASH_MAX_SIZE,
-											  sizeof(ChannelEntry)));
+											 sizeof(ChannelEntry)));
 
 	return size;
 }
@@ -657,21 +656,14 @@ AsyncShmemInit(void)
 		HASHCTL		hash_ctl;
 
 		MemSet(&hash_ctl, 0, sizeof(hash_ctl));
-		hash_ctl.keysize = NAMEDATALEN;
+		hash_ctl.keysize = sizeof(ChannelHashKey);
 		hash_ctl.entrysize = sizeof(ChannelEntry);
-		/*
-		 * Use 16 partitions to reduce lock contention. We're using the same
-		 * value as the lock manager and predicate lock manager (NUM_LOCK_PARTITIONS).
-		 * This seems like a reasonable choice that has proven to work well
-		 * for other similar hashtables in PostgreSQL.
-		 */
-		hash_ctl.num_partitions = 16;
 
 		channelHash = ShmemInitHash("Channel Hash",
 									CHANNEL_HASH_INIT_SIZE,
 									CHANNEL_HASH_MAX_SIZE,
 									&hash_ctl,
-									HASH_ELEM | HASH_BLOBS | HASH_PARTITION);
+									HASH_ELEM | HASH_BLOBS);
 	}
 }
 
@@ -1246,7 +1238,8 @@ Exec_ListenPreCommit(void)
 	foreach(p, listenChannels)
 	{
 		char	   *channel = (char *) lfirst(p);
-		AddChannelListener(channel, MyProcNumber);
+
+		ChannelHashAddListener(channel, MyProcNumber);
 	}
 
 	LWLockRelease(NotifyQueueLock);
@@ -1292,18 +1285,9 @@ Exec_ListenCommit(const char *channel)
 	listenChannels = lappend(listenChannels, pstrdup(channel));
 	MemoryContextSwitchTo(oldcontext);
 
-	/*
-	 * Add this backend to the channel hash table if we're registered
-	 * as a listener. We might not be registered yet during the first
-	 * LISTEN command, in which case Exec_ListenPreCommit will handle
-	 * adding all channels to the hash.
-	 */
-	if (amRegisteredListener)
-	{
-		LWLockAcquire(NotifyQueueLock, LW_EXCLUSIVE);
-		AddChannelListener(channel, MyProcNumber);
-		LWLockRelease(NotifyQueueLock);
-	}
+	LWLockAcquire(NotifyQueueLock, LW_EXCLUSIVE);
+	ChannelHashAddListener(channel, MyProcNumber);
+	LWLockRelease(NotifyQueueLock);
 }
 
 /*
@@ -1328,13 +1312,9 @@ Exec_UnlistenCommit(const char *channel)
 			listenChannels = foreach_delete_current(listenChannels, q);
 			pfree(lchan);
 
-			/* Remove this backend from the channel hash table */
-			if (amRegisteredListener)
-			{
-				LWLockAcquire(NotifyQueueLock, LW_EXCLUSIVE);
-				RemoveChannelListener(channel, MyProcNumber);
-				LWLockRelease(NotifyQueueLock);
-			}
+			LWLockAcquire(NotifyQueueLock, LW_EXCLUSIVE);
+			ChannelHashRemoveListener(channel, MyProcNumber);
+			LWLockRelease(NotifyQueueLock);
 			break;
 		}
 	}
@@ -1396,12 +1376,11 @@ asyncQueueUnregister(void)
 		return;
 
 	/*
-	 * Need exclusive lock here to manipulate list links and channel hash.
+	 * Need exclusive lock here to manipulate list links.
 	 */
 	LWLockAcquire(NotifyQueueLock, LW_EXCLUSIVE);
 
-	/* Remove this backend from all channels in the hash table */
-	RemoveListenerFromAllChannels(MyProcNumber);
+	ChannelHashRemoveBackendFromAll(MyProcNumber);
 
 	/* Mark our entry as invalid */
 	QUEUE_BACKEND_PID(MyProcNumber) = InvalidPid;
@@ -1750,16 +1729,12 @@ SignalBackends(void)
 	List	   *channels;
 	ListCell   *p;
 	bool	   *signaled;
-	bool		use_o_n_fallback = false;
+	bool		broadcast_mode = false;
 
 	/*
 	 * Identify backends that we need to signal.  We don't want to send
 	 * signals while holding the NotifyQueueLock, so this loop just builds a
 	 * list of target PIDs.
-	 *
-	 * These arrays are allocated once per NOTIFY-sending transaction, not
-	 * per commit in general, so the overhead is minimal. We can't use static
-	 * arrays because MaxBackends is not a compile-time constant.
 	 *
 	 * XXX in principle these pallocs could fail, which would be bad. Maybe
 	 * preallocate the arrays?  They're not that large, though.
@@ -1772,96 +1747,62 @@ SignalBackends(void)
 	/* Get list of channels that have pending notifications */
 	channels = GetPendingNotifyChannels();
 
-	/*
-	 * IMPORTANT: All preparation work (memory allocation, channel list building)
-	 * has been done before acquiring the lock. This minimizes lock contention.
-	 * We only hold NotifyQueueLock for the actual shared state examination that
-	 * must be done atomically.
-	 */
 	LWLockAcquire(NotifyQueueLock, LW_EXCLUSIVE);
 
-	/* Check if any channel has multiple listeners, requiring O(N) fallback */
+	/*
+	 * Check if any channel has multiple listeners, in which case we would
+	 * need to signal all backends anyway.
+	 */
 	foreach(p, channels)
 	{
 		char	   *channel = (char *) lfirst(p);
-		ChannelEntry *entry = GetChannelListeners(channel);
+		ChannelEntry *entry = ChannelHashLookup(channel);
 
-		if (entry && entry->has_multiple_listeners)
+		/*
+		 * If there is no entry, it could mean we ran out of shared memory
+		 * when trying to add this channel to the hash table, so we need to
+		 * broadcast in that case as well.
+		 */
+		if (!entry || entry->has_multiple_listeners)
 		{
-			use_o_n_fallback = true;
+			broadcast_mode = true;
 			break;
 		}
 	}
 
-	/* Use O(1) algorithm unless we have channels with multiple listeners */
-	if (!use_o_n_fallback)
+	/* Signal specific listening backends, unless broadcast is required */
+	if (!broadcast_mode)
 	{
 		/*
 		 * Use channel hash to find backends listening on notified channels.
-		 * This is O(1) per channel when there is exactly one listener per channel.
 		 */
 		foreach(p, channels)
 		{
 			char	   *channel = (char *) lfirst(p);
-			ChannelEntry *entry = GetChannelListeners(channel);
+			ChannelEntry *entry = ChannelHashLookup(channel);
 
-			if (entry && !entry->has_multiple_listeners)
-			{
-				/* Signal the single backend listening on this channel */
-				ProcNumber i = entry->listener;
-				int32	   pid = QUEUE_BACKEND_PID(i);
-				QueuePosition pos;
-
-				/* Skip if we already decided to signal this backend */
-				if (signaled[i])
-					continue;
-
-				Assert(pid != InvalidPid);
-				pos = QUEUE_BACKEND_POS(i);
-
-				if (QUEUE_BACKEND_DBOID(i) == MyDatabaseId)
-				{
-					/*
-					 * Always signal listeners in our own database, unless they're
-					 * already caught up (unlikely, but possible).
-					 */
-					if (QUEUE_POS_EQUAL(pos, QUEUE_HEAD))
-						continue;
-				}
-				else
-				{
-					/* Skip backends in other databases for channel-based signaling */
-					continue;
-				}
-
-				/* OK, need to signal this one */
-				pids[count] = pid;
-				procnos[count] = i;
-				signaled[i] = true;
-				count++;
-			}
-		}
-	}
-	else
-	{
-		/* Original O(N) algorithm */
-		for (ProcNumber i = QUEUE_FIRST_LISTENER; i != INVALID_PROC_NUMBER; i = QUEUE_NEXT_LISTENER(i))
-		{
-			int32		pid = QUEUE_BACKEND_PID(i);
+			ProcNumber	i = entry->listener;
+			int32		pid;
 			QueuePosition pos;
 
-			Assert(pid != InvalidPid);
-			pos = QUEUE_BACKEND_POS(i);
-			if (QUEUE_BACKEND_DBOID(i) == MyDatabaseId)
-			{
-				if (QUEUE_POS_EQUAL(pos, QUEUE_HEAD))
-					continue;
-			}
-			else
-			{
-				/* Skip - handled separately below */
+			Assert(entry && !entry->has_multiple_listeners);
+
+			if (signaled[i])
 				continue;
-			}
+
+			pos = QUEUE_BACKEND_POS(i);
+
+			/*
+			 * Skip signaling listeners if they already caught up.
+			 */
+			if (QUEUE_POS_EQUAL(pos, QUEUE_HEAD))
+				continue;
+
+			if (QUEUE_BACKEND_DBOID(i) != MyDatabaseId)
+				continue;
+
+			pid = QUEUE_BACKEND_PID(i);
+			Assert(pid != InvalidPid);
 
 			/* OK, need to signal this one */
 			pids[count] = pid;
@@ -1872,37 +1813,44 @@ SignalBackends(void)
 	}
 
 	/*
-	 * Also check for any backends that are far behind.
-	 * This ensures the global tail can advance even if they're not
-	 * actively receiving notifications on their channels.
-	 *
-	 * This is important for backends listening on channels that rarely
-	 * or never receive notifications - without this mechanism, they would
-	 * never advance their queue position and eventually cause the queue
-	 * to fill up.
+	 * Also check for any backends that are far behind. This ensures the
+	 * global tail can advance even if they're not actively receiving
+	 * notifications on their channels.
 	 */
 	for (ProcNumber i = QUEUE_FIRST_LISTENER; i != INVALID_PROC_NUMBER; i = QUEUE_NEXT_LISTENER(i))
 	{
 		int32		pid;
 		QueuePosition pos;
 
-		/* Skip if already signaled */
+		/*
+		 * Skip if we've already decided to signal this one.
+		 */
 		if (signaled[i])
+			continue;
+
+		pos = QUEUE_BACKEND_POS(i);
+
+		/*
+		 * Skip signaling listeners if they already caught up.
+		 */
+		if (QUEUE_POS_EQUAL(pos, QUEUE_HEAD))
+			continue;
+
+		/*
+		 * Skip signaling listeners if they are not far behind.
+		 */
+		if (asyncQueuePageDiff(QUEUE_POS_PAGE(QUEUE_HEAD),
+							   QUEUE_POS_PAGE(pos)) < QUEUE_CLEANUP_DELAY)
 			continue;
 
 		pid = QUEUE_BACKEND_PID(i);
 		Assert(pid != InvalidPid);
-		pos = QUEUE_BACKEND_POS(i);
+		/* OK, need to signal this one */
+		pids[count] = pid;
+		procnos[count] = i;
+		count++;
 
-		/* Wake up any backend that is far behind, regardless of database */
-		if (asyncQueuePageDiff(QUEUE_POS_PAGE(QUEUE_HEAD),
-							   QUEUE_POS_PAGE(pos)) >= QUEUE_CLEANUP_DELAY)
-		{
-			/* OK, need to signal this one */
-			pids[count] = pid;
-			procnos[count] = i;
-			count++;
-		}
+
 	}
 
 	LWLockRelease(NotifyQueueLock);
@@ -2679,49 +2627,48 @@ check_notify_buffers(int *newval, void **extra, GucSource source)
  */
 
 /*
- * prepare_channel_key
- *		Prepare a channel name for use as a hash key.
- *
- * The key must be zero-padded to ensure consistent hash values.
+ * ChannelHashPrepareKey
+ *		Prepare a channel key (database OID + channel name) for use as a hash key.
  */
 static inline void
-prepare_channel_key(char *key, const char *channel)
+ChannelHashPrepareKey(ChannelHashKey * key, Oid dboid, const char *channel)
 {
-	memset(key, 0, NAMEDATALEN);
-	strlcpy(key, channel, NAMEDATALEN);
+	memset(key, 0, sizeof(ChannelHashKey));
+	key->dboid = dboid;
+	strlcpy(key->channel, channel, NAMEDATALEN);
 }
 
 /*
- * AddChannelListener
- *		Add a backend to the list of listeners for a channel.
+ * ChannelHashAddListener
+ *		Register the given backend as a listener for the specified channel
+ *		in the shared channel hash table.
  *
- * The associated lock (currently NotifyQueueLock) must be held in
- * EXCLUSIVE mode, as this function may modify the hash table.
+ * Caller must hold exclusive NotifyQueueLock.
  */
 static void
-AddChannelListener(const char *channel, ProcNumber procno)
+ChannelHashAddListener(const char *channel, ProcNumber procno)
 {
 	ChannelEntry *entry;
 	bool		found;
-	char		key[NAMEDATALEN];
+	ChannelHashKey key;
 
-	prepare_channel_key(key, channel);
+	ChannelHashPrepareKey(&key, MyDatabaseId, channel);
 
 	/* Look up or create the channel entry */
 	entry = (ChannelEntry *) hash_search(GetChannelHash(),
-										 key,
-										 HASH_ENTER,
+										 &key,
+										 HASH_ENTER_NULL,
 										 &found);
 
 	/*
-	 * If hash_search returned NULL, the hash table is full. We gracefully
-	 * degrade by not tracking this channel in the hash. The channel will use
-	 * O(N) notification delivery, which is exactly what would happen without
-	 * this optimization anyway.
+	 * If hash_search returned NULL, we've run out of shared memory to
+	 * allocate new hash entries. We gracefully degrade by not tracking this
+	 * channel in the hash. The channel will use the fallback broadcast
+	 * signalling.
 	 */
 	if (entry == NULL)
 	{
-		ereport(LOG,
+		ereport(DEBUG1,
 				(errmsg("too many notification channels are already being tracked")));
 		return;
 	}
@@ -2729,7 +2676,7 @@ AddChannelListener(const char *channel, ProcNumber procno)
 	if (!found)
 	{
 		/* New channel, initialize the entry */
-		memcpy(entry->channel, key, NAMEDATALEN);
+		memcpy(&entry->key, &key, sizeof(ChannelHashKey));
 		entry->listener = procno;
 		entry->has_multiple_listeners = false;
 	}
@@ -2739,11 +2686,12 @@ AddChannelListener(const char *channel, ProcNumber procno)
 		if (!entry->has_multiple_listeners)
 		{
 			if (entry->listener == procno)
-				return;	/* Already listening */
+				return;			/* Already listening */
 
 			/*
-			 * Another backend is already listening on this channel.
-			 * Mark it as having multiple listeners and fall back to O(N).
+			 * Another backend is already listening on this channel. Mark it
+			 * as having multiple listeners and fall back to broadcast
+			 * signalling.
 			 */
 			entry->has_multiple_listeners = true;
 			entry->listener = INVALID_PROC_NUMBER;
@@ -2753,40 +2701,40 @@ AddChannelListener(const char *channel, ProcNumber procno)
 }
 
 /*
- * RemoveChannelListener
- *		Remove a backend from the list of listeners for a channel.
+ * ChannelHashRemoveListener
+ *		Update the channel hash when a backend stops listening on a channel.
  *
- * The channel hash must be locked in EXCLUSIVE mode.
+ * If the channel entry currently tracks exactly one listener and that
+ * listener matches the supplied procno, remove the entry altogether.
+ *
+ * If the channel has already been flagged as having multiple listeners,
+ * we no longer track individual backends; therefore we cannot remove a
+ * single backend without additional bookkeeping.  In that situation we
+ * simply leave the entry in place (still marked as having multiple
+ * listeners) and return.
+ *
+ * Caller must hold exclusive NotifyQueueLock.
  */
 static void
-RemoveChannelListener(const char *channel, ProcNumber procno)
+ChannelHashRemoveListener(const char *channel, ProcNumber procno)
 {
 	ChannelEntry *entry;
-	char		key[NAMEDATALEN];
+	ChannelHashKey key;
 
-	prepare_channel_key(key, channel);
+	ChannelHashPrepareKey(&key, MyDatabaseId, channel);
 
 	/* Look up the channel entry */
 	entry = (ChannelEntry *) hash_search(GetChannelHash(),
-										 key,
+										 &key,
 										 HASH_FIND,
 										 NULL);
 
 	if (!entry)
-		return;	/* Channel not found */
+		return;					/* Channel not found */
 
 	/*
 	 * If this channel has multiple listeners, we can't track individual
 	 * removals. Just leave it marked as having multiple listeners.
-	 *
-	 * Design note: Once a channel is marked as having multiple listeners,
-	 * it never reverts to single-listener status. This is intentional.
-	 * Tracking the exact count and reverting would require complex
-	 * reference counting in shared memory with potential race conditions.
-	 * The current approach is simple, robust, and the performance impact
-	 * is minimal - a channel that temporarily had multiple listeners will
-	 * continue to use O(N) notification, but this is a reasonable trade-off
-	 * for correctness and simplicity.
 	 */
 	if (entry->has_multiple_listeners)
 		return;
@@ -2795,103 +2743,74 @@ RemoveChannelListener(const char *channel, ProcNumber procno)
 	if (entry->listener == procno)
 	{
 		hash_search(GetChannelHash(),
-				   key,
-				   HASH_REMOVE,
-				   NULL);
+					&key,
+					HASH_REMOVE,
+					NULL);
 	}
 }
 
 /*
- * RemoveListenerFromAllChannels
- *		Remove a backend from all channels it's listening on.
+ * ChannelHashRemoveBackendFromAll
+ *		Sweep the channel hash and delete any channel entries for which
+ *		this backend is the only tracked listener in the current database.
  *
- * This is called when a backend unregisters from async notifications.
- * The channel hash must be locked in EXCLUSIVE mode.
+ * Caller must hold exclusive NotifyQueueLock.
  */
 static void
-RemoveListenerFromAllChannels(ProcNumber procno)
+ChannelHashRemoveBackendFromAll(ProcNumber procno)
 {
 	HASH_SEQ_STATUS status;
 	ChannelEntry *entry;
 
-	/* Scan all channel entries */
 	hash_seq_init(&status, GetChannelHash());
 
 	while ((entry = (ChannelEntry *) hash_seq_search(&status)) != NULL)
 	{
-		/* Skip channels with multiple listeners */
+		if (entry->key.dboid != MyDatabaseId)
+			continue;
+
 		if (entry->has_multiple_listeners)
 			continue;
 
-		/* If this backend is the single listener, remove the channel entry */
 		if (entry->listener == procno)
 		{
-			/*
-			 * Remove this channel entry. It is safe to use HASH_REMOVE while
-			 * iterating with hash_seq_search() as long as we are removing the
-			 * element just returned by hash_seq_search(), which is what we're
-			 * doing here. See dynahash.c for the safety guarantee.
-			 *
-			 * Note: For HASH_REMOVE with embedded key, we can use entry->channel
-			 * directly because it's already the properly-sized key field in the
-			 * hash entry.
-			 */
 			hash_search(GetChannelHash(),
-					   entry->channel,
-					   HASH_REMOVE,
-					   NULL);
+						&entry->key,
+						HASH_REMOVE,
+						NULL);
 		}
 	}
 }
 
 /*
- * GetChannelListeners
- *		Get the entry for a channel containing all its listeners.
+ * ChannelHashLookup
+ *		Look up the channel hash entry for the given channel name in the
+ *		current database.
  *
- * Returns NULL if the channel has no listeners.
+ * Returns NULL if the channel is not being tracked (no listeners, or channel
+ * fell back to broadcast mode because we ran out of shared memory when trying
+ * to add entries to the hash table).
  *
- * Note: The returned pointer is only valid as long as the caller holds
- * NotifyQueueLock, which protects the channel hash table. The hash API
- * releases the partition lock after HASH_FIND, but we're safe because
- * NotifyQueueLock provides broader protection for the entire hash table.
- * Callers must hold NotifyQueueLock in at least SHARE mode.
+ * Caller must hold at least shared NotifyQueueLock.
  */
 static ChannelEntry *
-GetChannelListeners(const char *channel)
+ChannelHashLookup(const char *channel)
 {
-	char		key[NAMEDATALEN];
+	ChannelHashKey key;
 
-	/* Caller must hold NotifyQueueLock */
 	Assert(LWLockHeldByMe(NotifyQueueLock));
 
-	prepare_channel_key(key, channel);
+	ChannelHashPrepareKey(&key, MyDatabaseId, channel);
 
 	return (ChannelEntry *) hash_search(GetChannelHash(),
-									   key,
-									   HASH_FIND,
-									   NULL);
+										&key,
+										HASH_FIND,
+										NULL);
 }
 
 /*
  * GetPendingNotifyChannels
  *		Get list of unique channel names from pending notifications.
- *
- * Returns a list of channel names (strings) that have pending notifications.
- * The caller must not modify or free the returned list.
- *
- * Note: A simple O(n²) list scan is used for deduplication. In practice,
- * the number of unique channels notified within a single transaction is
- * extremely small, making the constant-time overhead of setting up a
- * temporary hash table more expensive than this simple scan. This approach
- * favors simplicity and robustness for the common case over optimizing
- * a theoretical pathological case.
- *
- * Note: This function allocates the list in the current memory context,
- * which during transaction commit is TopTransactionContext. This is intentional
- * and not a memory leak - the memory will be automatically freed when the
- * transaction completes. This is standard PostgreSQL practice for data that
- * needs to survive until the end of transaction processing. See the comment
- * in ClearPendingActionsAndNotifies() for confirmation of this pattern.
  */
 static List *
 GetPendingNotifyChannels(void)
