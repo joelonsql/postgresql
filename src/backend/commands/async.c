@@ -372,6 +372,15 @@ static AsyncQueueControl *asyncQueueControl;
 static LWLock *channelHashLocks;
 static int	channelHashTrancheId = 0;
 
+/* Structure to hold channel hash locks and tranche ID in shared memory */
+typedef struct ChannelHashLockData
+{
+	int			trancheId;
+	LWLock		locks[FLEXIBLE_ARRAY_MEMBER];
+}			ChannelHashLockData;
+
+static ChannelHashLockData * channelHashLockData;
+
 /* Channel hash table for single listening backend signalling */
 static HTAB *channelHash = NULL;
 
@@ -623,7 +632,8 @@ AsyncShmemSize(void)
 	size = add_size(size, hash_estimate_size(CHANNEL_HASH_MAX_SIZE,
 											 sizeof(ChannelEntry)));
 
-	size = add_size(size, mul_size(NUM_NOTIFY_PARTITIONS, sizeof(LWLock)));
+	size = add_size(size, offsetof(ChannelHashLockData, locks) +
+					mul_size(NUM_NOTIFY_PARTITIONS, sizeof(LWLock)));
 
 	return size;
 }
@@ -700,16 +710,28 @@ AsyncShmemInit(void)
 	}
 
 	/* Initialize locks for the partitioned hash table */
-	channelHashLocks = (LWLock *) ShmemAlloc(mul_size(NUM_NOTIFY_PARTITIONS, sizeof(LWLock)));
+	size = offsetof(ChannelHashLockData, locks) +
+		mul_size(NUM_NOTIFY_PARTITIONS, sizeof(LWLock));
+	channelHashLockData = (ChannelHashLockData *)
+		ShmemInitStruct("Channel Hash Lock Data", size, &found);
 	if (!found)
 	{
-		channelHashTrancheId = LWLockNewTrancheId();
-		LWLockRegisterTranche(channelHashTrancheId, "ChannelHashPartition");
+		/* First time through: initialize the locks and tranche ID */
+		channelHashLockData->trancheId = LWLockNewTrancheId();
+		for (int i = 0; i < NUM_NOTIFY_PARTITIONS; i++)
+		{
+			LWLockInitialize(&channelHashLockData->locks[i],
+							 channelHashLockData->trancheId);
+		}
 	}
-	for (int i = 0; i < NUM_NOTIFY_PARTITIONS; i++)
-	{
-		LWLockInitialize(&channelHashLocks[i], channelHashTrancheId);
-	}
+
+	/*
+	 * Set up local pointers for convenience. We must also register the
+	 * tranche ID in every backend that will use these locks.
+	 */
+	channelHashLocks = channelHashLockData->locks;
+	channelHashTrancheId = channelHashLockData->trancheId;
+	LWLockRegisterTranche(channelHashTrancheId, "ChannelHashPartition");
 }
 
 
@@ -1943,8 +1965,8 @@ SignalBackends(void)
 		 * behind to help prevent backends from getting far behind in the
 		 * first place. This finds the backend(s) on the same page as the
 		 * global tail, which are the ones holding up truncation. This creates
-		 * a chain reaction where each backend eventually wakes up the next one
-		 * as notifications are processed, avoiding thundering herd.
+		 * a chain reaction where each backend eventually wakes up the next
+		 * one as notifications are processed, avoiding thundering herd.
 		 */
 		if (!tail_woken && asyncQueuePageDiff(QUEUE_POS_PAGE(QUEUE_TAIL),
 											  QUEUE_POS_PAGE(pos)) == 0)
