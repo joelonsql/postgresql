@@ -182,6 +182,7 @@ extern PGDLLIMPORT int commit_timestamp_buffers;
 extern PGDLLIMPORT int multixact_member_buffers;
 extern PGDLLIMPORT int multixact_offset_buffers;
 extern PGDLLIMPORT int notify_buffers;
+extern PGDLLIMPORT int notify_multicast_threshold;
 extern PGDLLIMPORT int serializable_buffers;
 extern PGDLLIMPORT int subtransaction_buffers;
 extern PGDLLIMPORT int transaction_buffers;

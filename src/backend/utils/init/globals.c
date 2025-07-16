@@ -162,6 +162,7 @@ int			commit_timestamp_buffers = 0;
 int			multixact_member_buffers = 32;
 int			multixact_offset_buffers = 16;
 int			notify_buffers = 16;
+int			notify_multicast_threshold = 1;
 int			serializable_buffers = 32;
 int			subtransaction_buffers = 0;
 int			transaction_buffers = 0;

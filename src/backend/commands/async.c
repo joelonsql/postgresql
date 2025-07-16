@@ -25,10 +25,12 @@
  *	  by listening backends.
  *
  *	  In addition to each backend maintaining its own list of channels, we also
- *	  maintain a central hash table that tracks channels with single listeners.
- *	  When a channel has exactly one listening backend, we can signal just that
- *	  backend. For channels with multiple listeners, we signal all listening
- *	  backends.
+ *	  maintain a central hash table that tracks listeners for each channel, up
+ *	  to a configurable threshold ('notify_multicast_threshold'). When the
+ *	  number of listeners is within this threshold, we can perform a targeted
+ *	  "multicast" by signaling only those specific backends. If the number of
+ *	  listeners exceeds the threshold, we fall back to the original broadcast
+ *	  behavior of signaling all listening backends in the database.
  *
  *	  Although there is only one queue, notifications are treated as being
  *	  database-local; this is done by including the sender's database OID
@@ -74,12 +76,13 @@
  *	  make any actual updates to the effective listen state (listenChannels).
  *	  Then we signal any backends that may be interested in our messages
  *	  (including our own backend, if listening).  This is done by
- *	  SignalBackends(), which has two modes of operation, depending on
- *	  if any of our channels have multiple listening backends or not:
- *	  a) If there are multiple listening backends, a PROCSIG_NOTIFY_INTERRUPT
- *	  signal is sent to every listening backend.
- *	  b) Otherwise, such signals are only sent to each single listening backend
- *	  per channel.
+ *	  SignalBackends(), which has two modes of operation:
+ *	  a) Multicast mode: For channels with a number of listeners not exceeding
+ *	  'notify_multicast_threshold', signals are sent only to those specific
+ *	  backends.
+ *	  b) Broadcast mode: If any channel being notified has more listeners than
+ *	  the threshold, we revert to the original behavior and send a
+ *	  PROCSIG_NOTIFY_INTERRUPT signal to every listening backend in the database.
  *	  Additionally, we use a "wake only tail" optimization: we always signal
  *	  the backend furthest behind in the queue to help prevent backends from
  *	  getting far behind and create a chain reaction of wake-ups.
@@ -179,19 +182,21 @@
 /*
  * Channel hash table definitions
  *
- * This hash table provides an optimization by tracking which backend is
- * listening on each channel. Channels are identified by database OID and
- * channel name, making them database-specific.
+ * This hash table provides an optimization by tracking which backends are
+ * listening on each channel, up to a certain threshold. Channels are
+ * identified by database OID and channel name, making them
+ * database-specific.
  *
  * To improve scalability of concurrent LISTEN/UNLISTEN operations, the hash
- * table is partitioned, with each partition protected by its own LWLock. This
- * avoids serializing all operations on a single global lock.
+ * table is partitioned, with each partition protected by its own LWLock.
+ * This avoids serializing all operations on a single global lock.
  *
- * When exactly one backend listens on a channel, we signal that specific
- * backend, avoiding unnecessary signals to all listening backends.
+ * When the number of backends listening on a channel is at or below
+ * 'notify_multicast_threshold', we store their ProcNumbers and signal them
+ * directly (multicast).
  *
  * We fall back to broadcast mode and signal all listening backends when:
- * 1) Multiple backends listen on the same channel, OR
+ * 1) More backends listen on the same channel than the threshold allows, OR
  * 2) The hash table runs out of shared memory for new entries
  *
  * Note that CHANNEL_HASH_MAX_SIZE is not a hard limit - the hash table can
@@ -219,17 +224,18 @@ typedef struct ChannelHashKey
 }			ChannelHashKey;
 
 /*
- * Each entry contains a channel key (database OID + channel name) and a
- * single backend ProcNumber that is listening on that channel. If multiple
- * backends try to listen on the same channel, we mark it as having multiple
- * listeners and fall back to broadcast behavior.
+ * Each entry contains a channel key (database OID + channel name) and an array
+ * of listening backend ProcNumbers, up to notify_multicast_threshold. If the
+ * number of listeners exceeds the threshold, we mark the channel for
+ * broadcast and stop tracking individual listeners.
  */
 typedef struct ChannelEntry
 {
 	ChannelHashKey key;
-	ProcNumber	listener;		/* single backend ID, or INVALID_PROC_NUMBER
-								 * if multiple */
-	bool		has_multiple_listeners;
+	bool		is_broadcast;	/* True if num_listeners > threshold */
+	uint8		num_listeners;	/* Number of listeners currently stored */
+	/* Listeners array follows, of size notify_multicast_threshold */
+	ProcNumber	listeners[FLEXIBLE_ARRAY_MEMBER];
 }			ChannelEntry;
 
 /*
@@ -381,7 +387,7 @@ typedef struct ChannelHashLockData
 
 static ChannelHashLockData * channelHashLockData;
 
-/* Channel hash table for single listening backend signalling */
+/* Channel hash table for multicast signalling */
 static HTAB *channelHash = NULL;
 
 /* Forward declaration needed by GetChannelHash */
@@ -401,6 +407,7 @@ GetChannelHash(void)
 	if (channelHash == NULL)
 	{
 		HASHCTL		hash_ctl;
+		Size		entrysize;
 
 		/*
 		 * Set up to attach to the existing shared hash table. The hash
@@ -408,7 +415,15 @@ GetChannelHash(void)
 		 */
 		MemSet(&hash_ctl, 0, sizeof(hash_ctl));
 		hash_ctl.keysize = sizeof(ChannelHashKey);
-		hash_ctl.entrysize = sizeof(ChannelEntry);
+
+		/*
+		 * The size of a channel entry is flexible. We must have enough space
+		 * for the maximum number of listeners specified by the threshold.
+		 */
+		entrysize = add_size(offsetof(ChannelEntry, listeners),
+							 mul_size(notify_multicast_threshold, sizeof(ProcNumber)));
+		hash_ctl.entrysize = entrysize;
+
 		hash_ctl.hash = channel_hash_func;
 		hash_ctl.num_partitions = NUM_NOTIFY_PARTITIONS;
 
@@ -622,6 +637,7 @@ Size
 AsyncShmemSize(void)
 {
 	Size		size;
+	Size		entrysize;
 
 	/* This had better match AsyncShmemInit */
 	size = mul_size(MaxBackends, sizeof(QueueBackendStatus));
@@ -629,8 +645,14 @@ AsyncShmemSize(void)
 
 	size = add_size(size, SimpleLruShmemSize(notify_buffers, 0));
 
+	/*
+	 * The size of a channel entry is flexible. We must allocate enough space
+	 * for the maximum number of listeners specified by the threshold.
+	 */
+	entrysize = add_size(offsetof(ChannelEntry, listeners),
+						 mul_size(notify_multicast_threshold, sizeof(ProcNumber)));
 	size = add_size(size, hash_estimate_size(CHANNEL_HASH_MAX_SIZE,
-											 sizeof(ChannelEntry)));
+											 entrysize));
 
 	size = add_size(size, offsetof(ChannelHashLockData, locks) +
 					mul_size(NUM_NOTIFY_PARTITIONS, sizeof(LWLock)));
@@ -695,10 +717,19 @@ AsyncShmemInit(void)
 	 */
 	{
 		HASHCTL		hash_ctl;
+		Size		entrysize;
 
 		MemSet(&hash_ctl, 0, sizeof(hash_ctl));
 		hash_ctl.keysize = sizeof(ChannelHashKey);
-		hash_ctl.entrysize = sizeof(ChannelEntry);
+
+		/*
+		 * The size of a channel entry is flexible. We must have enough space
+		 * for the maximum number of listeners specified by the threshold.
+		 */
+		entrysize = add_size(offsetof(ChannelEntry, listeners),
+							 mul_size(notify_multicast_threshold, sizeof(ProcNumber)));
+		hash_ctl.entrysize = entrysize;
+
 		hash_ctl.hash = channel_hash_func;
 		hash_ctl.num_partitions = NUM_NOTIFY_PARTITIONS;
 
@@ -1770,12 +1801,12 @@ asyncQueueFillWarning(void)
  * Send signals to listening backends.
  *
  * This function operates in two modes:
- * 1. Selective mode: When all pending notification channels have exactly one
- *    listener each, we signal only those specific backends that are listening
- *    on the channels with pending notifications.
- * 2. Broadcast mode: When any channel has multiple listeners (or we ran out
- *    of shared memory for the channel hash table), we signal all listening
- *    backends in our database.
+ * 1. Multicast mode: If all pending notification channels have a number of
+ *    listeners at or below the 'notify_multicast_threshold', we signal only
+ *    those specific backends.
+ * 2. Broadcast mode: If any channel has more listeners than the threshold (or
+ *    we ran out of shared memory for the channel hash table), we signal all
+ *    listening backends in our database.
  *
  * In addition to the channel-specific signaling, we also implement a "wake
  * only tail" optimization: we signal the backend that is furthest behind
@@ -1838,10 +1869,10 @@ SignalBackends(void)
 
 		/*
 		 * If there is no entry, it could mean we ran out of shared memory
-		 * when trying to add this channel to the hash table, so we need to
-		 * broadcast in that case as well.
+		 * when trying to add this channel to the hash table. If the entry is
+		 * marked for broadcast, we must use broadcast mode.
 		 */
-		if (!entry || entry->has_multiple_listeners)
+		if (!entry || entry->is_broadcast)
 		{
 			broadcast_mode = true;
 			LWLockRelease(lock);
@@ -1886,7 +1917,7 @@ SignalBackends(void)
 	else
 	{
 		/*
-		 * In targeted mode, signal specific listening backends. We must
+		 * In multicast mode, signal specific listening backends. We must
 		 * re-check the hash entries here inside the lock to avoid races.
 		 */
 		foreach(p, channels)
@@ -1898,39 +1929,33 @@ SignalBackends(void)
 			LWLockAcquire(lock, LW_SHARED);
 			entry = ChannelHashLookup(channel);
 
-			if (entry && !entry->has_multiple_listeners)
+			if (entry && !entry->is_broadcast)
 			{
-				ProcNumber	i = entry->listener;
-				int32		pid;
-				QueuePosition pos;
-
-				if (signaled[i])
+				for (int j = 0; j < entry->num_listeners; j++)
 				{
-					LWLockRelease(lock);
-					continue;
+					ProcNumber	i = entry->listeners[j];
+					int32		pid;
+					QueuePosition pos;
+
+					if (signaled[i])
+						continue;
+
+					pos = QUEUE_BACKEND_POS(i);
+
+					if (QUEUE_POS_EQUAL(pos, QUEUE_HEAD))
+						continue;
+
+					if (QUEUE_BACKEND_DBOID(i) != MyDatabaseId)
+						continue;
+
+					pid = QUEUE_BACKEND_PID(i);
+					Assert(pid != InvalidPid);
+
+					pids[count] = pid;
+					procnos[count] = i;
+					signaled[i] = true;
+					count++;
 				}
-
-				pos = QUEUE_BACKEND_POS(i);
-
-				if (QUEUE_POS_EQUAL(pos, QUEUE_HEAD))
-				{
-					LWLockRelease(lock);
-					continue;
-				}
-
-				if (QUEUE_BACKEND_DBOID(i) != MyDatabaseId)
-				{
-					LWLockRelease(lock);
-					continue;
-				}
-
-				pid = QUEUE_BACKEND_PID(i);
-				Assert(pid != InvalidPid);
-
-				pids[count] = pid;
-				procnos[count] = i;
-				signaled[i] = true;
-				count++;
 			}
 			LWLockRelease(lock);
 		}
@@ -2752,6 +2777,25 @@ check_notify_buffers(int *newval, void **extra, GucSource source)
 }
 
 /*
+ * GUC check_hook for notify_multicast_threshold
+ */
+bool
+check_notify_multicast_threshold(int *newval, void **extra, GucSource source)
+{
+	/*
+	 * We don't allow values less than 0.  A value of 0 is special and means
+	 * the multicast optimization is disabled entirely.
+	 */
+	if (*newval < 0)
+	{
+		GUC_check_errdetail("notify_multicast_threshold must be non-negative.");
+		return false;
+	}
+
+	return true;
+}
+
+/*
  * Channel hash table management functions
  */
 
@@ -2813,19 +2857,22 @@ ChannelHashPrepareKey(ChannelHashKey * key, Oid dboid, const char *channel)
  *     Register the given backend as a listener for the specified channel.
  *
  * This function uses an optimistic read-locking strategy to maximize
- * concurrency when many backends listen on the same channel.
+ * concurrency. An exclusive lock is only taken when mutating the listener
+ * list.
  *
- * 1. It first takes a shared lock and checks the channel's state. If the
- *    channel is already marked as having multiple listeners, no write is
- *    needed, and we can return immediately. This is the fast path for the
- *    3rd, 4th, etc., listener on a given channel.
+ * 1. It first takes a shared lock. If the channel is already in broadcast
+ *    mode, or if the current backend is already in the listener list, no write
+ *    is needed and we can return immediately.
  *
- * 2. If a write is needed (either to create the entry or to mark it as
- *    multi-listener), it releases the shared lock and acquires an exclusive
- *    lock.
+ * 2. If a write is needed, it releases the shared lock and acquires an
+ *    exclusive lock.
  *
  * 3. CRUCIALLY, after acquiring the exclusive lock, it must re-check the
  *    state, as another backend may have modified the entry in the interim.
+ *
+ * 4. If the number of listeners is below 'notify_multicast_threshold', the
+ *    new listener is added. If the threshold is reached, the channel is
+ *    converted to broadcast mode.
  */
 static void
 ChannelHashAddListener(const char *channel, ProcNumber procno)
@@ -2835,18 +2882,37 @@ ChannelHashAddListener(const char *channel, ProcNumber procno)
 	ChannelHashKey key;
 	LWLock	   *lock = GetChannelHashLock(channel);
 
+	/*
+	 * If the threshold is zero, this optimization is disabled. All channels
+	 * immediately use broadcast, so we don't need to track them.
+	 */
+	if (notify_multicast_threshold <= 0)
+		return;
+
 	ChannelHashPrepareKey(&key, MyDatabaseId, channel);
 
 	/*
-	 * FAST PATH: Optimistically take a shared lock. If the channel already
-	 * has multiple listeners, we don't need to do anything.
+	 * FAST PATH: Optimistically take a shared lock. If the channel is already
+	 * in broadcast mode, or if we are already listed, we are done.
 	 */
 	LWLockAcquire(lock, LW_SHARED);
 	entry = (ChannelEntry *) hash_search(GetChannelHash(), &key, HASH_FIND, NULL);
-	if (entry && entry->has_multiple_listeners)
+	if (entry)
 	{
-		LWLockRelease(lock);
-		return;
+		if (entry->is_broadcast)
+		{
+			LWLockRelease(lock);
+			return;
+		}
+		/* Check if we are already in the list */
+		for (int i = 0; i < entry->num_listeners; i++)
+		{
+			if (entry->listeners[i] == procno)
+			{
+				LWLockRelease(lock);
+				return;
+			}
+		}
 	}
 	LWLockRelease(lock);
 
@@ -2870,20 +2936,48 @@ ChannelHashAddListener(const char *channel, ProcNumber procno)
 
 	if (!found)
 	{
-		/* We are the first listener. */
-		entry->listener = procno;
-		entry->has_multiple_listeners = false;
+		/* First listener for this channel. */
+		entry->is_broadcast = false;
+		entry->num_listeners = 1;
+		entry->listeners[0] = procno;
 	}
-	else if (!entry->has_multiple_listeners)
+	else
 	{
-		/* We are the second listener. */
-		if (entry->listener != procno)
+		/* Entry already exists, re-check everything. */
+		bool		already_present = false;
+
+		if (entry->is_broadcast)
 		{
-			entry->has_multiple_listeners = true;
-			entry->listener = INVALID_PROC_NUMBER;
+			/* Another backend set it to broadcast mode. We're done. */
+			LWLockRelease(lock);
+			return;
+		}
+
+		for (int i = 0; i < entry->num_listeners; i++)
+		{
+			if (entry->listeners[i] == procno)
+			{
+				already_present = true;
+				break;
+			}
+		}
+
+		if (!already_present)
+		{
+			if (entry->num_listeners < notify_multicast_threshold)
+			{
+				/* Add ourselves to the list of listeners. */
+				entry->listeners[entry->num_listeners] = procno;
+				entry->num_listeners++;
+			}
+			else
+			{
+				/* We are the listener that exceeds the threshold. */
+				entry->is_broadcast = true;
+				entry->num_listeners = 0;	/* Clear the list */
+			}
 		}
 	}
-	/* If entry->has_multiple_listeners is now true, do nothing. */
 	LWLockRelease(lock);
 }
 
@@ -2891,9 +2985,10 @@ ChannelHashAddListener(const char *channel, ProcNumber procno)
  * ChannelHashRemoveListener
  *		Update the channel hash when a backend stops listening on a channel.
  *
- * This function uses an optimistic read-lock strategy to maximize concurrency.
- * An exclusive lock is only taken if we are the sole listener on a channel
- * and need to remove the entry from the hash table.
+ * This function uses an optimistic read-lock strategy. An exclusive lock is
+ * only taken if we are in the listener list for a channel and need to remove
+ * ourselves. If a channel is in broadcast mode, we cannot safely modify it,
+ * as we can't know which backends are listening.
  */
 static void
 ChannelHashRemoveListener(const char *channel, ProcNumber procno)
@@ -2901,38 +2996,94 @@ ChannelHashRemoveListener(const char *channel, ProcNumber procno)
 	ChannelEntry *entry;
 	ChannelHashKey key;
 	LWLock	   *lock = GetChannelHashLock(channel);
+	bool		present = false;
 
 	ChannelHashPrepareKey(&key, MyDatabaseId, channel);
 
 	/*
-	 * Take a shared lock first to see if a removal is even necessary. If the
-	 * entry doesn't exist, or it's a multi-listener entry, we have nothing to
-	 * do. This is the fast path.
+	 * Take a shared lock first to see if a removal is even possible. If the
+	 * entry doesn't exist, is in broadcast mode, or we're not in its list, we
+	 * have nothing to do. This is the fast path.
 	 */
 	LWLockAcquire(lock, LW_SHARED);
 	entry = (ChannelEntry *) hash_search(GetChannelHash(), &key, HASH_FIND, NULL);
-	if (!entry || entry->has_multiple_listeners || entry->listener != procno)
+	if (!entry || entry->is_broadcast)
+	{
+		LWLockRelease(lock);
+		return;
+	}
+
+	/* Check if we are in the list */
+	for (int i = 0; i < entry->num_listeners; i++)
+	{
+		if (entry->listeners[i] == procno)
+		{
+			present = true;
+			break;
+		}
+	}
+	if (!present)
 	{
 		LWLockRelease(lock);
 		return;
 	}
 	LWLockRelease(lock);
 
-	/*
-	 * A removal is likely needed. Acquire an exclusive lock.
-	 */
+	/* A removal is likely needed. Acquire an exclusive lock. */
 	LWLockAcquire(lock, LW_EXCLUSIVE);
 
 	/*
-	 * Re-check the state, as another backend might have changed it. The only
-	 * state change we care about is if it became a multi-listener channel, in
-	 * which case we should no longer remove it.
+	 * Re-check the state. Another backend might have changed it (e.g., to
+	 * broadcast mode).
 	 */
 	entry = (ChannelEntry *) hash_search(GetChannelHash(), &key, HASH_FIND, NULL);
-	if (entry && !entry->has_multiple_listeners && entry->listener == procno)
+	if (entry && !entry->is_broadcast)
 	{
-		/* Still a single-listener entry for us, so remove it. */
-		(void) hash_search(GetChannelHash(), &key, HASH_REMOVE, NULL);
+		int			i;
+
+		for (i = 0; i < entry->num_listeners; i++)
+		{
+			if (entry->listeners[i] == procno)
+			{
+				/*
+				 * Found our procno. Remove it from the listener array.
+				 *
+				 * If this is the last listener, we remove the entire hash
+				 * entry for the channel.
+				 */
+				if (entry->num_listeners == 1)
+				{
+					(void) hash_search(GetChannelHash(), &key, HASH_REMOVE, NULL);
+				}
+				else
+				{
+					/*
+					 * To remove an element from the array while keeping it
+					 * contiguous, we first decrement the listener count.
+					 * Then, we shift all subsequent elements one position to
+					 * the left, overwriting the element we want to remove.
+					 *
+					 * The `if (i < entry->num_listeners)` condition
+					 * explicitly handles the case where the last element in
+					 * the array is being removed. In that scenario, `i`
+					 * equals the new `num_listeners`, so no memory movement
+					 * is necessary, and the `memmove` is correctly skipped.
+					 */
+					entry->num_listeners--;
+					if (i < entry->num_listeners)
+					{
+						Size		size_to_move;
+
+						size_to_move = mul_size(entry->num_listeners - i,
+												sizeof(ProcNumber));
+						memmove(&entry->listeners[i],
+								&entry->listeners[i + 1],
+								size_to_move);
+					}
+				}
+				break;			/* Found and removed, exit loop. */
+			}
+		}
 	}
 	LWLockRelease(lock);
 }
