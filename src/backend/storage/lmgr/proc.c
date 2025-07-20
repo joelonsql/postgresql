@@ -364,6 +364,7 @@ InitProcGlobal(void)
 		pg_atomic_init_u32(&(proc->procArrayGroupNext), INVALID_PROC_NUMBER);
 		pg_atomic_init_u32(&(proc->clogGroupNext), INVALID_PROC_NUMBER);
 		pg_atomic_init_u64(&(proc->waitStart), 0);
+		pg_atomic_init_u32(&(proc->latch_signals), 0);
 	}
 
 	/* Should have consumed exactly the expected amount of fast-path memory. */

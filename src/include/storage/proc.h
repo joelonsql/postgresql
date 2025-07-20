@@ -134,6 +134,11 @@ extern PGDLLIMPORT int FastPathLockGroupsPerBackend;
 #define DELAY_CHKPT_START		(1<<0)
 #define DELAY_CHKPT_COMPLETE	(1<<1)
 
+/*
+ * Flags for latch-based signaling
+ */
+#define PROC_NOTIFY_INTERRUPT	(1<<0)
+
 typedef enum
 {
 	PROC_WAIT_STATUS_OK,
@@ -253,6 +258,12 @@ struct PGPROC
 								 * started */
 
 	int			delayChkptFlags;	/* for DELAY_CHKPT_* flags */
+
+	/*
+	 * Latch-based generic signaling. This is cheaper than a POSIX signal.
+	 * The target backend will process these flags when it wakes up.
+	 */
+	pg_atomic_uint32 latch_signals;
 
 	uint8		statusFlags;	/* this backend's status flags, see PROC_*
 								 * above. mirrored in

@@ -140,8 +140,10 @@
 #include "libpq/libpq.h"
 #include "libpq/pqformat.h"
 #include "miscadmin.h"
+#include "port/atomics.h"
 #include "storage/ipc.h"
 #include "storage/lmgr.h"
+#include "storage/proc.h"
 #include "storage/procsignal.h"
 #include "tcop/tcopprot.h"
 #include "utils/builtins.h"
@@ -1634,25 +1636,23 @@ SignalBackends(void)
 	for (int i = 0; i < count; i++)
 	{
 		int32		pid = pids[i];
+		PGPROC	   *proc = GetPGProcByNumber(procnos[i]);
 
-		/*
-		 * If we are signaling our own process, no need to involve the kernel;
-		 * just set the flag directly.
-		 */
 		if (pid == MyProcPid)
 		{
-			notifyInterruptPending = true;
-			continue;
+			/* Self-notify can directly set the local flag and latch */
+			pg_atomic_fetch_or_u32(&MyProc->latch_signals, PROC_NOTIFY_INTERRUPT);
+			SetLatch(MyLatch);
 		}
-
-		/*
-		 * Note: assuming things aren't broken, a signal failure here could
-		 * only occur if the target backend exited since we released
-		 * NotifyQueueLock; which is unlikely but certainly possible. So we
-		 * just log a low-level debug message if it happens.
-		 */
-		if (SendProcSignal(pid, PROCSIG_NOTIFY_INTERRUPT, procnos[i]) < 0)
-			elog(DEBUG3, "could not signal backend with PID %d: %m", pid);
+		else
+		{
+			/*
+			 * Atomically set the notification flag, then set the latch to
+			 * wake up the target process if it is sleeping.
+			 */
+			pg_atomic_fetch_or_u32(&proc->latch_signals, PROC_NOTIFY_INTERRUPT);
+			SetLatch(&proc->procLatch);
+		}
 	}
 
 	pfree(pids);
