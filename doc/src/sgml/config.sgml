@@ -2417,6 +2417,46 @@ include_dir 'conf.d'
       </listitem>
      </varlistentry>
 
+     <varlistentry id="guc-notify-dispatcher-batch-size" xreflabel="notify_dispatcher_batch_size">
+      <term><varname>notify_dispatcher_batch_size</varname> (<type>integer</type>)
+      <indexterm>
+       <primary><varname>notify_dispatcher_batch_size</varname> configuration parameter</primary>
+      </indexterm>
+      </term>
+      <listitem>
+       <para>
+        Specifies the maximum number of listening backends that the notify
+        dispatcher will wake up in each cycle. This controls the rate at
+        which <xref linkend="sql-notify"/> events are delivered to prevent
+        thundering herd problems when many backends are listening. 
+        The default value is 1. Setting this to a higher value will wake
+        more listeners at once, which may increase throughput but could
+        also increase system load.
+        This parameter can be changed at runtime with a configuration reload.
+       </para>
+      </listitem>
+     </varlistentry>
+
+     <varlistentry id="guc-notify-dispatcher-wake-interval" xreflabel="notify_dispatcher_wake_interval">
+      <term><varname>notify_dispatcher_wake_interval</varname> (<type>integer</type>)
+      <indexterm>
+       <primary><varname>notify_dispatcher_wake_interval</varname> configuration parameter</primary>
+      </indexterm>
+      </term>
+      <listitem>
+       <para>
+        Specifies the wake interval for the notify dispatcher background
+        worker, in milliseconds. The dispatcher will wake up at this
+        interval to check for and wake any lagging listeners, even if
+        no new <xref linkend="sql-notify"/> events have occurred.
+        The default value is 10000 (10 seconds). Lower values will
+        result in more responsive notification delivery but may increase
+        CPU usage.
+        This parameter can be changed at runtime with a configuration reload.
+       </para>
+      </listitem>
+     </varlistentry>
+
      </variablelist>
      </sect2>
 

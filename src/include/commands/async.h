@@ -14,6 +14,7 @@
 #define ASYNC_H
 
 #include <signal.h>
+#include "storage/procnumber.h"
 
 extern PGDLLIMPORT bool Trace_notify;
 extern PGDLLIMPORT int max_notify_queue_pages;
@@ -45,5 +46,9 @@ extern void HandleNotifyInterrupt(void);
 
 /* process interrupts */
 extern void ProcessNotifyInterrupt(bool flush);
+
+/* notify dispatcher support */
+extern void AsyncNotifySetDispatcherProc(ProcNumber procno);
+extern void AsyncNotifyDispatcherWakeListeners(int batch_size);
 
 #endif							/* ASYNC_H */

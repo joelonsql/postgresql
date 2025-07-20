@@ -102,6 +102,7 @@
 #include "port/pg_bswap.h"
 #include "postmaster/autovacuum.h"
 #include "postmaster/bgworker_internals.h"
+#include "postmaster/notify_dispatcher.h"
 #include "postmaster/pgarch.h"
 #include "postmaster/postmaster.h"
 #include "postmaster/syslogger.h"
@@ -925,6 +926,11 @@ PostmasterMain(int argc, char *argv[])
 	 * before any modules had a chance to take the background worker slots.
 	 */
 	ApplyLauncherRegister();
+
+	/*
+	 * Register the notify dispatcher background worker.
+	 */
+	NotifyDispatcherRegister();
 
 	/*
 	 * process any libraries that should be preloaded at postmaster start

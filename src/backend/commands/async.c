@@ -142,6 +142,7 @@
 #include "miscadmin.h"
 #include "storage/ipc.h"
 #include "storage/lmgr.h"
+#include "storage/proc.h"
 #include "storage/procsignal.h"
 #include "tcop/tcopprot.h"
 #include "utils/builtins.h"
@@ -286,6 +287,8 @@ typedef struct AsyncQueueControl
 	int64		stopPage;		/* oldest unrecycled page; must be <=
 								 * tail.page */
 	ProcNumber	firstListener;	/* id of first listener, or
+								 * INVALID_PROC_NUMBER */
+	ProcNumber	dispatcherProc;	/* notify dispatcher's ProcNumber, or
 								 * INVALID_PROC_NUMBER */
 	TimestampTz lastQueueFillWarn;	/* time of last queue-full msg */
 	QueueBackendStatus backend[FLEXIBLE_ARRAY_MEMBER];
@@ -520,6 +523,7 @@ AsyncShmemInit(void)
 		SET_QUEUE_POS(QUEUE_TAIL, 0, 0);
 		QUEUE_STOP_PAGE = 0;
 		QUEUE_FIRST_LISTENER = INVALID_PROC_NUMBER;
+		asyncQueueControl->dispatcherProc = INVALID_PROC_NUMBER;
 		asyncQueueControl->lastQueueFillWarn = 0;
 		for (int i = 0; i < MaxBackends; i++)
 		{
@@ -1580,83 +1584,67 @@ asyncQueueFillWarning(void)
 static void
 SignalBackends(void)
 {
-	int32	   *pids;
-	ProcNumber *procnos;
-	int			count;
-
-	/*
-	 * Identify backends that we need to signal.  We don't want to send
-	 * signals while holding the NotifyQueueLock, so this loop just builds a
-	 * list of target PIDs.
-	 *
-	 * XXX in principle these pallocs could fail, which would be bad. Maybe
-	 * preallocate the arrays?  They're not that large, though.
-	 */
-	pids = (int32 *) palloc(MaxBackends * sizeof(int32));
-	procnos = (ProcNumber *) palloc(MaxBackends * sizeof(ProcNumber));
-	count = 0;
+	ProcNumber	tailBackend = INVALID_PROC_NUMBER;
+	int32		tailPid = InvalidPid;
+	bool		found_tail = false;
 
 	LWLockAcquire(NotifyQueueLock, LW_EXCLUSIVE);
+
+	/*
+	 * Step 1: Find and signal ONE backend at the tail.
+	 * A backend is at the tail if its queue page is the same as the global tail page.
+	 */
 	for (ProcNumber i = QUEUE_FIRST_LISTENER; i != INVALID_PROC_NUMBER; i = QUEUE_NEXT_LISTENER(i))
 	{
-		int32		pid = QUEUE_BACKEND_PID(i);
-		QueuePosition pos;
-
-		Assert(pid != InvalidPid);
-		pos = QUEUE_BACKEND_POS(i);
-		if (QUEUE_BACKEND_DBOID(i) == MyDatabaseId)
+		QueuePosition pos = QUEUE_BACKEND_POS(i);
+		
+		/* Check if this backend is at the tail */
+		if (asyncQueuePageDiff(QUEUE_POS_PAGE(QUEUE_TAIL), QUEUE_POS_PAGE(pos)) == 0)
 		{
-			/*
-			 * Always signal listeners in our own database, unless they're
-			 * already caught up (unlikely, but possible).
-			 */
-			if (QUEUE_POS_EQUAL(pos, QUEUE_HEAD))
-				continue;
+			tailBackend = i;
+			tailPid = QUEUE_BACKEND_PID(i);
+			found_tail = true;
+			break;	/* We only need one backend at the tail */
 		}
-		else
-		{
-			/*
-			 * Listeners in other databases should be signaled only if they
-			 * are far behind.
-			 */
-			if (asyncQueuePageDiff(QUEUE_POS_PAGE(QUEUE_HEAD),
-								   QUEUE_POS_PAGE(pos)) < QUEUE_CLEANUP_DELAY)
-				continue;
-		}
-		/* OK, need to signal this one */
-		pids[count] = pid;
-		procnos[count] = i;
-		count++;
 	}
+
+	/*
+	 * Step 2: Signal the dispatcher daemon if it exists.
+	 */
+	if (asyncQueueControl->dispatcherProc != INVALID_PROC_NUMBER)
+	{
+		PGPROC *dispatcherProc = GetPGProcByNumber(asyncQueueControl->dispatcherProc);
+		if (dispatcherProc != NULL)
+			SetLatch(&dispatcherProc->procLatch);
+	}
+
 	LWLockRelease(NotifyQueueLock);
 
-	/* Now send signals */
-	for (int i = 0; i < count; i++)
+	/*
+	 * Now signal the tail backend if we found one, outside the lock.
+	 */
+	if (found_tail)
 	{
-		int32		pid = pids[i];
-
 		/*
 		 * If we are signaling our own process, no need to involve the kernel;
 		 * just set the flag directly.
 		 */
-		if (pid == MyProcPid)
+		if (tailPid == MyProcPid)
 		{
 			notifyInterruptPending = true;
-			continue;
 		}
-
-		/*
-		 * Note: assuming things aren't broken, a signal failure here could
-		 * only occur if the target backend exited since we released
-		 * NotifyQueueLock; which is unlikely but certainly possible. So we
-		 * just log a low-level debug message if it happens.
-		 */
-		if (SendProcSignal(pid, PROCSIG_NOTIFY_INTERRUPT, procnos[i]) < 0)
-			elog(DEBUG3, "could not signal backend with PID %d: %m", pid);
+		else
+		{
+			/*
+			 * Note: assuming things aren't broken, a signal failure here could
+			 * only occur if the target backend exited since we released
+			 * NotifyQueueLock; which is unlikely but certainly possible. So we
+			 * just log a low-level debug message if it happens.
+			 */
+			if (SendProcSignal(tailPid, PROCSIG_NOTIFY_INTERRUPT, tailBackend) < 0)
+				elog(DEBUG3, "could not signal backend with PID %d: %m", tailPid);
+		}
 	}
-
-	pfree(pids);
-	pfree(procnos);
 }
 
 /*
@@ -2394,4 +2382,74 @@ bool
 check_notify_buffers(int *newval, void **extra, GucSource source)
 {
 	return check_slru_buffers("notify_buffers", newval);
+}
+
+/*
+ * Set the notify dispatcher's ProcNumber in shared memory
+ */
+void
+AsyncNotifySetDispatcherProc(ProcNumber procno)
+{
+	LWLockAcquire(NotifyQueueLock, LW_EXCLUSIVE);
+	asyncQueueControl->dispatcherProc = procno;
+	LWLockRelease(NotifyQueueLock);
+}
+
+/*
+ * Wake up lagging listeners in controlled batches
+ * Called by the notify dispatcher daemon
+ */
+void
+AsyncNotifyDispatcherWakeListeners(int batch_size)
+{
+	ProcNumber *procnos;
+	int32	   *pids;
+	int			count = 0;
+	int			i;
+
+	/*
+	 * We need to identify lagging listeners under the lock, but we'll
+	 * signal them after releasing it to avoid holding the lock too long.
+	 */
+	procnos = (ProcNumber *) palloc(batch_size * sizeof(ProcNumber));
+	pids = (int32 *) palloc(batch_size * sizeof(int32));
+
+	LWLockAcquire(NotifyQueueLock, LW_SHARED);
+
+	/* Find the most-lagging listeners up to batch_size */
+	for (ProcNumber listener = QUEUE_FIRST_LISTENER;
+		 listener != INVALID_PROC_NUMBER && count < batch_size;
+		 listener = QUEUE_NEXT_LISTENER(listener))
+	{
+		QueuePosition pos = QUEUE_BACKEND_POS(listener);
+		
+		/* Skip if already caught up */
+		if (QUEUE_POS_EQUAL(pos, QUEUE_HEAD))
+			continue;
+
+		/* Skip backends in other databases unless they're very far behind */
+		if (QUEUE_BACKEND_DBOID(listener) != MyDatabaseId)
+		{
+			if (asyncQueuePageDiff(QUEUE_POS_PAGE(QUEUE_HEAD),
+								   QUEUE_POS_PAGE(pos)) < QUEUE_CLEANUP_DELAY)
+				continue;
+		}
+
+		/* This backend needs waking */
+		procnos[count] = listener;
+		pids[count] = QUEUE_BACKEND_PID(listener);
+		count++;
+	}
+
+	LWLockRelease(NotifyQueueLock);
+
+	/* Now send signals without holding the lock */
+	for (i = 0; i < count; i++)
+	{
+		if (SendProcSignal(pids[i], PROCSIG_NOTIFY_INTERRUPT, procnos[i]) < 0)
+			elog(DEBUG3, "could not signal backend with PID %d: %m", pids[i]);
+	}
+
+	pfree(procnos);
+	pfree(pids);
 }

@@ -67,6 +67,7 @@
 #include "postmaster/autovacuum.h"
 #include "postmaster/bgworker_internals.h"
 #include "postmaster/bgwriter.h"
+#include "postmaster/notify_dispatcher.h"
 #include "postmaster/postmaster.h"
 #include "postmaster/startup.h"
 #include "postmaster/syslogger.h"
@@ -2920,6 +2921,27 @@ struct config_int ConfigureNamesInt[] =
 		},
 		&max_notify_queue_pages,
 		1048576, 64, INT_MAX,
+		NULL, NULL, NULL
+	},
+
+	{
+		{"notify_dispatcher_batch_size", PGC_SIGHUP, RESOURCES_ASYNCHRONOUS,
+			gettext_noop("Sets the number of listeners to wake per notify dispatcher cycle."),
+			NULL,
+		},
+		&notify_dispatcher_batch_size,
+		1, 1, INT_MAX,
+		NULL, NULL, NULL
+	},
+
+	{
+		{"notify_dispatcher_wake_interval", PGC_SIGHUP, RESOURCES_ASYNCHRONOUS,
+			gettext_noop("Sets the notify dispatcher wake interval in milliseconds."),
+			NULL,
+			GUC_UNIT_MS
+		},
+		&notify_dispatcher_wake_interval,
+		10000, 1, INT_MAX,
 		NULL, NULL, NULL
 	},
 
