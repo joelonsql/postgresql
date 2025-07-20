@@ -51,6 +51,9 @@ typedef enum
 
 #define NUM_PROCSIGNALS (PROCSIG_RECOVERY_CONFLICT_LAST + 1)
 
+StaticAssertDecl(NUM_PROCSIGNALS <= 32,
+				"NUM_PROCSIGNALS must fit into ProcSignalSlot.pss_signalFlags");
+
 typedef enum
 {
 	PROCSIGNAL_BARRIER_SMGRRELEASE, /* ask smgr to close files */
