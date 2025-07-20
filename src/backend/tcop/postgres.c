@@ -53,6 +53,7 @@
 #include "pg_getopt.h"
 #include "pg_trace.h"
 #include "pgstat.h"
+#include "port/atomics.h"
 #include "postmaster/interrupt.h"
 #include "postmaster/postmaster.h"
 #include "replication/logicallauncher.h"
@@ -3282,6 +3283,36 @@ ProcessRecoveryConflictInterrupts(void)
 }
 
 /*
+ * ProcessLatchSignals: process latch-based signals
+ *
+ * Check for and process any latch-based signals that have been set
+ * on this backend's PGPROC structure. This avoids the overhead of
+ * POSIX signals when the backend is already awake.
+ */
+static void
+ProcessLatchSignals(void)
+{
+	uint32 signals;
+
+	/* Atomically fetch and clear the signals we are about to process. */
+	signals = pg_atomic_exchange_u32(&MyProc->latch_signals, 0);
+
+	/* Nothing to do if we lost a race. */
+	if (signals == 0)
+		return;
+
+	/*
+	 * Check for the NOTIFY signal. If found, bridge to the existing
+	 * notification logic by setting the process-local flag. This correctly
+	 * preserves the rule that notifies are only handled outside transactions.
+	 */
+	if (signals & PROC_NOTIFY_INTERRUPT)
+	{
+		notifyInterruptPending = true;
+	}
+}
+
+/*
  * ProcessInterrupts: out-of-line portion of CHECK_FOR_INTERRUPTS() macro
  *
  * If an interrupt condition is pending, and it's safe to service it,
@@ -3301,6 +3332,10 @@ ProcessInterrupts(void)
 	if (InterruptHoldoffCount != 0 || CritSectionCount != 0)
 		return;
 	InterruptPending = false;
+
+	/* Check for latch-based signals */
+	if (MyProc && pg_atomic_read_u32(&MyProc->latch_signals) != 0)
+		ProcessLatchSignals();
 
 	if (ProcDiePending)
 	{
