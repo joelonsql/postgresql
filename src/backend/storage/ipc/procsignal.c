@@ -65,8 +65,8 @@ typedef struct
 	pg_atomic_uint32 pss_pid;
 	int			pss_cancel_key_len; /* 0 means no cancellation is possible */
 	uint8		pss_cancel_key[MAX_CANCEL_KEY_LENGTH];
-	volatile sig_atomic_t pss_signalFlags[NUM_PROCSIGNALS];
-	slock_t		pss_mutex;		/* protects the above fields */
+	pg_atomic_uint32 pss_signalFlags;	/* bitmask of pending signals */
+	slock_t		pss_mutex;		/* protects cancel_key fields only */
 
 	/* Barrier-related fields (not protected by pss_mutex) */
 	pg_atomic_uint64 pss_barrierGeneration;
@@ -105,7 +105,7 @@ struct ProcSignalHeader
 NON_EXEC_STATIC ProcSignalHeader *ProcSignal = NULL;
 static ProcSignalSlot *MyProcSignalSlot = NULL;
 
-static bool CheckProcSignal(ProcSignalReason reason);
+static bool HasProcSignalFlag(uint32 flags, ProcSignalReason reason);
 static void CleanupProcSignalState(int status, Datum arg);
 static void ResetProcSignalBarrierBits(uint32 flags);
 
@@ -150,7 +150,7 @@ ProcSignalShmemInit(void)
 			SpinLockInit(&slot->pss_mutex);
 			pg_atomic_init_u32(&slot->pss_pid, 0);
 			slot->pss_cancel_key_len = 0;
-			MemSet(slot->pss_signalFlags, 0, sizeof(slot->pss_signalFlags));
+			pg_atomic_init_u32(&slot->pss_signalFlags, 0);
 			pg_atomic_init_u64(&slot->pss_barrierGeneration, PG_UINT64_MAX);
 			pg_atomic_init_u32(&slot->pss_barrierCheckMask, 0);
 			ConditionVariableInit(&slot->pss_barrierCV);
@@ -182,7 +182,7 @@ ProcSignalInit(const uint8 *cancel_key, int cancel_key_len)
 	old_pss_pid = pg_atomic_read_u32(&slot->pss_pid);
 
 	/* Clear out any leftover signal reasons */
-	MemSet(slot->pss_signalFlags, 0, NUM_PROCSIGNALS * sizeof(sig_atomic_t));
+	pg_atomic_write_u32(&slot->pss_signalFlags, 0);
 
 	/*
 	 * Initialize barrier state. Since we're a brand-new process, there
@@ -212,7 +212,7 @@ ProcSignalInit(const uint8 *cancel_key, int cancel_key_len)
 		elog(LOG, "process %d taking over ProcSignal slot %d, but it's not empty",
 			 MyProcPid, MyProcNumber);
 
-	/* Remember slot location for CheckProcSignal */
+	/* Remember slot location for HasProcSignalFlag */
 	MyProcSignalSlot = slot;
 
 	/* Set up to release the slot on process exit */
@@ -294,10 +294,15 @@ SendProcSignal(pid_t pid, ProcSignalReason reason, ProcNumber procNumber)
 		if (pg_atomic_read_u32(&slot->pss_pid) == pid)
 		{
 			/* Atomically set the proper flag */
-			slot->pss_signalFlags[reason] = true;
+			uint32		oldflags = pg_atomic_fetch_or_u32(&slot->pss_signalFlags,
+														  (uint32) 1 << reason);
+
 			SpinLockRelease(&slot->pss_mutex);
-			/* Send signal */
-			return kill(pid, SIGUSR1);
+			/* Send signal only if there were no pending signals before this. */
+			if (oldflags == 0)
+				return kill(pid, SIGUSR1);
+			else
+				return 0;
 		}
 		SpinLockRelease(&slot->pss_mutex);
 	}
@@ -322,10 +327,15 @@ SendProcSignal(pid_t pid, ProcSignalReason reason, ProcNumber procNumber)
 				if (pg_atomic_read_u32(&slot->pss_pid) == pid)
 				{
 					/* Atomically set the proper flag */
-					slot->pss_signalFlags[reason] = true;
+					uint32		oldflags = pg_atomic_fetch_or_u32(&slot->pss_signalFlags,
+																  (uint32) 1 << reason);
+
 					SpinLockRelease(&slot->pss_mutex);
-					/* Send signal */
-					return kill(pid, SIGUSR1);
+					/* Send signal only if there were no pending signals before this. */
+					if (oldflags == 0)
+						return kill(pid, SIGUSR1);
+					else
+						return 0;
 				}
 				SpinLockRelease(&slot->pss_mutex);
 			}
@@ -404,9 +414,13 @@ EmitProcSignalBarrier(ProcSignalBarrierType type)
 			if (pid != 0)
 			{
 				/* see SendProcSignal for details */
-				slot->pss_signalFlags[PROCSIG_BARRIER] = true;
+				uint32		oldflags = pg_atomic_fetch_or_u32(&slot->pss_signalFlags,
+															  (uint32) 1 << PROCSIG_BARRIER);
+
 				SpinLockRelease(&slot->pss_mutex);
-				kill(pid, SIGUSR1);
+				/* Send signal only if there were no pending signals before this. */
+				if (oldflags == 0)
+					kill(pid, SIGUSR1);
 			}
 			else
 				SpinLockRelease(&slot->pss_mutex);
@@ -641,30 +655,13 @@ ResetProcSignalBarrierBits(uint32 flags)
 }
 
 /*
- * CheckProcSignal - check to see if a particular reason has been
- * signaled, and clear the signal flag.  Should be called after receiving
- * SIGUSR1.
+ * HasProcSignalFlag - check to see if a particular reason has been
+ * signaled in the given flags bitmask.
  */
 static bool
-CheckProcSignal(ProcSignalReason reason)
+HasProcSignalFlag(uint32 flags, ProcSignalReason reason)
 {
-	volatile ProcSignalSlot *slot = MyProcSignalSlot;
-
-	if (slot != NULL)
-	{
-		/*
-		 * Careful here --- don't clear flag if we haven't seen it set.
-		 * pss_signalFlags is of type "volatile sig_atomic_t" to allow us to
-		 * read it here safely, without holding the spinlock.
-		 */
-		if (slot->pss_signalFlags[reason])
-		{
-			slot->pss_signalFlags[reason] = false;
-			return true;
-		}
-	}
-
-	return false;
+	return (flags & ((uint32) 1 << reason)) != 0;
 }
 
 /*
@@ -673,46 +670,54 @@ CheckProcSignal(ProcSignalReason reason)
 void
 procsignal_sigusr1_handler(SIGNAL_ARGS)
 {
-	if (CheckProcSignal(PROCSIG_CATCHUP_INTERRUPT))
+	uint32		flags;
+
+	/* Atomically consume all pending signals */
+	if (MyProcSignalSlot)
+		flags = pg_atomic_exchange_u32(&MyProcSignalSlot->pss_signalFlags, 0);
+	else
+		flags = 0;
+
+	if (HasProcSignalFlag(flags, PROCSIG_CATCHUP_INTERRUPT))
 		HandleCatchupInterrupt();
 
-	if (CheckProcSignal(PROCSIG_NOTIFY_INTERRUPT))
+	if (HasProcSignalFlag(flags, PROCSIG_NOTIFY_INTERRUPT))
 		HandleNotifyInterrupt();
 
-	if (CheckProcSignal(PROCSIG_PARALLEL_MESSAGE))
+	if (HasProcSignalFlag(flags, PROCSIG_PARALLEL_MESSAGE))
 		HandleParallelMessageInterrupt();
 
-	if (CheckProcSignal(PROCSIG_WALSND_INIT_STOPPING))
+	if (HasProcSignalFlag(flags, PROCSIG_WALSND_INIT_STOPPING))
 		HandleWalSndInitStopping();
 
-	if (CheckProcSignal(PROCSIG_BARRIER))
+	if (HasProcSignalFlag(flags, PROCSIG_BARRIER))
 		HandleProcSignalBarrierInterrupt();
 
-	if (CheckProcSignal(PROCSIG_LOG_MEMORY_CONTEXT))
+	if (HasProcSignalFlag(flags, PROCSIG_LOG_MEMORY_CONTEXT))
 		HandleLogMemoryContextInterrupt();
 
-	if (CheckProcSignal(PROCSIG_PARALLEL_APPLY_MESSAGE))
+	if (HasProcSignalFlag(flags, PROCSIG_PARALLEL_APPLY_MESSAGE))
 		HandleParallelApplyMessageInterrupt();
 
-	if (CheckProcSignal(PROCSIG_RECOVERY_CONFLICT_DATABASE))
+	if (HasProcSignalFlag(flags, PROCSIG_RECOVERY_CONFLICT_DATABASE))
 		HandleRecoveryConflictInterrupt(PROCSIG_RECOVERY_CONFLICT_DATABASE);
 
-	if (CheckProcSignal(PROCSIG_RECOVERY_CONFLICT_TABLESPACE))
+	if (HasProcSignalFlag(flags, PROCSIG_RECOVERY_CONFLICT_TABLESPACE))
 		HandleRecoveryConflictInterrupt(PROCSIG_RECOVERY_CONFLICT_TABLESPACE);
 
-	if (CheckProcSignal(PROCSIG_RECOVERY_CONFLICT_LOCK))
+	if (HasProcSignalFlag(flags, PROCSIG_RECOVERY_CONFLICT_LOCK))
 		HandleRecoveryConflictInterrupt(PROCSIG_RECOVERY_CONFLICT_LOCK);
 
-	if (CheckProcSignal(PROCSIG_RECOVERY_CONFLICT_SNAPSHOT))
+	if (HasProcSignalFlag(flags, PROCSIG_RECOVERY_CONFLICT_SNAPSHOT))
 		HandleRecoveryConflictInterrupt(PROCSIG_RECOVERY_CONFLICT_SNAPSHOT);
 
-	if (CheckProcSignal(PROCSIG_RECOVERY_CONFLICT_LOGICALSLOT))
+	if (HasProcSignalFlag(flags, PROCSIG_RECOVERY_CONFLICT_LOGICALSLOT))
 		HandleRecoveryConflictInterrupt(PROCSIG_RECOVERY_CONFLICT_LOGICALSLOT);
 
-	if (CheckProcSignal(PROCSIG_RECOVERY_CONFLICT_STARTUP_DEADLOCK))
+	if (HasProcSignalFlag(flags, PROCSIG_RECOVERY_CONFLICT_STARTUP_DEADLOCK))
 		HandleRecoveryConflictInterrupt(PROCSIG_RECOVERY_CONFLICT_STARTUP_DEADLOCK);
 
-	if (CheckProcSignal(PROCSIG_RECOVERY_CONFLICT_BUFFERPIN))
+	if (HasProcSignalFlag(flags, PROCSIG_RECOVERY_CONFLICT_BUFFERPIN))
 		HandleRecoveryConflictInterrupt(PROCSIG_RECOVERY_CONFLICT_BUFFERPIN);
 
 	SetLatch(MyLatch);
