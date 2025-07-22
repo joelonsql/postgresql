@@ -17,7 +17,6 @@
 
 extern PGDLLIMPORT bool Trace_notify;
 extern PGDLLIMPORT int max_notify_queue_pages;
-extern PGDLLIMPORT volatile sig_atomic_t notifyInterruptPending;
 
 extern Size AsyncShmemSize(void);
 extern void AsyncShmemInit(void);
@@ -45,5 +44,8 @@ extern void HandleNotifyInterrupt(void);
 
 /* process interrupts */
 extern void ProcessNotifyInterrupt(bool flush);
+
+/* check if notification interrupt is pending */
+extern bool IsNotifyInterruptPending(void);
 
 #endif							/* ASYNC_H */
