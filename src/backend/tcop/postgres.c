@@ -511,9 +511,14 @@ ProcessClientReadInterrupt(bool blocked)
 		if (catchupInterruptPending)
 			ProcessCatchupInterrupt();
 
-		/* Process notify interrupts, if any */
-		if (notifyInterruptPending)
-			ProcessNotifyInterrupt(true);
+		for (;;)
+		{
+			uint32 state = AsyncGetBackendState(MyProcNumber);
+			if (state == ASYNC_STATE_SIGNALLED)
+				ProcessNotifyInterrupt(true);
+			else
+				break;
+		}
 	}
 	else if (ProcDiePending)
 	{
@@ -4603,8 +4608,14 @@ PostgresMain(const char *dbname, const char *username)
 				 * were received during the just-finished transaction, they'll
 				 * be seen by the client before ReadyForQuery is.
 				 */
-				if (notifyInterruptPending)
-					ProcessNotifyInterrupt(false);
+				for (;;)
+				{
+					uint32 state = AsyncGetBackendState(MyProcNumber);
+					if (state == ASYNC_STATE_SIGNALLED)
+						ProcessNotifyInterrupt(false);
+					else
+						break;
+				}
 
 				/*
 				 * Check if we need to report stats. If pgstat_report_stat()

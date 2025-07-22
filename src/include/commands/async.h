@@ -17,7 +17,14 @@
 
 extern PGDLLIMPORT bool Trace_notify;
 extern PGDLLIMPORT int max_notify_queue_pages;
-extern PGDLLIMPORT volatile sig_atomic_t notifyInterruptPending;
+
+/* Async backend states */
+typedef enum
+{
+	ASYNC_STATE_IDLE = 0,		/* Backend is idle */
+	ASYNC_STATE_SIGNALLED = 1,	/* Backend has been signalled */
+	ASYNC_STATE_PROCESSING = 2	/* Backend is processing notifications */
+} AsyncBackendState;
 
 extern Size AsyncShmemSize(void);
 extern void AsyncShmemInit(void);
@@ -45,5 +52,8 @@ extern void HandleNotifyInterrupt(void);
 
 /* process interrupts */
 extern void ProcessNotifyInterrupt(bool flush);
+
+/* check backend async state */
+extern uint32 AsyncGetBackendState(int procno);
 
 #endif							/* ASYNC_H */

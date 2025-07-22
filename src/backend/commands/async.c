@@ -302,6 +302,12 @@ static AsyncQueueControl *asyncQueueControl;
 #define QUEUE_NEXT_LISTENER(i)		(asyncQueueControl->backend[i].nextListener)
 #define QUEUE_BACKEND_POS(i)		(asyncQueueControl->backend[i].pos)
 
+/* Access backend states array that follows the backend array */
+#define QUEUE_BACKEND_STATE(i) \
+	(((pg_atomic_uint32 *)((char *)asyncQueueControl + \
+	 offsetof(AsyncQueueControl, backend) + \
+	 MaxBackends * sizeof(QueueBackendStatus)))[i])
+
 /*
  * The SLRU buffer area through which we access the notification queue
  */
@@ -335,6 +341,8 @@ typedef enum
 	LISTEN_UNLISTEN,
 	LISTEN_UNLISTEN_ALL,
 } ListenActionKind;
+
+/* AsyncBackendState enum is now defined in async.h */
 
 typedef struct
 {
@@ -402,15 +410,6 @@ struct NotificationHash
 };
 
 static NotificationList *pendingNotifies = NULL;
-
-/*
- * Inbound notifications are initially processed by HandleNotifyInterrupt(),
- * called from inside a signal handler. That just sets the
- * notifyInterruptPending flag and sets the process
- * latch. ProcessNotifyInterrupt() will then be called whenever it's safe to
- * actually deal with the interrupt.
- */
-volatile sig_atomic_t notifyInterruptPending = false;
 
 /* True if we've registered an on_shmem_exit cleanup */
 static bool unlistenExitRegistered = false;
@@ -487,8 +486,9 @@ AsyncShmemSize(void)
 	Size		size;
 
 	/* This had better match AsyncShmemInit */
-	size = mul_size(MaxBackends, sizeof(QueueBackendStatus));
-	size = add_size(size, offsetof(AsyncQueueControl, backend));
+	size = offsetof(AsyncQueueControl, backend);
+	size = add_size(size, mul_size(MaxBackends, sizeof(QueueBackendStatus)));
+	size = add_size(size, mul_size(MaxBackends, sizeof(pg_atomic_uint32)));
 
 	size = add_size(size, SimpleLruShmemSize(notify_buffers, 0));
 
@@ -507,8 +507,9 @@ AsyncShmemInit(void)
 	/*
 	 * Create or attach to the AsyncQueueControl structure.
 	 */
-	size = mul_size(MaxBackends, sizeof(QueueBackendStatus));
-	size = add_size(size, offsetof(AsyncQueueControl, backend));
+	size = offsetof(AsyncQueueControl, backend);
+	size = add_size(size, mul_size(MaxBackends, sizeof(QueueBackendStatus)));
+	size = add_size(size, mul_size(MaxBackends, sizeof(pg_atomic_uint32)));
 
 	asyncQueueControl = (AsyncQueueControl *)
 		ShmemInitStruct("Async Queue Control", size, &found);
@@ -527,6 +528,7 @@ AsyncShmemInit(void)
 			QUEUE_BACKEND_DBOID(i) = InvalidOid;
 			QUEUE_NEXT_LISTENER(i) = INVALID_PROC_NUMBER;
 			SET_QUEUE_POS(QUEUE_BACKEND_POS(i), 0, 0);
+			pg_atomic_init_u32(&QUEUE_BACKEND_STATE(i), ASYNC_STATE_IDLE);
 		}
 	}
 
@@ -1179,6 +1181,9 @@ Exec_UnlistenCommit(const char *channel)
 		}
 	}
 
+	if (listenChannels == NIL)
+		pg_atomic_write_u32(&QUEUE_BACKEND_STATE(MyProcNumber),
+							ASYNC_STATE_IDLE);
 	/*
 	 * We do not complain about unlistening something not being listened;
 	 * should we?
@@ -1198,6 +1203,8 @@ Exec_UnlistenAllCommit(void)
 
 	list_free_deep(listenChannels);
 	listenChannels = NIL;
+	pg_atomic_write_u32(&QUEUE_BACKEND_STATE(MyProcNumber),
+						ASYNC_STATE_IDLE);
 }
 
 /*
@@ -1261,6 +1268,8 @@ asyncQueueUnregister(void)
 
 	/* mark ourselves as no longer listed in the global array */
 	amRegisteredListener = false;
+	/* set async state to IDLE */
+	pg_atomic_exchange_u32(&QUEUE_BACKEND_STATE(MyProcNumber), ASYNC_STATE_IDLE);
 }
 
 /*
@@ -1630,29 +1639,113 @@ SignalBackends(void)
 	}
 	LWLockRelease(NotifyQueueLock);
 
-	/* Now send signals */
+	/* Now send signals using atomic state transitions */
 	for (int i = 0; i < count; i++)
 	{
 		int32		pid = pids[i];
+		ProcNumber	procno = procnos[i];
+		uint32		oldstate;
+		bool		need_signal = false;
 
 		/*
 		 * If we are signaling our own process, no need to involve the kernel;
-		 * just set the flag directly.
+		 * just set the flag directly and update our state.
 		 */
 		if (pid == MyProcPid)
 		{
-			notifyInterruptPending = true;
+			/* Update our own state to SIGNALLED */
+			pg_atomic_exchange_u32(&QUEUE_BACKEND_STATE(procno), ASYNC_STATE_SIGNALLED);
 			continue;
 		}
 
 		/*
-		 * Note: assuming things aren't broken, a signal failure here could
-		 * only occur if the target backend exited since we released
-		 * NotifyQueueLock; which is unlikely but certainly possible. So we
-		 * just log a low-level debug message if it happens.
+		 * Determine if we need to send a signal
 		 */
-		if (SendProcSignal(pid, PROCSIG_NOTIFY_INTERRUPT, procnos[i]) < 0)
-			elog(DEBUG3, "could not signal backend with PID %d: %m", pid);
+		oldstate = pg_atomic_read_membarrier_u32(&QUEUE_BACKEND_STATE(procno));
+		if (oldstate == ASYNC_STATE_IDLE)
+		{
+			/*
+			 * The backend is IDLE, so it needs to be signalled.
+			 */
+			if (pg_atomic_compare_exchange_u32(&QUEUE_BACKEND_STATE(procno),
+												&oldstate,
+												ASYNC_STATE_SIGNALLED))
+			{
+				/* State transition IDLE -> SIGNALLED successful. */
+				need_signal = true;
+			}
+			else
+			{
+				/*
+				 * Some other process changed it from IDLE,
+				 * which means we don't need to signal it,
+				 * since it was definitively in IDLE,
+				 * so our pending notification is guaranteed
+				 * to be included in its next processing cycle.
+				 */
+			}
+		}
+		else if (oldstate == ASYNC_STATE_SIGNALLED)
+		{
+			/*
+			 * The backend is already in SIGNALLED,
+			 * we don't need to do anything,
+			 * we know it hadn't started processing the queue yet
+			 * when we read this state, which was after in time
+			 * when we added our pending notification to the queue,
+			 * so it will definitively be included in its next processing
+			 * cycle.
+			 */
+		}
+		else
+		{
+			Assert(oldstate == ASYNC_STATE_PROCESSING);
+			/*
+			 * The backend is already in PROCESSING.
+			 * We need to signal it again, since it could have finished
+			 * processed the queue before our pending notification was
+			 * added to the queue, and not just yet changed its
+			 * state to IDLE.
+			 */
+			if (pg_atomic_compare_exchange_u32(&QUEUE_BACKEND_STATE(procno),
+												&oldstate,
+												ASYNC_STATE_SIGNALLED))
+			{
+				/* State transition PROCESSING -> SIGNALLED successful. */
+				need_signal = true;
+			}
+			else if (oldstate == ASYNC_STATE_IDLE)
+			{
+				/*
+				 * The backend became IDLE from the time we observed it
+				 * to be PROCESSING. We will need to signal it again,
+				 * for the same reasons as mentioned for PROCESSING.
+				 */
+				if (pg_atomic_compare_exchange_u32(&QUEUE_BACKEND_STATE(procno),
+													&oldstate,
+													ASYNC_STATE_SIGNALLED))
+				{
+					/* State transition IDLE -> SIGNALLED successful. */
+					need_signal = true;
+				}
+				/*
+				 * Else, some other process signalled it, that's fine,
+				 * then we don't need to do anything.
+				 */
+		   }
+		}
+
+		if (need_signal)
+		{
+			/*
+			 * Note: assuming things aren't broken, a signal failure here could
+			 * only occur if the target backend exited since we released
+			 * NotifyQueueLock; which is unlikely but certainly possible. So we
+			 * just log a low-level debug message if it happens.
+			 */
+			if (SendProcSignal(pid, PROCSIG_NOTIFY_INTERRUPT, procno) < 0)
+				elog(DEBUG3, "could not signal backend with PID %d: %m", pid);
+		}
 	}
 
 	pfree(pids);
@@ -1680,6 +1773,10 @@ AtAbort_Notify(void)
 
 	/* And clean up */
 	ClearPendingActionsAndNotifies();
+
+	if (listenChannels == NIL)
+		pg_atomic_write_u32(&QUEUE_BACKEND_STATE(MyProcNumber),
+							ASYNC_STATE_IDLE);
 }
 
 /*
@@ -1804,12 +1901,11 @@ void
 HandleNotifyInterrupt(void)
 {
 	/*
-	 * Note: this is called by a SIGNAL HANDLER. You must be very wary what
-	 * you do here.
+	 * Note: this is called by a SIGNAL HANDLER. The state transition to
+	 * SIGNALLED was already performed by the notifier; the signal's only
+	 * purpose is to wake up the backend by setting its latch. You must be
+	 * very wary what you do here.
 	 */
-
-	/* signal that work needs to be done */
-	notifyInterruptPending = true;
 
 	/* make sure the event is processed in due course */
 	SetLatch(MyLatch);
@@ -1837,8 +1933,14 @@ ProcessNotifyInterrupt(bool flush)
 		return;					/* not really idle */
 
 	/* Loop in case another signal arrives while sending messages */
-	while (notifyInterruptPending)
-		ProcessIncomingNotify(flush);
+	for (;;)
+	{
+		uint32 state = pg_atomic_read_u32(&QUEUE_BACKEND_STATE(MyProcNumber));
+		if (state == ASYNC_STATE_SIGNALLED)
+			ProcessIncomingNotify(flush);
+		else
+			break;
+	}
 }
 
 
@@ -2182,12 +2284,40 @@ asyncQueueAdvanceTail(void)
 static void
 ProcessIncomingNotify(bool flush)
 {
-	/* We *must* reset the flag */
-	notifyInterruptPending = false;
+	uint32		oldstate;
 
 	/* Do nothing else if we aren't actively listening */
 	if (listenChannels == NIL)
 		return;
+
+	/* Try changing state from SIGNALLED -> PROCESSING */
+	oldstate = ASYNC_STATE_SIGNALLED;
+	if (!pg_atomic_compare_exchange_u32(&QUEUE_BACKEND_STATE(MyProcNumber),
+										&oldstate,
+										ASYNC_STATE_PROCESSING))
+	{
+		if (oldstate == ASYNC_STATE_IDLE)
+		{
+			/*
+				* We were not SIGNALLED, but IDLE, so we don't need to do
+				* anything. The logics should be fixed so that we're not
+				* even called if we're not signalled, but for now,
+				* just ignore it.
+				*/
+			return;
+		}
+		else if (oldstate == ASYNC_STATE_PROCESSING)
+		{
+			/*
+				* We cannot possibly be in PROCESSING, since it's only
+				* the backend itself that ever transit from SIGNALLED
+				* to PROCESSING, and we will only be called if
+				* we are in SIGNALLED (or IDLE, until we've fixed the logics).
+				*/
+			elog(ERROR, "Unexpected state ASYNC_STATE_PROCESSING");
+		}
+		return;
+	}
 
 	if (Trace_notify)
 		elog(DEBUG1, "ProcessIncomingNotify");
@@ -2203,6 +2333,25 @@ ProcessIncomingNotify(bool flush)
 	asyncQueueReadAllNotifications();
 
 	CommitTransactionCommand();
+
+	/*
+	 * Try to transition from PROCESSING to IDLE.
+	 * If the state is SIGNALLED, it means new notifications arrived
+	 * while we were processing, so we need to loop again.
+	 */
+	oldstate = ASYNC_STATE_PROCESSING;
+	if (!pg_atomic_compare_exchange_u32(&QUEUE_BACKEND_STATE(MyProcNumber),
+										&oldstate,
+										ASYNC_STATE_IDLE))
+	{
+		/*
+			* If our attempt to transit state from PROCESSING to IDLE failed,
+			* that must be because some other process signalled us.
+			* We should change this to an Assert, but use elog ERROR for now.
+			*/
+		if (oldstate != ASYNC_STATE_SIGNALLED)
+				elog(ERROR, "Unexpected state: expected ASYNC_STATE_SIGNALLED, got %u", oldstate);
+	}
 
 	/*
 	 * If this isn't an end-of-command case, we must flush the notify messages
@@ -2394,4 +2543,19 @@ bool
 check_notify_buffers(int *newval, void **extra, GucSource source)
 {
 	return check_slru_buffers("notify_buffers", newval);
+}
+
+/*
+ * AsyncGetBackendState
+ *
+ *		Return the current async state for the given backend.
+ *		This allows postgres.c to check backend states.
+ */
+uint32
+AsyncGetBackendState(int procno)
+{
+	if (!asyncQueueControl)
+		return ASYNC_STATE_IDLE;
+
+	return pg_atomic_read_u32(&QUEUE_BACKEND_STATE(procno));
 }
