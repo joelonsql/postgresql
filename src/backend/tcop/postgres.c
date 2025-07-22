@@ -512,7 +512,7 @@ ProcessClientReadInterrupt(bool blocked)
 			ProcessCatchupInterrupt();
 
 		/* Process notify interrupts, if any */
-		if (notifyInterruptPending)
+		if (IsNotifyInterruptPending())
 			ProcessNotifyInterrupt(true);
 	}
 	else if (ProcDiePending)
@@ -4604,7 +4604,7 @@ PostgresMain(const char *dbname, const char *username)
 				 * were received during the just-finished transaction, they'll
 				 * be seen by the client before ReadyForQuery is.
 				 */
-				if (notifyInterruptPending)
+				if (IsNotifyInterruptPending())
 					ProcessNotifyInterrupt(false);
 
 				/*
