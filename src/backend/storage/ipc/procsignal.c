@@ -16,6 +16,11 @@
 
 #include <signal.h>
 #include <unistd.h>
+#ifdef HAVE_KQUEUE
+#include <sys/types.h>
+#include <sys/event.h>
+#include <sys/time.h>
+#endif
 
 #include "access/parallel.h"
 #include "commands/async.h"
@@ -67,6 +72,9 @@ typedef struct
 	uint8		pss_cancel_key[MAX_CANCEL_KEY_LENGTH];
 	pg_atomic_uint32 pss_signalFlags;	/* bitmask of pending signals */
 	slock_t		pss_mutex;		/* protects cancel_key fields only */
+#ifdef HAVE_KQUEUE
+	int			pss_kqueue_fd;	/* kqueue file descriptor for direct signaling */
+#endif
 
 	/* Barrier-related fields (not protected by pss_mutex) */
 	pg_atomic_uint64 pss_barrierGeneration;
@@ -108,6 +116,9 @@ static ProcSignalSlot *MyProcSignalSlot = NULL;
 static bool HasProcSignalFlag(uint32 flags, ProcSignalReason reason);
 static void CleanupProcSignalState(int status, Datum arg);
 static void ResetProcSignalBarrierBits(uint32 flags);
+#ifdef HAVE_KQUEUE
+static void ProcessKqueueProcSignals(void);
+#endif
 
 /*
  * ProcSignalShmemSize
@@ -151,6 +162,9 @@ ProcSignalShmemInit(void)
 			pg_atomic_init_u32(&slot->pss_pid, 0);
 			slot->pss_cancel_key_len = 0;
 			pg_atomic_init_u32(&slot->pss_signalFlags, 0);
+#ifdef HAVE_KQUEUE
+			slot->pss_kqueue_fd = -1;
+#endif
 			pg_atomic_init_u64(&slot->pss_barrierGeneration, PG_UINT64_MAX);
 			pg_atomic_init_u32(&slot->pss_barrierCheckMask, 0);
 			ConditionVariableInit(&slot->pss_barrierCV);
@@ -204,6 +218,9 @@ ProcSignalInit(const uint8 *cancel_key, int cancel_key_len)
 		memcpy(slot->pss_cancel_key, cancel_key, cancel_key_len);
 	slot->pss_cancel_key_len = cancel_key_len;
 	pg_atomic_write_u32(&slot->pss_pid, MyProcPid);
+#ifdef HAVE_KQUEUE
+	slot->pss_kqueue_fd = MyKqueue;
+#endif
 
 	SpinLockRelease(&slot->pss_mutex);
 
@@ -257,6 +274,9 @@ CleanupProcSignalState(int status, Datum arg)
 	/* Mark the slot as unused */
 	pg_atomic_write_u32(&slot->pss_pid, 0);
 	slot->pss_cancel_key_len = 0;
+#ifdef HAVE_KQUEUE
+	slot->pss_kqueue_fd = -1;
+#endif
 
 	/*
 	 * Make this slot look like it's absorbed all possible barriers, so that
@@ -678,6 +698,42 @@ procsignal_sigusr1_handler(SIGNAL_ARGS)
 	else
 		flags = 0;
 
+#ifdef HAVE_KQUEUE
+	/*
+	 * Signal-to-kqueue bridge: Convert signal reasons to kqueue events.
+	 * This is async-signal-safe as it only uses atomic operations and kevent.
+	 * Each signal reason becomes a user event with the reason as the ident.
+	 */
+	if (flags != 0 && MyKqueue >= 0)
+	{
+		struct kevent events[NUM_PROCSIGNALS];
+		int nevents = 0;
+		int i;
+		
+		/* Build kevent array for all pending signals */
+		for (i = 0; i < NUM_PROCSIGNALS; i++)
+		{
+			if (HasProcSignalFlag(flags, i))
+			{
+				EV_SET(&events[nevents], i, EVFILT_USER, 
+					   EV_ADD | EV_ENABLE, NOTE_TRIGGER, 0, NULL);
+				nevents++;
+			}
+		}
+		
+		/* Inject all events with a single non-blocking kevent call */
+		if (nevents > 0)
+		{
+			/* This is async-signal-safe */
+			kevent(MyKqueue, events, nevents, NULL, 0, NULL);
+		}
+		
+		/* The kqueue event will wake up the backend, no need for SetLatch */
+		return;
+	}
+#endif
+
+	/* Fallback: Call handlers directly for non-kqueue systems */
 	if (HasProcSignalFlag(flags, PROCSIG_CATCHUP_INTERRUPT))
 		HandleCatchupInterrupt();
 
@@ -798,3 +854,109 @@ SendCancelRequest(int backendPID, const uint8 *cancel_key, int cancel_key_len)
 			(errmsg("PID %d in cancel request did not match any process",
 					backendPID)));
 }
+
+#ifdef HAVE_KQUEUE
+/*
+ * ProcessKqueueProcSignals
+ *		Process any pending procsignal events from MyKqueue
+ *
+ * This function is called from the main backend loop to check if any
+ * procsignal events have been delivered via kqueue. It uses a non-blocking
+ * kevent call to retrieve and process any pending events.
+ */
+static void
+ProcessKqueueProcSignals(void)
+{
+	struct kevent events[NUM_PROCSIGNALS];
+	struct timespec timeout = {0, 0};	/* non-blocking */
+	int nevents;
+	int i;
+	
+	if (MyKqueue < 0)
+		return;
+	
+	/* Check for any pending kqueue events */
+	nevents = kevent(MyKqueue, NULL, 0, events, NUM_PROCSIGNALS, &timeout);
+	
+	if (nevents < 0)
+	{
+		if (errno != EINTR)
+			elog(WARNING, "kevent failed in ProcessKqueueProcSignals: %m");
+		return;
+	}
+	
+	/* Process each event */
+	for (i = 0; i < nevents; i++)
+	{
+		struct kevent *ev = &events[i];
+		
+		/* Only process user events that are from procsignals */
+		if (ev->filter == EVFILT_USER && ev->ident < NUM_PROCSIGNALS)
+		{
+			ProcSignalReason reason = (ProcSignalReason) ev->ident;
+			
+			/* Call the appropriate handler based on the signal reason */
+			switch (reason)
+			{
+				case PROCSIG_CATCHUP_INTERRUPT:
+					HandleCatchupInterrupt();
+					break;
+				case PROCSIG_NOTIFY_INTERRUPT:
+					HandleNotifyInterrupt();
+					break;
+				case PROCSIG_PARALLEL_MESSAGE:
+					HandleParallelMessageInterrupt();
+					break;
+				case PROCSIG_WALSND_INIT_STOPPING:
+					HandleWalSndInitStopping();
+					break;
+				case PROCSIG_BARRIER:
+					HandleProcSignalBarrierInterrupt();
+					break;
+				case PROCSIG_LOG_MEMORY_CONTEXT:
+					HandleLogMemoryContextInterrupt();
+					break;
+				case PROCSIG_PARALLEL_APPLY_MESSAGE:
+					HandleParallelApplyMessageInterrupt();
+					break;
+				case PROCSIG_RECOVERY_CONFLICT_DATABASE:
+					HandleRecoveryConflictInterrupt(PROCSIG_RECOVERY_CONFLICT_DATABASE);
+					break;
+				case PROCSIG_RECOVERY_CONFLICT_TABLESPACE:
+					HandleRecoveryConflictInterrupt(PROCSIG_RECOVERY_CONFLICT_TABLESPACE);
+					break;
+				case PROCSIG_RECOVERY_CONFLICT_LOCK:
+					HandleRecoveryConflictInterrupt(PROCSIG_RECOVERY_CONFLICT_LOCK);
+					break;
+				case PROCSIG_RECOVERY_CONFLICT_SNAPSHOT:
+					HandleRecoveryConflictInterrupt(PROCSIG_RECOVERY_CONFLICT_SNAPSHOT);
+					break;
+				case PROCSIG_RECOVERY_CONFLICT_LOGICALSLOT:
+					HandleRecoveryConflictInterrupt(PROCSIG_RECOVERY_CONFLICT_LOGICALSLOT);
+					break;
+				case PROCSIG_RECOVERY_CONFLICT_STARTUP_DEADLOCK:
+					HandleRecoveryConflictInterrupt(PROCSIG_RECOVERY_CONFLICT_STARTUP_DEADLOCK);
+					break;
+				case PROCSIG_RECOVERY_CONFLICT_BUFFERPIN:
+					HandleRecoveryConflictInterrupt(PROCSIG_RECOVERY_CONFLICT_BUFFERPIN);
+					break;
+				default:
+					elog(WARNING, "unrecognized procsignal reason: %d", reason);
+					break;
+			}
+		}
+	}
+}
+
+/*
+ * CheckProcSignalKqueue
+ *		Public interface to check for pending kqueue procsignal events
+ *
+ * This should be called periodically from the main backend loop.
+ */
+void
+CheckProcSignalKqueue(void)
+{
+	ProcessKqueueProcSignals();
+}
+#endif

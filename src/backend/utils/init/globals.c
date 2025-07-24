@@ -63,6 +63,14 @@ int			MyPMChildSlot;
 struct Latch *MyLatch;
 
 /*
+ * MyKqueue is the per-backend kqueue descriptor used for event notification.
+ * It is initialized to -1 and set up during backend initialization on systems
+ * that support kqueue (macOS, BSD). This provides a more efficient alternative
+ * to signal-based IPC.
+ */
+int			MyKqueue = -1;
+
+/*
  * DataDir is the absolute path to the top level of the PGDATA directory tree.
  * Except during early startup, this is also the server's working directory;
  * most code therefore can simply use relative paths and not reference DataDir

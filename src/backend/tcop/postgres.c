@@ -4606,6 +4606,15 @@ PostgresMain(const char *dbname, const char *username)
 				if (IsNotifyInterruptPending())
 					ProcessNotifyInterrupt(false);
 
+#ifdef HAVE_KQUEUE
+				/*
+				 * Check for any procsignal events delivered via kqueue.
+				 * This ensures that kqueue-delivered signals are processed
+				 * promptly even if no SIGUSR1 was sent.
+				 */
+				CheckProcSignalKqueue();
+#endif
+
 				/*
 				 * Check if we need to report stats. If pgstat_report_stat()
 				 * decides it's too soon to flush out pending stats / lock

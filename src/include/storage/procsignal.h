@@ -86,6 +86,10 @@ extern void ProcessProcSignalBarrier(void);
 
 extern void procsignal_sigusr1_handler(SIGNAL_ARGS);
 
+#ifdef HAVE_KQUEUE
+extern void CheckProcSignalKqueue(void);
+#endif
+
 /* ProcSignalHeader is an opaque struct, details known only within procsignal.c */
 typedef struct ProcSignalHeader ProcSignalHeader;
 

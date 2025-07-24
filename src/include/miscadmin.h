@@ -191,6 +191,7 @@ extern PGDLLIMPORT pg_time_t MyStartTime;
 extern PGDLLIMPORT TimestampTz MyStartTimestamp;
 extern PGDLLIMPORT struct Port *MyProcPort;
 extern PGDLLIMPORT struct Latch *MyLatch;
+extern PGDLLIMPORT int MyKqueue;
 extern PGDLLIMPORT uint8 MyCancelKey[];
 extern PGDLLIMPORT int MyCancelKeyLength;
 extern PGDLLIMPORT int MyPMChildSlot;

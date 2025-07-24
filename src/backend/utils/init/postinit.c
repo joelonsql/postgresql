@@ -18,6 +18,11 @@
 #include <ctype.h>
 #include <fcntl.h>
 #include <unistd.h>
+#ifdef HAVE_KQUEUE
+#include <sys/types.h>
+#include <sys/event.h>
+#include <sys/time.h>
+#endif
 
 #include "access/genam.h"
 #include "access/heapam.h"
@@ -749,6 +754,39 @@ InitPostgres(const char *in_dbname, Oid dboid,
 	SharedInvalBackendInit(false);
 
 	ProcSignalInit(MyCancelKey, MyCancelKeyLength);
+
+#ifdef HAVE_KQUEUE
+	/*
+	 * Initialize the per-backend kqueue descriptor for event notification.
+	 * This provides a more efficient alternative to signal-based IPC on
+	 * systems that support kqueue (macOS, BSD).
+	 */
+	if (!bootstrap)
+	{
+		struct kevent ev;
+		
+		MyKqueue = kqueue();
+		if (MyKqueue < 0)
+			ereport(ERROR,
+					(errcode_for_socket_access(),
+					 errmsg("could not create kqueue: %m")));
+		
+		/* Set close-on-exec flag */
+		if (fcntl(MyKqueue, F_SETFD, FD_CLOEXEC) < 0)
+			ereport(ERROR,
+					(errcode_for_socket_access(),
+					 errmsg("could not set close-on-exec flag on kqueue: %m")));
+		
+		/* Register a user event filter using MyProcNumber as the identifier */
+		EV_SET(&ev, MyProcNumber, EVFILT_USER, EV_ADD | EV_CLEAR, 0, 0, NULL);
+		if (kevent(MyKqueue, &ev, 1, NULL, 0, NULL) < 0)
+			ereport(ERROR,
+					(errcode_for_socket_access(),
+					 errmsg("could not register user event filter on kqueue: %m")));
+		
+		elog(DEBUG3, "initialized MyKqueue = %d for backend %d", MyKqueue, MyProcNumber);
+	}
+#endif
 
 	/*
 	 * Also set up timeout handlers needed for backend operation.  We need
