@@ -142,6 +142,7 @@
 #include "miscadmin.h"
 #include "storage/ipc.h"
 #include "storage/lmgr.h"
+#include "storage/proc.h"
 #include "storage/procsignal.h"
 #include "tcop/tcopprot.h"
 #include "utils/builtins.h"
@@ -1719,13 +1720,25 @@ SignalBackends(void)
 			else
 			{
 				/*
-				 * Note: assuming things aren't broken, a signal failure here could
-				 * only occur if the target backend exited since we released
-				 * NotifyQueueLock; which is unlikely but certainly possible. So we
-				 * just log a low-level debug message if it happens.
+				 * Get the target backend's PGPROC and set its latch.
+				 *
+				 * Note: The target backend might exit after we released
+				 * NotifyQueueLock but before we set the latch. We need to
+				 * handle the race condition where the PGPROC slot might be
+				 * recycled by a new process with a different PID.
 				 */
-				if (SendProcSignal(pid, PROCSIG_NOTIFY_INTERRUPT, procno) < 0)
-					elog(DEBUG3, "could not signal backend with PID %d: %m", pid);
+				PGPROC *proc = GetPGProcByNumber(procno);
+
+				/* Verify the PID hasn't changed (backend hasn't exited) */
+				if (proc->pid == pid)
+				{
+					SetLatch(&proc->procLatch);
+				}
+				else
+				{
+					/* Backend exited and slot was recycled */
+					elog(DEBUG3, "could not signal backend with PID %d: process no longer exists", pid);
+				}
 			}
 		}
 	}
