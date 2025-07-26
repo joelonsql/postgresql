@@ -4,6 +4,11 @@ backend_build_deps = [backend_code]
 backend_sources = []
 backend_link_with = [pgport_srv, common_srv]
 
+# Add Metal framework on macOS for GPU acceleration
+if host_machine.system() == 'darwin'
+  backend_build_deps += dependency('appleframeworks', modules: ['Metal', 'Foundation'])
+endif
+
 generated_backend_sources = []
 post_export_backend_sources = []
 

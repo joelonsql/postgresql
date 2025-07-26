@@ -100,6 +100,7 @@
 #include "postgres.h"
 
 #include <limits.h>
+#include <stdint.h>
 
 #include "commands/tablespace.h"
 #include "miscadmin.h"
@@ -109,6 +110,26 @@
 #include "utils/memutils.h"
 #include "utils/pg_rusage.h"
 #include "utils/tuplesort.h"
+
+#if defined(__APPLE__)
+#include <TargetConditionals.h>
+#if TARGET_OS_MAC
+#define POSTGRES_TARGET_OS_MAC 1
+#endif
+#endif
+
+/*
+ * GPU acceleration support
+ */
+#ifdef __APPLE__
+/* External GPU functions implemented in tuplesort_gpu_direct.c */
+extern void *gpu_direct_init_context(void);
+extern void gpu_direct_destroy_context(void *context);
+extern int gpu_direct_sort_int64(void *context, int64_t *keys, uint32_t *indices, int count);
+
+/* Global GPU context */
+static void *metal_context = NULL;
+#endif
 
 /*
  * Initial size of memtuples array.  We're trying to select this size so that
@@ -177,6 +198,14 @@ typedef enum
 #define MAXORDER		500		/* maximum merge order */
 #define TAPE_BUFFER_OVERHEAD		BLCKSZ
 #define MERGE_BUFFER_SIZE			(BLCKSZ * 32)
+
+#ifdef __APPLE__
+/* Don't attempt to use the GPU for sorts smaller than this threshold. */
+#define GPU_SORT_THRESHOLD 262144 /* 256k tuples */
+
+/* Forward declaration */
+static bool tuplesort_try_gpu_sort(Tuplesortstate *state);
+#endif /* __APPLE__ */
 
 
 /*
@@ -646,6 +675,9 @@ tuplesort_begin_common(int workMem, SortCoordinate coordinate, int sortopt)
 	MemoryContext sortcontext;
 	MemoryContext oldcontext;
 
+	elog(NOTICE, "tuplesort_begin_common: Starting with workMem=%d, coordinate=%p, sortopt=%d", 
+		 workMem, (void*)coordinate, sortopt);
+
 	/* See leader_takeover_tapes() remarks on random access support */
 	if (coordinate && (sortopt & TUPLESORT_RANDOMACCESS))
 		elog(ERROR, "random access disallowed under parallel sort");
@@ -741,6 +773,146 @@ tuplesort_begin_common(int workMem, SortCoordinate coordinate, int sortopt)
 	return state;
 }
 
+#ifdef __APPLE__
+/*
+ * Initialize GPU context on first use
+ */
+static void
+initialize_gpu_context(void)
+{
+	if (!metal_context)
+	{
+		elog(NOTICE, "initialize_gpu_context: Attempting to initialize Metal GPU context");
+		metal_context = gpu_direct_init_context();
+		if (!metal_context)
+			elog(NOTICE, "initialize_gpu_context: GPU context initialization failed");
+		else
+			elog(NOTICE, "initialize_gpu_context: GPU context initialized successfully");
+	}
+}
+
+/*
+ * Attempt to perform an in-memory sort using the Metal GPU backend.
+ * Returns true on success, false on failure or if the sort is ineligible.
+ */
+static bool
+tuplesort_try_gpu_sort(Tuplesortstate *state)
+{
+	elog(NOTICE, "tuplesort_try_gpu_sort: Entering GPU sort attempt");
+
+	/* 1. Eligibility Check */
+	if (state->memtupcount < GPU_SORT_THRESHOLD)
+	{
+		elog(NOTICE, "tuplesort_try_gpu_sort: Tuple count %d < threshold %d, ineligible", 
+			 state->memtupcount, GPU_SORT_THRESHOLD);
+		return false;
+	}
+	elog(NOTICE, "tuplesort_try_gpu_sort: Tuple count %d >= threshold %d, continuing", 
+		 state->memtupcount, GPU_SORT_THRESHOLD);
+
+	initialize_gpu_context();
+	if (!metal_context)
+	{
+		elog(NOTICE, "tuplesort_try_gpu_sort: Failed to initialize GPU context, ineligible");
+		return false;
+	}
+	elog(NOTICE, "tuplesort_try_gpu_sort: GPU context initialized successfully");
+
+	/* This POC only supports single-key, non-NULL, int8 sorts */
+	if (state->base.nKeys != 1 ||
+		state->base.sortKeys[0].comparator != ssup_datum_signed_cmp ||
+		state->base.sortKeys[0].abbrev_converter != NULL)
+	{
+		elog(NOTICE, "tuplesort_try_gpu_sort: Sort configuration ineligible - nKeys=%d, comparator=%p (expected %p), abbrev_converter=%p", 
+			 state->base.nKeys, 
+			 (void*)state->base.sortKeys[0].comparator, 
+			 (void*)ssup_datum_signed_cmp,
+			 (void*)state->base.sortKeys[0].abbrev_converter);
+		return false;
+	}
+	elog(NOTICE, "tuplesort_try_gpu_sort: Sort configuration is eligible for GPU processing");
+
+	/* 2. Data Marshalling and Padding */
+	int num_tuples;
+	int padded_num_tuples;
+	int64_t *keys;
+	uint32_t *indices;
+	int i;
+	int64_t sentinel_key;
+	int result;
+	SortTuple *temp_tuples;
+
+	num_tuples = state->memtupcount;
+	padded_num_tuples = 1;
+	while (padded_num_tuples < num_tuples)
+		padded_num_tuples <<= 1;
+
+	elog(NOTICE, "tuplesort_try_gpu_sort: Beginning data marshalling - %d tuples, padding to %d", 
+		 num_tuples, padded_num_tuples);
+
+	/* Allocate arrays for keys and indices using MemoryContextAllocHuge for large allocations */
+	keys = (int64_t *) MemoryContextAllocHuge(CurrentMemoryContext, 
+											   (Size)padded_num_tuples * sizeof(int64_t));
+	indices = (uint32_t *) MemoryContextAllocHuge(CurrentMemoryContext, 
+												   (Size)padded_num_tuples * sizeof(uint32_t));
+	elog(NOTICE, "tuplesort_try_gpu_sort: Allocated memory for keys and indices arrays");
+
+	for (i = 0; i < num_tuples; i++)
+	{
+		if (state->memtuples[i].isnull1)
+		{
+			elog(NOTICE, "tuplesort_try_gpu_sort: Found NULL value at tuple %d, GPU sort ineligible", i);
+			pfree(keys);
+			pfree(indices);
+			return false; /* NULLs not handled by this POC */
+		}
+		keys[i] = DatumGetInt64(state->memtuples[i].datum1);
+		indices[i] = i;
+	}
+	elog(NOTICE, "tuplesort_try_gpu_sort: Data marshalling completed successfully for %d tuples", num_tuples);
+
+	/* Pad with sentinel values */
+	sentinel_key = state->base.sortKeys[0].ssup_reverse ? INT64_MIN : INT64_MAX;
+	for (i = num_tuples; i < padded_num_tuples; i++)
+	{
+		keys[i] = sentinel_key;
+		indices[i] = i;
+	}
+	elog(NOTICE, "tuplesort_try_gpu_sort: Padded array to %d tuples with sentinel value %ld", 
+		 padded_num_tuples, sentinel_key);
+
+	/* 3. GPU Execution */
+	elog(NOTICE, "Attempting GPU-accelerated sort via Metal backend...");
+	result = gpu_direct_sort_int64(metal_context, keys, indices, padded_num_tuples);
+	if (result != 0)
+	{
+		elog(NOTICE, "GPU sort failed (gpu_direct_sort_int64 returned %d), falling back to CPU sort.", result);
+		pfree(keys);
+		pfree(indices);
+		return false;
+	}
+	else
+	{
+		elog(NOTICE, "GPU sort succeeded.");
+	}
+	/* 4. Un-marshalling: Reorder the original SortTuple array (O(n) operation) */
+	elog(NOTICE, "tuplesort_try_gpu_sort: Beginning result unmarshalling");
+	temp_tuples = (SortTuple *) MemoryContextAllocHuge(CurrentMemoryContext,
+														(Size)num_tuples * sizeof(SortTuple));
+	memcpy(temp_tuples, state->memtuples, num_tuples * sizeof(SortTuple));
+
+	for (i = 0; i < num_tuples; i++)
+		state->memtuples[i] = temp_tuples[indices[i]];
+	elog(NOTICE, "tuplesort_try_gpu_sort: Successfully completed GPU sort and result unmarshalling");
+
+	pfree(temp_tuples);
+	pfree(keys);
+	pfree(indices);
+
+	return true;
+}
+#endif /* __APPLE__ */
+
 /*
  *		tuplesort_begin_batch
  *
@@ -752,6 +924,8 @@ static void
 tuplesort_begin_batch(Tuplesortstate *state)
 {
 	MemoryContext oldcontext;
+
+	elog(NOTICE, "tuplesort_begin_batch: Initializing batch processing");
 
 	oldcontext = MemoryContextSwitchTo(state->base.maincontext);
 
@@ -837,6 +1011,8 @@ tuplesort_begin_batch(Tuplesortstate *state)
 void
 tuplesort_set_bound(Tuplesortstate *state, int64 bound)
 {
+	elog(NOTICE, "tuplesort_set_bound: Setting bound to %ld", bound);
+
 	/* Assert we're called before loading any tuples */
 	Assert(state->status == TSS_INITIAL && state->memtupcount == 0);
 	/* Assert we allow bounded sorts */
@@ -885,6 +1061,7 @@ tuplesort_set_bound(Tuplesortstate *state, int64 bound)
 bool
 tuplesort_used_bound(Tuplesortstate *state)
 {
+	elog(NOTICE, "tuplesort_used_bound: Called");
 	return state->boundUsed;
 }
 
@@ -950,6 +1127,8 @@ tuplesort_free(Tuplesortstate *state)
 void
 tuplesort_end(Tuplesortstate *state)
 {
+	elog(NOTICE, "tuplesort_end: Cleaning up sort state");
+
 	tuplesort_free(state);
 
 	/*
@@ -1018,6 +1197,8 @@ tuplesort_updatemax(Tuplesortstate *state)
 void
 tuplesort_reset(Tuplesortstate *state)
 {
+	elog(NOTICE, "tuplesort_reset: Resetting sort state");
+
 	tuplesort_updatemax(state);
 	tuplesort_free(state);
 
@@ -1170,6 +1351,10 @@ tuplesort_puttuple_common(Tuplesortstate *state, SortTuple *tuple,
 						  bool useAbbrev, Size tuplen)
 {
 	MemoryContext oldcontext = MemoryContextSwitchTo(state->base.sortcontext);
+
+	/* Commented out to avoid flooding output with 1M messages
+	elog(NOTICE, "tuplesort_puttuple_common: Adding tuple, useAbbrev=%d, tuplen=%zu", useAbbrev, tuplen);
+	*/
 
 	Assert(!LEADER(state));
 
@@ -1364,6 +1549,9 @@ tuplesort_performsort(Tuplesortstate *state)
 {
 	MemoryContext oldcontext = MemoryContextSwitchTo(state->base.sortcontext);
 
+	elog(NOTICE, "tuplesort_performsort: Starting sort, status=%d, memtupcount=%d", 
+		 state->status, state->memtupcount);
+
 	if (trace_sort)
 		elog(LOG, "performsort of worker %d starting: %s",
 			 state->worker, pg_rusage_show(&state->ru_start));
@@ -1472,6 +1660,11 @@ tuplesort_gettuple_common(Tuplesortstate *state, bool forward,
 {
 	unsigned int tuplen;
 	size_t		nmoved;
+
+	/* Commented out to avoid spamming output
+	elog(NOTICE, "tuplesort_gettuple_common: Getting tuple, forward=%d, status=%d", 
+		 forward, state->status);
+	*/
 
 	Assert(!WORKER(state));
 
@@ -1711,6 +1904,8 @@ tuplesort_skiptuples(Tuplesortstate *state, int64 ntuples, bool forward)
 {
 	MemoryContext oldcontext;
 
+	elog(NOTICE, "tuplesort_skiptuples: Skipping %ld tuples, forward=%d", ntuples, forward);
+
 	/*
 	 * We don't actually support backwards skip yet, because no callers need
 	 * it.  The API is designed to allow for that later, though.
@@ -1778,6 +1973,8 @@ int
 tuplesort_merge_order(int64 allowedMem)
 {
 	int			mOrder;
+
+	elog(NOTICE, "tuplesort_merge_order: Calculating merge order for allowedMem=%ld", allowedMem);
 
 	/*----------
 	 * In the merge phase, we need buffer space for each input and output tape.
@@ -2403,6 +2600,8 @@ tuplesort_rescan(Tuplesortstate *state)
 {
 	MemoryContext oldcontext = MemoryContextSwitchTo(state->base.sortcontext);
 
+	elog(NOTICE, "tuplesort_rescan: Rewinding sort");
+
 	Assert(state->base.sortopt & TUPLESORT_RANDOMACCESS);
 
 	switch (state->status)
@@ -2436,6 +2635,8 @@ tuplesort_markpos(Tuplesortstate *state)
 {
 	MemoryContext oldcontext = MemoryContextSwitchTo(state->base.sortcontext);
 
+	elog(NOTICE, "tuplesort_markpos: Marking position in sort");
+
 	Assert(state->base.sortopt & TUPLESORT_RANDOMACCESS);
 
 	switch (state->status)
@@ -2466,6 +2667,8 @@ void
 tuplesort_restorepos(Tuplesortstate *state)
 {
 	MemoryContext oldcontext = MemoryContextSwitchTo(state->base.sortcontext);
+
+	elog(NOTICE, "tuplesort_restorepos: Restoring position in sort");
 
 	Assert(state->base.sortopt & TUPLESORT_RANDOMACCESS);
 
@@ -2499,6 +2702,8 @@ void
 tuplesort_get_stats(Tuplesortstate *state,
 					TuplesortInstrumentation *stats)
 {
+	elog(NOTICE, "tuplesort_get_stats: Getting sort statistics");
+
 	/*
 	 * Note: it might seem we should provide both memory and disk usage for a
 	 * disk-based sort.  However, the current code doesn't track memory space
@@ -2542,6 +2747,8 @@ tuplesort_get_stats(Tuplesortstate *state,
 const char *
 tuplesort_method_name(TuplesortMethod m)
 {
+	elog(NOTICE, "tuplesort_method_name: Getting name for method %d", m);
+
 	switch (m)
 	{
 		case SORT_TYPE_STILL_IN_PROGRESS:
@@ -2565,6 +2772,8 @@ tuplesort_method_name(TuplesortMethod m)
 const char *
 tuplesort_space_type_name(TuplesortSpaceType t)
 {
+	elog(NOTICE, "tuplesort_space_type_name: Getting name for space type %d", t);
+
 	Assert(t == SORT_SPACE_TYPE_DISK || t == SORT_SPACE_TYPE_MEMORY);
 	return t == SORT_SPACE_TYPE_DISK ? "Disk" : "Memory";
 }
@@ -2676,6 +2885,21 @@ static void
 tuplesort_sort_memtuples(Tuplesortstate *state)
 {
 	Assert(!LEADER(state));
+
+	elog(NOTICE, "tuplesort_sort_memtuples: Starting sort with %d tuples", state->memtupcount);
+
+#ifdef __APPLE__
+	elog(NOTICE, "tuplesort_sort_memtuples: __APPLE__ is defined, checking GPU eligibility");
+	/* Attempt GPU sort first for eligible large sorts. */
+	if (tuplesort_try_gpu_sort(state))
+	{
+		elog(NOTICE, "tuplesort_sort_memtuples: GPU sort succeeded, returning");
+		return; /* GPU sort succeeded, we are done. */
+	}
+	elog(NOTICE, "tuplesort_sort_memtuples: GPU sort failed or ineligible, falling back to CPU sort");
+#else
+	elog(NOTICE, "tuplesort_sort_memtuples: __APPLE__ not defined, skipping GPU sort");
+#endif
 
 	if (state->memtupcount > 1)
 	{
@@ -2884,6 +3108,8 @@ tuplesort_readtup_alloc(Tuplesortstate *state, Size tuplen)
 {
 	SlabSlot   *buf;
 
+	elog(NOTICE, "tuplesort_readtup_alloc: Allocating %zu bytes for tuple", tuplen);
+
 	/*
 	 * We pre-allocate enough slots in the slab arena that we should never run
 	 * out.
@@ -2918,6 +3144,8 @@ tuplesort_estimate_shared(int nWorkers)
 {
 	Size		tapesSize;
 
+	elog(NOTICE, "tuplesort_estimate_shared: Estimating shared memory for %d workers", nWorkers);
+
 	Assert(nWorkers > 0);
 
 	/* Make sure that BufFile shared state is MAXALIGN'd */
@@ -2938,6 +3166,8 @@ void
 tuplesort_initialize_shared(Sharedsort *shared, int nWorkers, dsm_segment *seg)
 {
 	int			i;
+
+	elog(NOTICE, "tuplesort_initialize_shared: Initializing shared state for %d workers", nWorkers);
 
 	Assert(nWorkers > 0);
 
@@ -2960,6 +3190,8 @@ tuplesort_initialize_shared(Sharedsort *shared, int nWorkers, dsm_segment *seg)
 void
 tuplesort_attach_shared(Sharedsort *shared, dsm_segment *seg)
 {
+	elog(NOTICE, "tuplesort_attach_shared: Attaching to shared tuplesort state");
+
 	/* Attach to SharedFileSet */
 	SharedFileSetAttach(&shared->fileset, seg);
 }

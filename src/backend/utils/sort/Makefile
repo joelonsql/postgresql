@@ -23,4 +23,9 @@ OBJS = \
 	tuplesortvariants.o \
 	tuplestore.o
 
+# Add GPU support on macOS
+ifeq ($(shell uname), Darwin)
+OBJS += tuplesort_gpu_direct.o
+endif
+
 include $(top_srcdir)/src/backend/common.mk
