@@ -248,6 +248,7 @@ typedef struct QueuePosition
  * catch up before the pages they'll need to read fall out of SLRU cache.
  */
 #define QUEUE_CLEANUP_DELAY 4
+#define MAX_NON_IDLE_LISTENERS 16
 
 /*
  * Struct describing a listening backend's status
@@ -301,6 +302,7 @@ typedef struct AsyncQueueControl
 	ProcNumber	firstListener;	/* id of first listener, or
 								 * INVALID_PROC_NUMBER */
 	TimestampTz lastQueueFillWarn;	/* time of last queue-full msg */
+	pg_atomic_uint32 nonIdleBackends;	/* number of non-IDLE backends */
 	QueueBackendStatus backend[FLEXIBLE_ARRAY_MEMBER];
 } AsyncQueueControl;
 
@@ -440,7 +442,6 @@ bool		Trace_notify = false;
 int			max_notify_queue_pages = 1048576;
 
 /* local function prototypes */
-static inline int64 asyncQueuePageDiff(int64 p, int64 q);
 static inline bool asyncQueuePagePrecedes(int64 p, int64 q);
 static void queue_listen(ListenActionKind action, const char *channel);
 static void Async_UnlistenOnExit(int code, Datum arg);
@@ -469,16 +470,10 @@ static void AddEventToPendingNotifies(Notification *n);
 static uint32 notification_hash(const void *key, Size keysize);
 static int	notification_match(const void *key1, const void *key2, Size keysize);
 static void ClearPendingActionsAndNotifies(void);
-
-/*
- * Compute the difference between two queue page numbers.
- * Previously this function accounted for a wraparound.
- */
-static inline int64
-asyncQueuePageDiff(int64 p, int64 q)
-{
-	return p - q;
-}
+static inline bool async_state_transition(volatile pg_atomic_uint32 *ptr,
+										  uint32 *expected, uint32 newval);
+static void MaybeSignalBackend(int32 pid, ProcNumber procno);
+static bool AwakeIdleNonCaughtUpBackend(void);
 
 /*
  * Determines whether p precedes q.
@@ -533,6 +528,7 @@ AsyncShmemInit(void)
 		QUEUE_STOP_PAGE = 0;
 		QUEUE_FIRST_LISTENER = INVALID_PROC_NUMBER;
 		asyncQueueControl->lastQueueFillWarn = 0;
+		pg_atomic_init_u32(&asyncQueueControl->nonIdleBackends, 0);
 		for (int i = 0; i < MaxBackends; i++)
 		{
 			QUEUE_BACKEND_PID(i) = InvalidPid;
@@ -1245,6 +1241,8 @@ IsListeningOn(const char *channel)
 static void
 asyncQueueUnregister(void)
 {
+	uint32 old_state;
+
 	Assert(listenChannels == NIL);	/* else caller error */
 
 	if (!amRegisteredListener)	/* nothing to do */
@@ -1257,8 +1255,9 @@ asyncQueueUnregister(void)
 	/* Mark our entry as invalid */
 	QUEUE_BACKEND_PID(MyProcNumber) = InvalidPid;
 	QUEUE_BACKEND_DBOID(MyProcNumber) = InvalidOid;
-	/* Reset state to IDLE to prevent zombie listeners */
-	pg_atomic_write_u32(&QUEUE_BACKEND_STATE(MyProcNumber), ASYNC_STATE_IDLE);
+	old_state = pg_atomic_exchange_u32(&QUEUE_BACKEND_STATE(MyProcNumber), ASYNC_STATE_IDLE);
+	if (old_state != ASYNC_STATE_IDLE)
+		pg_atomic_fetch_sub_u32(&asyncQueueControl->nonIdleBackends, 1);
 	/* and remove it from the list */
 	if (QUEUE_FIRST_LISTENER == MyProcNumber)
 		QUEUE_FIRST_LISTENER = QUEUE_NEXT_LISTENER(MyProcNumber);
@@ -1580,171 +1579,162 @@ asyncQueueFillWarning(void)
 }
 
 /*
- * Send signals to listening backends.
+ * Centralized state transition helper for async listeners.
  *
- * Normally we signal only backends in our own database, since only those
- * backends could be interested in notifies we send.  However, if there's
- * notify traffic in our database but no traffic in another database that
- * does have listener(s), those listeners will fall further and further
- * behind.  Waken them anyway if they're far enough behind, so that they'll
- * advance their queue position pointers, allowing the global tail to advance.
+ * This function wraps the atomic compare-and-exchange operation for a
+ * backend's state, and it also maintains the global count of non-IDLE
+ * backends. The interface is identical to pg_atomic_compare_exchange_u32.
  *
- * Since we know the ProcNumber and the Pid the signaling is quite cheap.
- *
- * This is called during CommitTransaction(), so it's important for it
- * to have very low probability of failure.
+ * To ensure the non-IDLE counter remains accurate and to avoid race
+ * conditions, the counter is only modified *after* a successful state
+ * transition.
+ */
+static inline bool
+async_state_transition(volatile pg_atomic_uint32 *ptr,
+					   uint32 *expected, uint32 newval)
+{
+	uint32 original_expected = *expected;
+
+	if (pg_atomic_compare_exchange_u32(ptr, expected, newval))
+	{
+		/* CAS was successful, now update the counter if needed. */
+
+		if (original_expected == ASYNC_STATE_IDLE && newval != ASYNC_STATE_IDLE)
+		{
+			/*
+			 * A backend became non-IDLE. Increment the counter.
+			 */
+			pg_atomic_fetch_add_u32(&asyncQueueControl->nonIdleBackends, 1);
+		}
+		else if (original_expected != ASYNC_STATE_IDLE && newval == ASYNC_STATE_IDLE)
+		{
+			/*
+			 * A backend became IDLE. Decrement the counter.
+			 */
+			pg_atomic_fetch_sub_u32(&asyncQueueControl->nonIdleBackends, 1);
+		}
+
+		return true;
+	}
+
+	/* CAS failed, so we do not touch the counter. */
+	return false;
+}
+
+/*
+ * Helper to send a signal to a single backend process.
  */
 static void
-SignalBackends(void)
+MaybeSignalBackend(int32 pid, ProcNumber procno)
 {
-	int32	   *pids;
-	ProcNumber *procnos;
-	int			count;
+	PGPROC *proc;
 
 	/*
-	 * Identify backends that we need to signal.  We don't want to send
-	 * signals while holding the NotifyQueueLock, so this loop just builds a
-	 * list of target PIDs.
-	 *
-	 * XXX in principle these pallocs could fail, which would be bad. Maybe
-	 * preallocate the arrays?  They're not that large, though.
+	 * For our own process, just set our own latch.
 	 */
-	pids = (int32 *) palloc(MaxBackends * sizeof(int32));
-	procnos = (ProcNumber *) palloc(MaxBackends * sizeof(ProcNumber));
-	count = 0;
+	if (pid == MyProcPid)
+	{
+		SetLatch(MyLatch);
+		return;
+	}
+
+	/*
+	 * Get the target backend's PGPROC and set its latch.
+	 *
+	 * Note: The target backend might exit after we looked it up but before we
+	 * set the latch. We need to handle the race condition where the PGPROC
+	 * slot might be recycled by a new process with a different PID.
+	 */
+	proc = GetPGProcByNumber(procno);
+
+	/* Verify the PID hasn't changed (backend hasn't exited) */
+	if (proc->pid == pid)
+	{
+		SetLatch(&proc->procLatch);
+	}
+	else
+	{
+		/* Backend exited and slot was recycled */
+		elog(DEBUG3, "could not signal backend with PID %d: process no longer exists", pid);
+	}
+}
+
+/*
+ * Find one idle, non-caught-up backend and wake it up.
+ *
+ * This function finds the single listening backend that is furthest behind in
+ * processing the queue and is also in the IDLE state. If found, it
+ * atomically transitions its state to SIGNALLED and wakes it up.
+ *
+ * Returns true if a backend was successfully signalled, false otherwise.
+ */
+static bool
+AwakeIdleNonCaughtUpBackend(void)
+{
+	QueuePosition min = QUEUE_HEAD;
+	int32		minPid = InvalidPid;
+	ProcNumber	minProcno = INVALID_PROC_NUMBER;
 
 	LWLockAcquire(NotifyQueueLock, LW_EXCLUSIVE);
 	for (ProcNumber i = QUEUE_FIRST_LISTENER; i != INVALID_PROC_NUMBER; i = QUEUE_NEXT_LISTENER(i))
 	{
-		int32		pid = QUEUE_BACKEND_PID(i);
-		QueuePosition pos;
+		QueuePosition pos = QUEUE_BACKEND_POS(i);
+		uint32		state;
+		Assert(QUEUE_BACKEND_PID(i) != InvalidPid);
+		/*
+		 * Skip if already caught up.
+		 */
+		if (QUEUE_POS_EQUAL(pos, QUEUE_HEAD))
+			continue;
 
-		Assert(pid != InvalidPid);
-		pos = QUEUE_BACKEND_POS(i);
-		if (QUEUE_BACKEND_DBOID(i) == MyDatabaseId)
+		min = QUEUE_POS_MIN(min, pos);
+		state = pg_atomic_read_membarrier_u32(&QUEUE_BACKEND_STATE(i));
+		if (QUEUE_POS_EQUAL(min, pos) && state == ASYNC_STATE_IDLE)
 		{
-			/*
-			 * Always signal listeners in our own database, unless they're
-			 * already caught up (unlikely, but possible).
-			 */
-			if (QUEUE_POS_EQUAL(pos, QUEUE_HEAD))
-				continue;
+			minPid = QUEUE_BACKEND_PID(i);
+			minProcno = i;
 		}
-		else
-		{
-			/*
-			 * Listeners in other databases should be signaled only if they
-			 * are far behind.
-			 */
-			if (asyncQueuePageDiff(QUEUE_POS_PAGE(QUEUE_HEAD),
-								   QUEUE_POS_PAGE(pos)) < QUEUE_CLEANUP_DELAY)
-				continue;
-		}
-		/* OK, need to signal this one */
-		pids[count] = pid;
-		procnos[count] = i;
-		count++;
 	}
 	LWLockRelease(NotifyQueueLock);
 
-	/* Now send signals */
-	for (int i = 0; i < count; i++)
+	if (minProcno != INVALID_PROC_NUMBER)
 	{
-		int32		pid = pids[i];
-		ProcNumber	procno = procnos[i];
-		uint32		expected;
-		bool		signal_needed = false;
+		uint32		expected = ASYNC_STATE_IDLE;
 
 		/*
-		 * Implement state machine transitions for the notifier.
-		 * We use a loop to handle race conditions where the state
-		 * changes between our read and the CAS operation.
+		 * Transition from IDLE to SIGNALLED. This also increments the
+		 * non-idle counter via our helper function.
 		 */
-		uint32	current_state = pg_atomic_read_membarrier_u32(&QUEUE_BACKEND_STATE(procno));
-
-		switch (current_state)
+		if (async_state_transition(&QUEUE_BACKEND_STATE(minProcno),
+									&expected, ASYNC_STATE_SIGNALLED))
 		{
-			case ASYNC_STATE_IDLE:
-				/* Try to transition from IDLE to SIGNALLED */
-				expected = ASYNC_STATE_IDLE;
-				if (pg_atomic_compare_exchange_u32(&QUEUE_BACKEND_STATE(procno),
-													&expected,
-													ASYNC_STATE_SIGNALLED))
-				{
-					/* Success - need to send signal */
-					signal_needed = true;
-					if (Trace_notify)
-						elog(DEBUG1, "SignalBackends: transitioned backend %d from IDLE to SIGNALLED", pid);
-				}
-				/* Another notifier already signaled - we're done */
-				break;
+			if (Trace_notify)
+				elog(DEBUG1, "AwakeIdleNonCaughtUpBackend: waking up backend %d", minPid);
 
-			case ASYNC_STATE_SIGNALLED:
-				/* Backend is already signaled - nothing to do */
-				if (Trace_notify)
-					elog(DEBUG1, "SignalBackends: backend %d already in SIGNALLED state, skipping", pid);
-				break;
-
-			case ASYNC_STATE_PROCESSING:
-				/* Try to transition from PROCESSING to SIGNALLED */
-				expected = ASYNC_STATE_PROCESSING;
-				if (pg_atomic_compare_exchange_u32(&QUEUE_BACKEND_STATE(procno),
-													&expected,
-													ASYNC_STATE_SIGNALLED))
-				{
-					/* Success - need to send signal for re-scan */
-					signal_needed = true;
-					if (Trace_notify)
-						elog(DEBUG1, "SignalBackends: transitioned backend %d from PROCESSING to SIGNALLED for re-scan", pid);
-					break;
-				}
-				/* Another notifier already signaled - we're done */
-				break;
-
-			default:
-				/* Should never happen */
-				elog(ERROR, "unexpected async state %u for backend %d",
-						current_state, pid);
+			MaybeSignalBackend(minPid, minProcno);
+			return true;
 		}
-
-		/* Send signal if needed */
-		if (signal_needed)
+		else
 		{
-			/*
-			 * For our own process, no need to involve the kernel
-			 */
-			if (pid == MyProcPid)
-			{
-				SetLatch(MyLatch);
-			}
-			else
-			{
-				/*
-				 * Get the target backend's PGPROC and set its latch.
-				 *
-				 * Note: The target backend might exit after we released
-				 * NotifyQueueLock but before we set the latch. We need to
-				 * handle the race condition where the PGPROC slot might be
-				 * recycled by a new process with a different PID.
-				 */
-				PGPROC *proc = GetPGProcByNumber(procno);
-
-				/* Verify the PID hasn't changed (backend hasn't exited) */
-				if (proc->pid == pid)
-				{
-					SetLatch(&proc->procLatch);
-				}
-				else
-				{
-					/* Backend exited and slot was recycled */
-					elog(DEBUG3, "could not signal backend with PID %d: process no longer exists", pid);
-				}
-			}
+			if (Trace_notify)
+				elog(DEBUG1, "AwakeIdleNonCaughtUpBackend: failed to transition backend %d, another process was faster", minPid);
 		}
 	}
 
-	pfree(pids);
-	pfree(procnos);
+	return false;
+}
+
+/*
+ * SignalBackends
+ *
+ *	Wakes up another idle non-caught up listener to process its queue,
+ *	unless the max limit of parallel processors is exceeded.
+ */
+static void
+SignalBackends(void)
+{
+	if (pg_atomic_read_membarrier_u32(&asyncQueueControl->nonIdleBackends) < MAX_NON_IDLE_LISTENERS)
+		AwakeIdleNonCaughtUpBackend();
 }
 
 /*
@@ -2304,9 +2294,9 @@ ProcessIncomingNotify(bool flush)
 	 * This is the "acquire lock" operation for the listener.
 	 */
 	expected = ASYNC_STATE_SIGNALLED;
-	if (!pg_atomic_compare_exchange_u32(&QUEUE_BACKEND_STATE(MyProcNumber),
-										&expected,
-										ASYNC_STATE_PROCESSING))
+	if (!async_state_transition(&QUEUE_BACKEND_STATE(MyProcNumber),
+								&expected,
+								ASYNC_STATE_PROCESSING))
 	{
 		/*
 		 * CAS failed - the state was not SIGNALLED. This should not happen
@@ -2336,9 +2326,9 @@ ProcessIncomingNotify(bool flush)
 	 * This is the "release lock" operation for the listener.
 	 */
 	expected = ASYNC_STATE_PROCESSING;
-	if (pg_atomic_compare_exchange_u32(&QUEUE_BACKEND_STATE(MyProcNumber),
-										&expected,
-										ASYNC_STATE_IDLE))
+	if (async_state_transition(&QUEUE_BACKEND_STATE(MyProcNumber),
+								&expected,
+								ASYNC_STATE_IDLE))
 	{
 		/* Success - we're done, transitioned to IDLE */
 		if (Trace_notify)
@@ -2346,27 +2336,23 @@ ProcessIncomingNotify(bool flush)
 	}
 	else
 	{
-		/* CAS failed - check what the new state is */
-		if (expected == ASYNC_STATE_SIGNALLED)
-		{
-			/*
-				* A notifier set our state to SIGNALLED while we were processing.
-				* We are done with this batch of work, but we know there is more
-				* to do. Rather than loop here and risk starving other backend
-				* activity, we set our own latch to ensure we are woken up again
-				* to re-process, and then exit. The state is left as SIGNALLED.
-				*/
-			if (Trace_notify)
-				elog(DEBUG1, "ProcessIncomingNotify: signalled while processing");
-			SetLatch(MyLatch);
-		}
-		else
-		{
-			/* Any other state is an error */
-			elog(ERROR, "unexpected async state %u when trying to return to IDLE",
-					expected);
-		}
+		/*
+		 * CAS failed - the state was not PROCESSING. This should not happen
+		 * as no other backend should change our state from PROCESSING
+		 * than the backend itself.
+		 */
+		elog(ERROR, "unexpected async state %u in ProcessIncomingNotify, expected PROCESSING",
+			expected);
 	}
+
+	/*
+	 * We just became idle. To ensure the chain reaction continues if
+	 * there are still notifications in the queue and other idle
+	 * listeners, we try to wake up a successor. We do this without
+	 * checking the non-idle limit, as we are simply replacing ourselves
+	 * in the pool of active processors.
+	 */
+	AwakeIdleNonCaughtUpBackend();
 
 	/*
 	 * If this isn't an end-of-command case, we must flush the notify messages
