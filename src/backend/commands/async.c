@@ -140,6 +140,7 @@
 #include "libpq/libpq.h"
 #include "libpq/pqformat.h"
 #include "miscadmin.h"
+#include "port/atomics.h"
 #include "storage/ipc.h"
 #include "storage/lmgr.h"
 #include "storage/procsignal.h"
@@ -238,31 +239,41 @@ typedef struct QueuePosition
 #define QUEUE_CLEANUP_DELAY 4
 
 /*
- * Struct describing a listening backend's status
+ * Struct describing a listening backend's status.
+ *
+ * The pid field is atomic to allow for a lock-free check of whether the
+ * entry is active. The nextListener field is atomic to support lock-free
+ * traversal of the listener list.
  */
 typedef struct QueueBackendStatus
 {
-	int32		pid;			/* either a PID or InvalidPid */
+	pg_atomic_uint32 pid;		/* either a PID or InvalidPid */
 	Oid			dboid;			/* backend's database OID, or InvalidOid */
-	ProcNumber	nextListener;	/* id of next listener, or INVALID_PROC_NUMBER */
+	pg_atomic_uint32 nextListener;	/* id of next listener, or
+									 * INVALID_PROC_NUMBER */
 	QueuePosition pos;			/* backend has read queue up to here */
 } QueueBackendStatus;
 
 /*
  * Shared memory state for LISTEN/NOTIFY (excluding its SLRU stuff)
  *
- * The AsyncQueueControl structure is protected by the NotifyQueueLock and
- * NotifyQueueTailLock.
+ * The listener list, anchored by firstListener and threaded through the
+ * backend array via nextListener links, is a lock-free, singly-linked list
+ * sorted by ProcNumber. Traversal of this list does not require any lock.
+ * Modifications (insertions and deletions) are performed using atomic
+ * compare-and-swap (CAS) operations, making them safe for concurrent
+ * traversal.
+ *
+ * The queue head and tail pointers in AsyncQueueControl are protected by the
+ * NotifyQueueLock and NotifyQueueTailLock. This lock does NOT protect the
+ * listener list.
  *
  * When holding NotifyQueueLock in SHARED mode, backends may only inspect
- * their own entries as well as the head and tail pointers. Consequently we
- * can allow a backend to update its own record while holding only SHARED lock
- * (since no other backend will inspect it).
+ * their own entries as well as the head and tail pointers.
  *
- * When holding NotifyQueueLock in EXCLUSIVE mode, backends can inspect the
- * entries of other backends and also change the head pointer. When holding
- * both NotifyQueueLock and NotifyQueueTailLock in EXCLUSIVE mode, backends
- * can change the tail pointers.
+ * When holding NotifyQueueLock in EXCLUSIVE mode, backends can change the
+ * head pointer. When holding both NotifyQueueLock and NotifyQueueTailLock in
+ * EXCLUSIVE mode, backends can change the tail pointers.
  *
  * SLRU buffer pool is divided in banks and bank wise SLRU lock is used as
  * the control lock for the pg_notify SLRU buffers.
@@ -271,12 +282,6 @@ typedef struct QueueBackendStatus
  *
  * Each backend uses the backend[] array entry with index equal to its
  * ProcNumber.  We rely on this to make SendProcSignal fast.
- *
- * The backend[] array entries for actively-listening backends are threaded
- * together using firstListener and the nextListener links, so that we can
- * scan them without having to iterate over inactive entries.  We keep this
- * list in order by ProcNumber so that the scan is cache-friendly when there
- * are many active entries.
  */
 typedef struct AsyncQueueControl
 {
@@ -285,8 +290,8 @@ typedef struct AsyncQueueControl
 								 * listening backend */
 	int64		stopPage;		/* oldest unrecycled page; must be <=
 								 * tail.page */
-	ProcNumber	firstListener;	/* id of first listener, or
-								 * INVALID_PROC_NUMBER */
+	pg_atomic_uint32 firstListener; /* id of first listener, or
+									 * INVALID_PROC_NUMBER */
 	TimestampTz lastQueueFillWarn;	/* time of last queue-full msg */
 	QueueBackendStatus backend[FLEXIBLE_ARRAY_MEMBER];
 } AsyncQueueControl;
@@ -519,13 +524,13 @@ AsyncShmemInit(void)
 		SET_QUEUE_POS(QUEUE_HEAD, 0, 0);
 		SET_QUEUE_POS(QUEUE_TAIL, 0, 0);
 		QUEUE_STOP_PAGE = 0;
-		QUEUE_FIRST_LISTENER = INVALID_PROC_NUMBER;
+		pg_atomic_init_u32(&QUEUE_FIRST_LISTENER, INVALID_PROC_NUMBER);
 		asyncQueueControl->lastQueueFillWarn = 0;
 		for (int i = 0; i < MaxBackends; i++)
 		{
-			QUEUE_BACKEND_PID(i) = InvalidPid;
+			pg_atomic_init_u32(&QUEUE_BACKEND_PID(i), InvalidPid);
 			QUEUE_BACKEND_DBOID(i) = InvalidOid;
-			QUEUE_NEXT_LISTENER(i) = INVALID_PROC_NUMBER;
+			pg_atomic_init_u32(&QUEUE_NEXT_LISTENER(i), INVALID_PROC_NUMBER);
 			SET_QUEUE_POS(QUEUE_BACKEND_POS(i), 0, 0);
 		}
 	}
@@ -1036,13 +1041,18 @@ AtCommit_Notify(void)
  * Exec_ListenPreCommit --- subroutine for PreCommit_Notify
  *
  * This function must make sure we are ready to catch any incoming messages.
+ * It uses a lock-free algorithm to add this backend to the shared list of
+ * listeners.
  */
 static void
 Exec_ListenPreCommit(void)
 {
 	QueuePosition head;
 	QueuePosition max;
-	ProcNumber	prevListener;
+	ProcNumber	to_insert = MyProcNumber;
+	ProcNumber	pred,
+				curr;
+	uint32		expected_next;
 
 	/*
 	 * Nothing to do if we are already listening to something, nor if we
@@ -1081,36 +1091,71 @@ Exec_ListenPreCommit(void)
 	 * backends connected to our DB, because others will not have bothered to
 	 * check committed-ness of notifications in our DB.)
 	 *
-	 * We need exclusive lock here so we can look at other backends' entries
-	 * and manipulate the list links.
+	 * We traverse the listener list lock-free. This involves a risk of torn
+	 * reads on other backends' positions, but a slightly incorrect start
+	 * position is not a correctness issue.
 	 */
-	LWLockAcquire(NotifyQueueLock, LW_EXCLUSIVE);
+	LWLockAcquire(NotifyQueueLock, LW_SHARED);
 	head = QUEUE_HEAD;
-	max = QUEUE_TAIL;
-	prevListener = INVALID_PROC_NUMBER;
-	for (ProcNumber i = QUEUE_FIRST_LISTENER; i != INVALID_PROC_NUMBER; i = QUEUE_NEXT_LISTENER(i))
+	LWLockRelease(NotifyQueueLock);
+	max = QUEUE_TAIL;			/* Non-atomic read, but a safe starting point */
+
+	for (curr = pg_atomic_read_u32(&QUEUE_FIRST_LISTENER);
+		 curr != INVALID_PROC_NUMBER;
+		 curr = pg_atomic_read_u32(&QUEUE_NEXT_LISTENER(curr)))
 	{
-		if (QUEUE_BACKEND_DBOID(i) == MyDatabaseId)
-			max = QUEUE_POS_MAX(max, QUEUE_BACKEND_POS(i));
-		/* Also find last listening backend before this one */
-		if (i < MyProcNumber)
-			prevListener = i;
+		if (pg_atomic_read_u32(&QUEUE_BACKEND_PID(curr)) != InvalidPid &&
+			QUEUE_BACKEND_DBOID(curr) == MyDatabaseId)
+			max = QUEUE_POS_MAX(max, QUEUE_BACKEND_POS(curr));
 	}
-	QUEUE_BACKEND_POS(MyProcNumber) = max;
-	QUEUE_BACKEND_PID(MyProcNumber) = MyProcPid;
-	QUEUE_BACKEND_DBOID(MyProcNumber) = MyDatabaseId;
-	/* Insert backend into list of listeners at correct position */
-	if (prevListener != INVALID_PROC_NUMBER)
+	QUEUE_BACKEND_POS(to_insert) = max;
+
+	/*
+	 * Now, insert ourselves into the lock-free linked list of listeners. The
+	 * list is kept sorted by ProcNumber. We use a compare-and-swap (CAS) loop
+	 * to ensure atomicity.
+	 */
+retry:
+	/* Find insertion point (pred is node before, curr is node after) */
+	pred = INVALID_PROC_NUMBER;
+	curr = pg_atomic_read_u32(&QUEUE_FIRST_LISTENER);
+
+	while (curr != INVALID_PROC_NUMBER && curr < to_insert)
 	{
-		QUEUE_NEXT_LISTENER(MyProcNumber) = QUEUE_NEXT_LISTENER(prevListener);
-		QUEUE_NEXT_LISTENER(prevListener) = MyProcNumber;
+		pred = curr;
+		curr = pg_atomic_read_u32(&QUEUE_NEXT_LISTENER(curr));
+	}
+
+	/* Our entry should not be in the list yet */
+	Assert(curr != to_insert);
+
+	/* Set our next pointer to point to our successor */
+	pg_atomic_init_u32(&QUEUE_NEXT_LISTENER(to_insert), curr);
+
+	/*
+	 * Now try to atomically link ourself into the list. If pred is invalid,
+	 * we are the new head. Otherwise, we are inserting after pred.
+	 */
+	if (pred == INVALID_PROC_NUMBER)
+	{
+		expected_next = curr;
+		if (!pg_atomic_compare_exchange_u32(&QUEUE_FIRST_LISTENER, &expected_next, to_insert))
+			goto retry;			/* Head was changed by another process */
 	}
 	else
 	{
-		QUEUE_NEXT_LISTENER(MyProcNumber) = QUEUE_FIRST_LISTENER;
-		QUEUE_FIRST_LISTENER = MyProcNumber;
+		expected_next = curr;
+		if (!pg_atomic_compare_exchange_u32(&QUEUE_NEXT_LISTENER(pred), &expected_next, to_insert))
+			goto retry;			/* Predecessor's next was changed */
 	}
-	LWLockRelease(NotifyQueueLock);
+
+	/*
+	 * Successfully inserted. Now make the entry visible by setting the PID.
+	 * The CAS operation provides a memory barrier, ensuring that the
+	 * initialization of nextListener is visible before the PID is set.
+	 */
+	QUEUE_BACKEND_DBOID(to_insert) = MyDatabaseId;
+	pg_atomic_write_u32(&QUEUE_BACKEND_PID(to_insert), MyProcPid);
 
 	/* Now we are listed in the global array, so remember we're listening */
 	amRegisteredListener = true;
@@ -1225,41 +1270,78 @@ IsListeningOn(const char *channel)
 
 /*
  * Remove our entry from the listeners array when we are no longer listening
- * on any channel.  NB: must not fail if we're already not listening.
+ * on any channel. This uses a lock-free algorithm to remove the backend from
+ * the shared list.
+ *
+ * NB: must not fail if we're already not listening.
  */
 static void
 asyncQueueUnregister(void)
 {
+	ProcNumber	to_delete = MyProcNumber;
+	ProcNumber	pred,
+				curr;
+	uint32		expected_next;
+
 	Assert(listenChannels == NIL);	/* else caller error */
 
 	if (!amRegisteredListener)	/* nothing to do */
 		return;
 
 	/*
-	 * Need exclusive lock here to manipulate list links.
+	 * Mark our entry as invalid first. This is safe because traversals will
+	 * check the PID and skip invalid entries. The memory barrier ensures that
+	 * this write becomes visible to other processors.
 	 */
-	LWLockAcquire(NotifyQueueLock, LW_EXCLUSIVE);
-	/* Mark our entry as invalid */
-	QUEUE_BACKEND_PID(MyProcNumber) = InvalidPid;
-	QUEUE_BACKEND_DBOID(MyProcNumber) = InvalidOid;
-	/* and remove it from the list */
-	if (QUEUE_FIRST_LISTENER == MyProcNumber)
-		QUEUE_FIRST_LISTENER = QUEUE_NEXT_LISTENER(MyProcNumber);
+	pg_atomic_write_u32(&QUEUE_BACKEND_PID(to_delete), InvalidPid);
+	pg_write_barrier();
+
+	/*
+	 * Now, physically remove the node from the lock-free list using a CAS
+	 * loop. Another backend might be concurrently modifying the list, so we
+	 * loop until our CAS succeeds.
+	 */
+retry:
+	/* Find predecessor of the node to delete. */
+	pred = INVALID_PROC_NUMBER;
+	curr = pg_atomic_read_u32(&QUEUE_FIRST_LISTENER);
+	while (curr != INVALID_PROC_NUMBER && curr != to_delete)
+	{
+		pred = curr;
+		curr = pg_atomic_read_u32(&QUEUE_NEXT_LISTENER(curr));
+	}
+
+	/* If not found, another process might have already removed it. */
+	if (curr != to_delete)
+	{
+		amRegisteredListener = false;
+		return;
+	}
+
+	/*
+	 * Atomically update the predecessor's next pointer to skip our node. The
+	 * new 'next' is the one from the node we are deleting.
+	 */
+	expected_next = to_delete;
+	if (pred == INVALID_PROC_NUMBER)
+	{
+		/* We are deleting the head of the list. */
+		if (!pg_atomic_compare_exchange_u32(&QUEUE_FIRST_LISTENER, &expected_next,
+											pg_atomic_read_u32(&QUEUE_NEXT_LISTENER(to_delete))))
+			goto retry;
+	}
 	else
 	{
-		for (ProcNumber i = QUEUE_FIRST_LISTENER; i != INVALID_PROC_NUMBER; i = QUEUE_NEXT_LISTENER(i))
-		{
-			if (QUEUE_NEXT_LISTENER(i) == MyProcNumber)
-			{
-				QUEUE_NEXT_LISTENER(i) = QUEUE_NEXT_LISTENER(MyProcNumber);
-				break;
-			}
-		}
+		/* We are deleting from the middle of the list. */
+		if (!pg_atomic_compare_exchange_u32(&QUEUE_NEXT_LISTENER(pred), &expected_next,
+											pg_atomic_read_u32(&QUEUE_NEXT_LISTENER(to_delete))))
+			goto retry;
 	}
-	QUEUE_NEXT_LISTENER(MyProcNumber) = INVALID_PROC_NUMBER;
-	LWLockRelease(NotifyQueueLock);
 
-	/* mark ourselves as no longer listed in the global array */
+	/* Unlinked successfully. Clean up our former entry. */
+	QUEUE_BACKEND_DBOID(to_delete) = InvalidOid;
+	pg_atomic_write_u32(&QUEUE_NEXT_LISTENER(to_delete), INVALID_PROC_NUMBER);
+
 	amRegisteredListener = false;
 }
 
@@ -1540,13 +1622,23 @@ asyncQueueFillWarning(void)
 	{
 		QueuePosition min = QUEUE_HEAD;
 		int32		minPid = InvalidPid;
+		ProcNumber	i;
 
-		for (ProcNumber i = QUEUE_FIRST_LISTENER; i != INVALID_PROC_NUMBER; i = QUEUE_NEXT_LISTENER(i))
+		/* Lock-free scan of the listener list */
+		for (i = pg_atomic_read_u32(&QUEUE_FIRST_LISTENER);
+			 i != INVALID_PROC_NUMBER;
+			 i = pg_atomic_read_u32(&QUEUE_NEXT_LISTENER(i)))
 		{
-			Assert(QUEUE_BACKEND_PID(i) != InvalidPid);
-			min = QUEUE_POS_MIN(min, QUEUE_BACKEND_POS(i));
-			if (QUEUE_POS_EQUAL(min, QUEUE_BACKEND_POS(i)))
-				minPid = QUEUE_BACKEND_PID(i);
+			int32		pid = pg_atomic_read_u32(&QUEUE_BACKEND_PID(i));
+
+			if (pid != InvalidPid)
+			{
+				QueuePosition pos = QUEUE_BACKEND_POS(i);
+
+				min = QUEUE_POS_MIN(min, pos);
+				if (QUEUE_POS_EQUAL(min, pos))
+					minPid = pid;
+			}
 		}
 
 		ereport(WARNING,
@@ -1564,6 +1656,8 @@ asyncQueueFillWarning(void)
 
 /*
  * Send signals to listening backends.
+ *
+ * This function traverses the list of listeners lock-free.
  *
  * Normally we signal only backends in our own database, since only those
  * backends could be interested in notifies we send.  However, if there's
@@ -1583,11 +1677,13 @@ SignalBackends(void)
 	int32	   *pids;
 	ProcNumber *procnos;
 	int			count;
+	QueuePosition head;
+	ProcNumber	i;
 
 	/*
 	 * Identify backends that we need to signal.  We don't want to send
-	 * signals while holding the NotifyQueueLock, so this loop just builds a
-	 * list of target PIDs.
+	 * signals while holding any locks, so this loop just builds a list of
+	 * target PIDs.
 	 *
 	 * XXX in principle these pallocs could fail, which would be bad. Maybe
 	 * preallocate the arrays?  They're not that large, though.
@@ -1596,44 +1692,66 @@ SignalBackends(void)
 	procnos = (ProcNumber *) palloc(MaxBackends * sizeof(ProcNumber));
 	count = 0;
 
-	LWLockAcquire(NotifyQueueLock, LW_EXCLUSIVE);
-	for (ProcNumber i = QUEUE_FIRST_LISTENER; i != INVALID_PROC_NUMBER; i = QUEUE_NEXT_LISTENER(i))
-	{
-		int32		pid = QUEUE_BACKEND_PID(i);
-		QueuePosition pos;
+	/*
+	 * Read queue head. It's not atomic, but we are only using it for a hint,
+	 * so a slightly stale value is acceptable.
+	 */
+	head = QUEUE_HEAD;
 
-		Assert(pid != InvalidPid);
-		pos = QUEUE_BACKEND_POS(i);
-		if (QUEUE_BACKEND_DBOID(i) == MyDatabaseId)
+	/* Traverse the lock-free list of listeners. */
+	for (i = pg_atomic_read_u32(&QUEUE_FIRST_LISTENER);
+		 i != INVALID_PROC_NUMBER;
+		)
+	{
+		/*
+		 * Read the next listener before processing the current one. This is
+		 * crucial because the current entry could be removed from the list
+		 * while we are processing it.
+		 */
+		ProcNumber	next_i = pg_atomic_read_u32(&QUEUE_NEXT_LISTENER(i));
+		int32		pid = pg_atomic_read_u32(&QUEUE_BACKEND_PID(i));
+
+		if (pid != InvalidPid)
 		{
-			/*
-			 * Always signal listeners in our own database, unless they're
-			 * already caught up (unlikely, but possible).
-			 */
-			if (QUEUE_POS_EQUAL(pos, QUEUE_HEAD))
-				continue;
+			QueuePosition pos = QUEUE_BACKEND_POS(i);
+
+			if (QUEUE_BACKEND_DBOID(i) == MyDatabaseId)
+			{
+				/*
+				 * Always signal listeners in our own database, unless they're
+				 * already caught up (unlikely, but possible).
+				 */
+				if (QUEUE_POS_EQUAL(pos, head))
+				{
+					i = next_i;
+					continue;
+				}
+			}
+			else
+			{
+				/*
+				 * Listeners in other databases should be signaled only if
+				 * they are far behind.
+				 */
+				if (asyncQueuePageDiff(QUEUE_POS_PAGE(head),
+									   QUEUE_POS_PAGE(pos)) < QUEUE_CLEANUP_DELAY)
+				{
+					i = next_i;
+					continue;
+				}
+			}
+			/* OK, need to signal this one */
+			pids[count] = pid;
+			procnos[count] = i;
+			count++;
 		}
-		else
-		{
-			/*
-			 * Listeners in other databases should be signaled only if they
-			 * are far behind.
-			 */
-			if (asyncQueuePageDiff(QUEUE_POS_PAGE(QUEUE_HEAD),
-								   QUEUE_POS_PAGE(pos)) < QUEUE_CLEANUP_DELAY)
-				continue;
-		}
-		/* OK, need to signal this one */
-		pids[count] = pid;
-		procnos[count] = i;
-		count++;
+		i = next_i;
 	}
-	LWLockRelease(NotifyQueueLock);
 
 	/* Now send signals */
-	for (int i = 0; i < count; i++)
+	for (int j = 0; j < count; j++)
 	{
-		int32		pid = pids[i];
+		int32		pid = pids[j];
 
 		/*
 		 * If we are signaling our own process, no need to involve the kernel;
@@ -1647,11 +1765,11 @@ SignalBackends(void)
 
 		/*
 		 * Note: assuming things aren't broken, a signal failure here could
-		 * only occur if the target backend exited since we released
-		 * NotifyQueueLock; which is unlikely but certainly possible. So we
-		 * just log a low-level debug message if it happens.
+		 * only occur if the target backend exited since we read its PID;
+		 * which is unlikely but certainly possible. So we just log a
+		 * low-level debug message if it happens.
 		 */
-		if (SendProcSignal(pid, PROCSIG_NOTIFY_INTERRUPT, procnos[i]) < 0)
+		if (SendProcSignal(pid, PROCSIG_NOTIFY_INTERRUPT, procnos[j]) < 0)
 			elog(DEBUG3, "could not signal backend with PID %d: %m", pid);
 	}
 
@@ -1864,7 +1982,7 @@ asyncQueueReadAllNotifications(void)
 	/* Fetch current state */
 	LWLockAcquire(NotifyQueueLock, LW_SHARED);
 	/* Assert checks that we have a valid state entry */
-	Assert(MyProcPid == QUEUE_BACKEND_PID(MyProcNumber));
+	Assert(MyProcPid == pg_atomic_read_u32(&QUEUE_BACKEND_PID(MyProcNumber)));
 	pos = QUEUE_BACKEND_POS(MyProcNumber);
 	head = QUEUE_HEAD;
 	LWLockRelease(NotifyQueueLock);
@@ -2101,6 +2219,9 @@ asyncQueueProcessPageEntries(volatile QueuePosition *current,
  * Advance the shared queue tail variable to the minimum of all the
  * per-backend tail pointers.  Truncate pg_notify space if possible.
  *
+ * This function scans the listener list lock-free to find the minimum
+ * position, then acquires locks only to update the shared tail pointers.
+ *
  * This is (usually) called during CommitTransaction(), so it's important for
  * it to have very low probability of failure.
  */
@@ -2111,34 +2232,34 @@ asyncQueueAdvanceTail(void)
 	int64		oldtailpage;
 	int64		newtailpage;
 	int64		boundary;
+	ProcNumber	i;
+
+	/*
+	 * Find the minimum position among all active listeners by scanning the
+	 * lock-free list. A torn read of a backend's position is possible but
+	 * acceptable; it would only result in a slightly less optimal tail
+	 * position, which is not a correctness issue.
+	 */
+	LWLockAcquire(NotifyQueueLock, LW_SHARED);
+	min = QUEUE_HEAD;
+	LWLockRelease(NotifyQueueLock);
+
+	for (i = pg_atomic_read_u32(&QUEUE_FIRST_LISTENER);
+		 i != INVALID_PROC_NUMBER;
+		 i = pg_atomic_read_u32(&QUEUE_NEXT_LISTENER(i)))
+	{
+		if (pg_atomic_read_u32(&QUEUE_BACKEND_PID(i)) != InvalidPid)
+			min = QUEUE_POS_MIN(min, QUEUE_BACKEND_POS(i));
+	}
 
 	/* Restrict task to one backend per cluster; see SimpleLruTruncate(). */
 	LWLockAcquire(NotifyQueueTailLock, LW_EXCLUSIVE);
 
 	/*
-	 * Compute the new tail.  Pre-v13, it's essential that QUEUE_TAIL be exact
-	 * (ie, exactly match at least one backend's queue position), so it must
-	 * be updated atomically with the actual computation.  Since v13, we could
-	 * get away with not doing it like that, but it seems prudent to keep it
-	 * so.
-	 *
-	 * Also, because incoming backends will scan forward from QUEUE_TAIL, that
-	 * must be advanced before we can truncate any data.  Thus, QUEUE_TAIL is
-	 * the logical tail, while QUEUE_STOP_PAGE is the physical tail, or oldest
-	 * un-truncated page.  When QUEUE_STOP_PAGE != QUEUE_POS_PAGE(QUEUE_TAIL),
-	 * there are pages we can truncate but haven't yet finished doing so.
-	 *
-	 * For concurrency's sake, we don't want to hold NotifyQueueLock while
-	 * performing SimpleLruTruncate.  This is OK because no backend will try
-	 * to access the pages we are in the midst of truncating.
+	 * Update QUEUE_TAIL. It's the logical tail, while QUEUE_STOP_PAGE is the
+	 * physical one. Advancing QUEUE_TAIL must happen before truncation.
 	 */
 	LWLockAcquire(NotifyQueueLock, LW_EXCLUSIVE);
-	min = QUEUE_HEAD;
-	for (ProcNumber i = QUEUE_FIRST_LISTENER; i != INVALID_PROC_NUMBER; i = QUEUE_NEXT_LISTENER(i))
-	{
-		Assert(QUEUE_BACKEND_PID(i) != InvalidPid);
-		min = QUEUE_POS_MIN(min, QUEUE_BACKEND_POS(i));
-	}
 	QUEUE_TAIL = min;
 	oldtailpage = QUEUE_STOP_PAGE;
 	LWLockRelease(NotifyQueueLock);
