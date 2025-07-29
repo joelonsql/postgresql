@@ -16,6 +16,7 @@
 
 #include "storage/aio.h"
 #include "storage/buf_internals.h"
+#include "storage/buf_table_lockfree.h"
 #include "storage/bufmgr.h"
 
 BufferDescPadded *BufferDescriptors;
@@ -174,6 +175,9 @@ BufferManagerShmemSize(void)
 
 	/* size of stuff controlled by freelist.c */
 	size = add_size(size, StrategyShmemSize());
+	
+	/* size of lock-free buffer table */
+	size = add_size(size, LFBufTableShmemSize(NBuffers + NUM_BUFFER_PARTITIONS));
 
 	/* size of I/O condition variables */
 	size = add_size(size, mul_size(NBuffers,

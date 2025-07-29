@@ -18,6 +18,7 @@
 #include "pgstat.h"
 #include "port/atomics.h"
 #include "storage/buf_internals.h"
+#include "storage/buf_table_lockfree.h"
 #include "storage/bufmgr.h"
 #include "storage/proc.h"
 
@@ -455,7 +456,7 @@ StrategyShmemSize(void)
 	Size		size = 0;
 
 	/* size of lookup hash table ... see comment in StrategyInitialize */
-	size = add_size(size, BufTableShmemSize(NBuffers + NUM_BUFFER_PARTITIONS));
+	size = add_size(size, LFBufTableShmemSize(NBuffers + NUM_BUFFER_PARTITIONS));
 
 	/* size of the shared replacement strategy control block */
 	size = add_size(size, MAXALIGN(sizeof(BufferStrategyControl)));
@@ -485,7 +486,7 @@ StrategyInitialize(bool init)
 	 * happening in each partition concurrently, so we could need as many as
 	 * NBuffers + NUM_BUFFER_PARTITIONS entries.
 	 */
-	InitBufTable(NBuffers + NUM_BUFFER_PARTITIONS);
+	LFInitBufTable(NBuffers + NUM_BUFFER_PARTITIONS);
 
 	/*
 	 * Get or create the shared strategy control block

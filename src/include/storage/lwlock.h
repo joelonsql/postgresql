@@ -84,13 +84,10 @@ extern PGDLLIMPORT NamedLWLockTranche *NamedLWLockTrancheArray;
 extern PGDLLIMPORT int NamedLWLockTrancheRequests;
 
 /*
- * It's a bit odd to declare NUM_BUFFER_PARTITIONS and NUM_LOCK_PARTITIONS
- * here, but we need them to figure out offsets within MainLWLockArray, and
- * having this file include lock.h or bufmgr.h would be backwards.
+ * It's a bit odd to declare NUM_LOCK_PARTITIONS here, but we need them to
+ * figure out offsets within MainLWLockArray, and having this file include
+ * lock.h would be backwards.
  */
-
-/* Number of partitions of the shared buffer mapping hashtable */
-#define NUM_BUFFER_PARTITIONS  128
 
 /* Number of partitions the shared lock tables are divided into */
 #define LOG2_NUM_LOCK_PARTITIONS  4
@@ -101,9 +98,7 @@ extern PGDLLIMPORT int NamedLWLockTrancheRequests;
 #define NUM_PREDICATELOCK_PARTITIONS  (1 << LOG2_NUM_PREDICATELOCK_PARTITIONS)
 
 /* Offsets for various chunks of preallocated lwlocks. */
-#define BUFFER_MAPPING_LWLOCK_OFFSET	NUM_INDIVIDUAL_LWLOCKS
-#define LOCK_MANAGER_LWLOCK_OFFSET		\
-	(BUFFER_MAPPING_LWLOCK_OFFSET + NUM_BUFFER_PARTITIONS)
+#define LOCK_MANAGER_LWLOCK_OFFSET		NUM_INDIVIDUAL_LWLOCKS
 #define PREDICATELOCK_MANAGER_LWLOCK_OFFSET \
 	(LOCK_MANAGER_LWLOCK_OFFSET + NUM_LOCK_PARTITIONS)
 #define NUM_FIXED_LWLOCKS \

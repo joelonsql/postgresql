@@ -184,29 +184,10 @@ BufTagMatchesRelFileLocator(const BufferTag *tag,
 
 
 /*
- * The shared buffer mapping table is partitioned to reduce contention.
- * To determine which partition lock a given tag requires, compute the tag's
- * hash code with BufTableHashCode(), then apply BufMappingPartitionLock().
- * NB: NUM_BUFFER_PARTITIONS must be a power of 2!
+ * The buffer mapping table is now lock-free, so these partition-related
+ * functions are no longer needed. They are removed as part of the
+ * lock-free implementation.
  */
-static inline uint32
-BufTableHashPartition(uint32 hashcode)
-{
-	return hashcode % NUM_BUFFER_PARTITIONS;
-}
-
-static inline LWLock *
-BufMappingPartitionLock(uint32 hashcode)
-{
-	return &MainLWLockArray[BUFFER_MAPPING_LWLOCK_OFFSET +
-							BufTableHashPartition(hashcode)].lock;
-}
-
-static inline LWLock *
-BufMappingPartitionLockByIndex(uint32 index)
-{
-	return &MainLWLockArray[BUFFER_MAPPING_LWLOCK_OFFSET + index].lock;
-}
 
 /*
  *	BufferDesc -- shared descriptor/state data for a single shared buffer.
@@ -455,13 +436,7 @@ extern Size StrategyShmemSize(void);
 extern void StrategyInitialize(bool init);
 extern bool have_free_buffer(void);
 
-/* buf_table.c */
-extern Size BufTableShmemSize(int size);
-extern void InitBufTable(int size);
-extern uint32 BufTableHashCode(BufferTag *tagPtr);
-extern int	BufTableLookup(BufferTag *tagPtr, uint32 hashcode);
-extern int	BufTableInsert(BufferTag *tagPtr, uint32 hashcode, int buf_id);
-extern void BufTableDelete(BufferTag *tagPtr, uint32 hashcode);
+/* buf_table_lockfree.c - lock-free implementation is now the only implementation */
 
 /* localbuf.c */
 extern bool PinLocalBuffer(BufferDesc *buf_hdr, bool adjust_usagecount);

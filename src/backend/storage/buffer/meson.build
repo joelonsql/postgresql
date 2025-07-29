@@ -2,7 +2,7 @@
 
 backend_sources += files(
   'buf_init.c',
-  'buf_table.c',
+  'buf_table_lockfree.c',
   'bufmgr.c',
   'freelist.c',
   'localbuf.c',

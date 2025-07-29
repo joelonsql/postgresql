@@ -471,11 +471,6 @@ InitializeLWLocks(void)
 	for (id = 0, lock = MainLWLockArray; id < NUM_INDIVIDUAL_LWLOCKS; id++, lock++)
 		LWLockInitialize(&lock->lock, id);
 
-	/* Initialize buffer mapping LWLocks in main array */
-	lock = MainLWLockArray + BUFFER_MAPPING_LWLOCK_OFFSET;
-	for (id = 0; id < NUM_BUFFER_PARTITIONS; id++, lock++)
-		LWLockInitialize(&lock->lock, LWTRANCHE_BUFFER_MAPPING);
-
 	/* Initialize lmgrs' LWLocks in main array */
 	lock = MainLWLockArray + LOCK_MANAGER_LWLOCK_OFFSET;
 	for (id = 0; id < NUM_LOCK_PARTITIONS; id++, lock++)
