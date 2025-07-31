@@ -177,11 +177,6 @@ static volatile sig_atomic_t waiting = false;
 static int	signal_fd = -1;
 #endif
 
-#ifdef __linux__
-/* On Linux, we'll use per-process eventfd for wakeup. */
-static int	latch_event_fd = -1;
-#endif
-
 #ifdef WAIT_USE_SELF_PIPE
 /* Read and write ends of the self-pipe */
 static int	selfpipe_readfd = -1;
@@ -354,18 +349,6 @@ InitializeWaitEventSupport(void)
 #ifdef WAIT_USE_KQUEUE
 	/* Ignore SIGURG, because we'll receive it via kqueue. */
 	pqsignal(SIGURG, SIG_IGN);
-#endif
-
-#if defined(WAIT_USE_EPOLL) && defined(__linux__)
-	/*
-	 * On Linux, we use a per-process eventfd, which is created during
-	 * process startup and stored in MyProc. We retrieve it here for use in
-	 * this module.
-	 */
-	if (MyProc && MyProc->procEventFd != -1)
-	{
-		latch_event_fd = MyProc->procEventFd;
-	}
 #endif
 }
 
@@ -632,7 +615,13 @@ AddWaitEventToSet(WaitEventSet *set, uint32 events, pgsocket fd, Latch *latch,
 		set->latch = latch;
 		set->latch_pos = event->pos;
 #if defined(WAIT_USE_EPOLL) && defined(__linux__)
-		event->fd = latch_event_fd;
+		if (MyProc != NULL && MyProc->procEventFd != -1)
+			event->fd = MyProc->procEventFd;
+		else
+		{
+			event->fd = PGINVALID_SOCKET;
+			return event->pos;  /* Skip epoll_ctl for invalid fd */
+		}
 #elif defined(WAIT_USE_SELF_PIPE)
 		event->fd = selfpipe_readfd;
 #elif defined(WAIT_USE_SIGNALFD)
@@ -1969,12 +1958,19 @@ drain(void)
 	int			fd;
 
 #if defined(WAIT_USE_EPOLL) && defined(__linux__)
-	fd = latch_event_fd;
+	if (MyProc != NULL && MyProc->procEventFd != -1)
+		fd = MyProc->procEventFd;
+	else
+		fd = -1;  /* Should not happen, but handle gracefully */
 #elif defined(WAIT_USE_SELF_PIPE)
 	fd = selfpipe_readfd;
 #else
 	fd = signal_fd;
 #endif
+
+	/* Safety check - should not happen in normal operation */
+	if (fd == -1)
+		return;
 
 	for (;;)
 	{
@@ -2046,7 +2042,7 @@ void
 WakeupMyProc(void)
 {
 #ifdef __linux__
-	if (latch_event_fd != -1)
+	if (MyProc != NULL && MyProc->procEventFd != -1)
 	{
 		uint64_t val = 1;
 		int rc;
@@ -2056,7 +2052,7 @@ WakeupMyProc(void)
 		 * EAGAIN if the 64-bit counter is at its max, which is fine;
 		 * it means a wakeup is already pending.
 		 */
-		rc = write(latch_event_fd, &val, sizeof(val));
+		rc = write(MyProc->procEventFd, &val, sizeof(val));
 		(void) rc; /* Discard result in a signal handler */
 		return;
 	}
