@@ -72,6 +72,8 @@
 #include "storage/fd.h"
 #include "storage/ipc.h"
 #include "storage/pmsignal.h"
+#include "storage/proc.h"
+#include "storage/procarray.h"
 #include "storage/latch.h"
 #include "storage/waiteventset.h"
 #include "utils/memutils.h"
@@ -173,6 +175,11 @@ static volatile sig_atomic_t waiting = false;
 #ifdef WAIT_USE_SIGNALFD
 /* On Linux, we'll receive SIGURG via a signalfd file descriptor. */
 static int	signal_fd = -1;
+#endif
+
+#ifdef __linux__
+/* On Linux, we'll use per-process eventfd for wakeup. */
+static int	latch_event_fd = -1;
 #endif
 
 #ifdef WAIT_USE_SELF_PIPE
@@ -347,6 +354,18 @@ InitializeWaitEventSupport(void)
 #ifdef WAIT_USE_KQUEUE
 	/* Ignore SIGURG, because we'll receive it via kqueue. */
 	pqsignal(SIGURG, SIG_IGN);
+#endif
+
+#if defined(WAIT_USE_EPOLL) && defined(__linux__)
+	/*
+	 * On Linux, we use a per-process eventfd, which is created during
+	 * process startup and stored in MyProc. We retrieve it here for use in
+	 * this module.
+	 */
+	if (MyProc && MyProc->procEventFd != -1)
+	{
+		latch_event_fd = MyProc->procEventFd;
+	}
 #endif
 }
 
@@ -612,7 +631,9 @@ AddWaitEventToSet(WaitEventSet *set, uint32 events, pgsocket fd, Latch *latch,
 	{
 		set->latch = latch;
 		set->latch_pos = event->pos;
-#if defined(WAIT_USE_SELF_PIPE)
+#if defined(WAIT_USE_EPOLL) && defined(__linux__)
+		event->fd = latch_event_fd;
+#elif defined(WAIT_USE_SELF_PIPE)
 		event->fd = selfpipe_readfd;
 #elif defined(WAIT_USE_SIGNALFD)
 		event->fd = signal_fd;
@@ -1934,7 +1955,7 @@ retry:
 #if defined(WAIT_USE_SELF_PIPE) || defined(WAIT_USE_SIGNALFD)
 
 /*
- * Read all available data from self-pipe or signalfd.
+ * Read all available data from self-pipe, signalfd, or eventfd.
  *
  * Note: this is only called when waiting = true.  If it fails and doesn't
  * return, it must reset that flag first (though ideally, this will never
@@ -1947,7 +1968,9 @@ drain(void)
 	int			rc;
 	int			fd;
 
-#ifdef WAIT_USE_SELF_PIPE
+#if defined(WAIT_USE_EPOLL) && defined(__linux__)
+	fd = latch_event_fd;
+#elif defined(WAIT_USE_SELF_PIPE)
 	fd = selfpipe_readfd;
 #else
 	fd = signal_fd;
@@ -1965,7 +1988,9 @@ drain(void)
 			else
 			{
 				waiting = false;
-#ifdef WAIT_USE_SELF_PIPE
+#if defined(WAIT_USE_EPOLL) && defined(__linux__)
+				elog(ERROR, "read() on eventfd failed: %m");
+#elif defined(WAIT_USE_SELF_PIPE)
 				elog(ERROR, "read() on self-pipe failed: %m");
 #else
 				elog(ERROR, "read() on signalfd failed: %m");
@@ -1975,7 +2000,9 @@ drain(void)
 		else if (rc == 0)
 		{
 			waiting = false;
-#ifdef WAIT_USE_SELF_PIPE
+#if defined(WAIT_USE_EPOLL) && defined(__linux__)
+			elog(ERROR, "unexpected EOF on eventfd");
+#elif defined(WAIT_USE_SELF_PIPE)
 			elog(ERROR, "unexpected EOF on self-pipe");
 #else
 			elog(ERROR, "unexpected EOF on signalfd");
@@ -2018,6 +2045,24 @@ ResOwnerReleaseWaitEventSet(Datum res)
 void
 WakeupMyProc(void)
 {
+#ifdef __linux__
+	if (latch_event_fd != -1)
+	{
+		uint64_t val = 1;
+		int rc;
+
+		/*
+		 * Write to the eventfd. It's non-blocking, so it will return
+		 * EAGAIN if the 64-bit counter is at its max, which is fine;
+		 * it means a wakeup is already pending.
+		 */
+		rc = write(latch_event_fd, &val, sizeof(val));
+		(void) rc; /* Discard result in a signal handler */
+		return;
+	}
+#endif
+
+	/* Fallback to original implementation */
 #if defined(WAIT_USE_SELF_PIPE)
 	if (waiting)
 		sendSelfPipeByte();
@@ -2031,6 +2076,41 @@ WakeupMyProc(void)
 void
 WakeupOtherProc(int pid)
 {
+#ifdef __linux__
+	PGPROC *proc = BackendPidGetProc(pid);
+
+	/*
+	 * If we found the proc and it has a valid eventfd, signal it by
+	 * writing to its eventfd.
+	 */
+	if (proc != NULL && proc->procEventFd != -1)
+	{
+		uint64_t val = 1;
+		int      rc;
+
+		rc = write(proc->procEventFd, &val, sizeof(val));
+
+		if (rc == sizeof(val))
+			return; /* Success */
+
+		/*
+		 * If write failed with EAGAIN, the counter is full, meaning a
+		 * wakeup is already pending. If it failed with EBADF, the process
+		 * likely exited and closed the fd. In either case, we can
+		 * consider our job done.
+		 */
+		if (rc < 0 && (errno == EAGAIN || errno == EBADF))
+			return;
+
+		/*
+		 * For other errors, or if we got a short write (should not happen
+		 * for eventfd), fall through to the old signal mechanism as a
+		 * safety net.
+		 */
+	}
+#endif
+
+	/* Original implementation for non-Linux or as a fallback */
 	kill(pid, SIGURG);
 }
 #endif

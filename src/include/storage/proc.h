@@ -320,6 +320,10 @@ struct PGPROC
 	LocalTransactionId fpLocalTransactionId;	/* lxid for fast-path VXID
 												 * lock */
 
+#ifdef __linux__
+	int			procEventFd;	/* eventfd for process wakeup */
+#endif
+
 	/*
 	 * Support for lock groups.  Use LockHashPartitionLockByProc on the group
 	 * leader to get the LWLock protecting these fields.

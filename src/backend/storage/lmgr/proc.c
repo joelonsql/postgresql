@@ -32,6 +32,9 @@
 #include <signal.h>
 #include <unistd.h>
 #include <sys/time.h>
+#ifdef __linux__
+#include <sys/eventfd.h>
+#endif
 
 #include "access/transam.h"
 #include "access/twophase.h"
@@ -42,6 +45,7 @@
 #include "replication/slotsync.h"
 #include "replication/syncrep.h"
 #include "storage/condition_variable.h"
+#include "storage/fd.h"
 #include "storage/ipc.h"
 #include "storage/lmgr.h"
 #include "storage/pmsignal.h"
@@ -357,6 +361,11 @@ InitProcGlobal(void)
 		/* Initialize lockGroupMembers list. */
 		dlist_init(&proc->lockGroupMembers);
 
+#ifdef __linux__
+		/* Initialize eventfd to invalid value */
+		proc->procEventFd = -1;
+#endif
+
 		/*
 		 * Initialize the atomic variables, otherwise, it won't be safe to
 		 * access them for backends that aren't currently in use.
@@ -519,6 +528,17 @@ InitProcess(void)
 
 	/* Initialize wait event information. */
 	MyProc->wait_event_info = 0;
+
+#ifdef __linux__
+	/*
+	 * Create eventfd for process wakeup. Use EFD_CLOEXEC to close on exec
+	 * and EFD_NONBLOCK to avoid blocking on write when counter is full.
+	 */
+	MyProc->procEventFd = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
+	if (MyProc->procEventFd < 0)
+		elog(FATAL, "could not create eventfd: %m");
+	ReserveExternalFD();
+#endif
 
 	/* Initialize fields for group transaction status update. */
 	MyProc->clogGroupMember = false;
@@ -998,6 +1018,16 @@ ProcKill(int code, Datum arg)
 	MyProc = NULL;
 	MyProcNumber = INVALID_PROC_NUMBER;
 	DisownLatch(&proc->procLatch);
+
+#ifdef __linux__
+	/* Close the eventfd if we have one */
+	if (proc->procEventFd != -1)
+	{
+		close(proc->procEventFd);
+		ReleaseExternalFD();
+		proc->procEventFd = -1;
+	}
+#endif
 
 	/* Mark the proc no longer in use */
 	proc->pid = 0;
