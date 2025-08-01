@@ -77,6 +77,10 @@
 #include <netdb.h>
 #include <limits.h>
 
+#ifdef HAVE_EVENTFD
+#include <sys/eventfd.h>
+#endif
+
 #ifdef USE_BONJOUR
 #include <dns_sd.h>
 #endif
@@ -1001,6 +1005,26 @@ PostmasterMain(int argc, char *argv[])
 	 * clean up dead IPC objects if the postmaster crashes and is restarted.
 	 */
 	CreateSharedMemoryAndSemaphores();
+
+#ifdef HAVE_EVENTFD
+	/*
+	 * Create eventfds for latch support, if supported by the platform. This
+	 * is done here in the postmaster so that all child processes inherit the
+	 * file descriptors. In processes that don't go through this code path
+	 * (e.g. initdb), the FDs will be invalid (-1), and the system will fall
+	 * back to using signals.
+	 */
+	for (int i = 0; i < ProcGlobal->allProcCount; i++)
+	{
+		PGPROC	   *proc = &ProcGlobal->allProcs[i];
+
+		proc->latchEventFd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+		if (proc->latchEventFd < 0)
+			ereport(FATAL,
+					(errcode_for_socket_access(),
+					 errmsg("could not create eventfd for PGPROC slot %d: %m", i)));
+	}
+#endif
 
 	/*
 	 * Estimate number of openable files.  This must happen after setting up

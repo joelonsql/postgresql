@@ -60,6 +60,9 @@
 #ifdef HAVE_SYS_SIGNALFD_H
 #include <sys/signalfd.h>
 #endif
+#ifdef HAVE_EVENTFD
+#include <sys/eventfd.h>
+#endif
 #ifdef HAVE_POLL_H
 #include <poll.h>
 #endif
@@ -74,6 +77,10 @@
 #include "storage/pmsignal.h"
 #include "storage/latch.h"
 #include "storage/waiteventset.h"
+#ifdef HAVE_EVENTFD
+#include "storage/proc.h"
+#include "storage/procarray.h"
+#endif
 #include "utils/memutils.h"
 #include "utils/resowner.h"
 
@@ -239,6 +246,9 @@ ResourceOwnerForgetWaitEventSet(ResourceOwner owner, WaitEventSet *set)
 void
 InitializeWaitEventSupport(void)
 {
+/*
+ * On systems that use poll(), we need a self-pipe to wake up from a signal.
+ */
 #if defined(WAIT_USE_SELF_PIPE)
 	int			pipefd[2];
 
@@ -310,6 +320,10 @@ InitializeWaitEventSupport(void)
 	ReserveExternalFD();
 	ReserveExternalFD();
 
+	/*
+	 * We always set up the signal handler, which is used as a fallback if
+	 * eventfds are not available (e.g. in initdb).
+	 */
 	pqsignal(SIGURG, latch_sigurg_handler);
 #endif
 
@@ -333,7 +347,7 @@ InitializeWaitEventSupport(void)
 	}
 
 	/* Block SIGURG, because we'll receive it through a signalfd. */
-	sigaddset(&UnBlockSig, SIGURG);
+	sigaddset(&BlockSig, SIGURG);
 
 	/* Set up the signalfd to receive SIGURG notifications. */
 	sigemptyset(&signalfd_mask);
@@ -346,6 +360,10 @@ InitializeWaitEventSupport(void)
 
 #ifdef WAIT_USE_KQUEUE
 	/* Ignore SIGURG, because we'll receive it via kqueue. */
+	/*
+	 * NB: this is not conditional on HAVE_EVENTFD because kqueue handles both
+	 * signals and FDs through the same mechanism.
+	 */
 	pqsignal(SIGURG, SIG_IGN);
 #endif
 }
@@ -612,7 +630,25 @@ AddWaitEventToSet(WaitEventSet *set, uint32 events, pgsocket fd, Latch *latch,
 	{
 		set->latch = latch;
 		set->latch_pos = event->pos;
+
+#if defined(HAVE_EVENTFD)
+		/*
+		 * Use the current process's own eventfd if it's valid. Otherwise,
+		 * fall back to the self-pipe/signal mechanism. A value of -1
+		 * indicates we're in a process like initdb that doesn't set these
+		 * up.
+		 */
+		if (MyProc && MyProc->latchEventFd >= 0)
+			event->fd = MyProc->latchEventFd;
+		else
 #if defined(WAIT_USE_SELF_PIPE)
+			event->fd = selfpipe_readfd;
+#elif defined(WAIT_USE_SIGNALFD)
+			event->fd = signal_fd;
+#else
+			event->fd = PGINVALID_SOCKET;
+#endif
+#elif defined(WAIT_USE_SELF_PIPE)
 		event->fd = selfpipe_readfd;
 #elif defined(WAIT_USE_SIGNALFD)
 		event->fd = signal_fd;
@@ -1230,8 +1266,24 @@ WaitEventSetWaitBlock(WaitEventSet *set, int cur_timeout,
 		if (cur_event->events == WL_LATCH_SET &&
 			cur_epoll_event->events & (EPOLLIN | EPOLLERR | EPOLLHUP))
 		{
-			/* Drain the signalfd. */
-			drain();
+#if defined(HAVE_EVENTFD)
+			if (MyProc && cur_event->fd == MyProc->latchEventFd)
+			{
+				/*
+				 * Drain the eventfd. This consumes the 64-bit counter value
+				 * and resets the eventfd to a non-readable state.
+				 */
+				uint64 val;
+				int read_rc = read(cur_event->fd, &val, sizeof(uint64));
+				if (read_rc < 0 && errno != EAGAIN)
+					elog(LOG, "could not read from eventfd: %m");
+			}
+			else
+#endif
+			{
+				/* Drain the signalfd or self-pipe. */
+				drain();
+			}
 
 			if (set->latch && set->latch->maybe_sleeping && set->latch->is_set)
 			{
@@ -1514,8 +1566,24 @@ WaitEventSetWaitBlock(WaitEventSet *set, int cur_timeout,
 		if (cur_event->events == WL_LATCH_SET &&
 			(cur_pollfd->revents & (POLLIN | POLLHUP | POLLERR | POLLNVAL)))
 		{
-			/* There's data in the self-pipe, clear it. */
-			drain();
+#if defined(HAVE_EVENTFD)
+			if (MyProc && cur_event->fd == MyProc->latchEventFd)
+			{
+				/*
+				 * Drain the eventfd. This consumes the 64-bit counter value
+				 * and resets the eventfd to a non-readable state.
+				 */
+				uint64 val;
+				int read_rc = read(cur_event->fd, &val, sizeof(uint64));
+				if (read_rc < 0 && errno != EAGAIN)
+					elog(LOG, "could not read from eventfd: %m");
+			}
+			else
+#endif
+			{
+				/* There's data in the self-pipe, clear it. */
+				drain();
+			}
 
 			if (set->latch && set->latch->maybe_sleeping && set->latch->is_set)
 			{
@@ -1933,6 +2001,8 @@ retry:
 
 #if defined(WAIT_USE_SELF_PIPE) || defined(WAIT_USE_SIGNALFD)
 
+/* drain() is not used when eventfd is the only IPC mechanism. */
+#if !defined(HAVE_EVENTFD) || defined(WAIT_USE_SIGNALFD)
 /*
  * Read all available data from self-pipe or signalfd.
  *
@@ -1989,6 +2059,7 @@ drain(void)
 		/* else buffer wasn't big enough, so read again */
 	}
 }
+#endif /* !HAVE_EVENTFD || WAIT_USE_SIGNALFD */
 
 #endif
 
@@ -2018,19 +2089,64 @@ ResOwnerReleaseWaitEventSet(Datum res)
 void
 WakeupMyProc(void)
 {
-#if defined(WAIT_USE_SELF_PIPE)
-	if (waiting)
-		sendSelfPipeByte();
-#else
-	if (waiting)
-		kill(MyProcPid, SIGURG);
+#ifdef HAVE_EVENTFD
+	/*
+	 * If we have a valid eventfd, use that. This is the normal path.
+	 * Otherwise, fall back to the signal mechanism.
+	 */
+	if (MyProc && MyProc->latchEventFd >= 0)
+	{
+		uint64	val = 1;
+		int		rc;
+
+		rc = write(MyProc->latchEventFd, &val, sizeof(uint64));
+
+		/*
+		 * It's not an error if the write fails with EAGAIN. It just means
+		 * the event counter is maxed out, which is fine; a wakeup is
+		 * already pending. We only log other unexpected errors.
+		 */
+		if (rc < 0 && errno != EAGAIN)
+			elog(LOG, "could not write to eventfd: %m");
+		return;
+	}
 #endif
+
+	/* Fallback to original signal-based implementation */
+	kill(MyProcPid, SIGURG);
 }
 
 /* Similar to WakeupMyProc, but wake up another process */
 void
 WakeupOtherProc(int pid)
 {
+#ifdef HAVE_EVENTFD
+	PGPROC	   *proc = BackendPidGetProc(pid);
+
+	/*
+	 * If we find the PGPROC and it has a valid eventfd, use that. This is the
+	 * normal path in a running postmaster.
+	 */
+	if (proc && proc->latchEventFd >= 0)
+	{
+		uint64		val = 1;
+		int			rc;
+
+		rc = write(proc->latchEventFd, &val, sizeof(uint64));
+
+		/*
+		 * It's not an error if the write fails with EAGAIN. It just means
+		 * the event counter is maxed out, which is fine; a wakeup is
+		 * already pending. We only log other unexpected errors.
+		 */
+		if (rc < 0 && errno != EAGAIN)
+			elog(LOG, "could not write to eventfd for PID %d: %m", pid);
+		return;					/* Successfully used eventfd, so we are done */
+	}
+	/* Fall through to signal mechanism if no proc or no eventfd */
+#endif
+
+	/* Original implementation */
 	kill(pid, SIGURG);
 }
 #endif

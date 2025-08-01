@@ -191,6 +191,9 @@ struct PGPROC
 
 	Latch		procLatch;		/* generic latch for process */
 
+#ifdef HAVE_EVENTFD
+	int			latchEventFd;	/* eventfd for latch wakeups on Linux */
+#endif
 
 	TransactionId xid;			/* id of top-level transaction currently being
 								 * executed by this proc, if running and XID

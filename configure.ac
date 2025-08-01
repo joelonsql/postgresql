@@ -1792,6 +1792,7 @@ AC_CHECK_FUNCS(m4_normalize([
 	copyfile
 	copy_file_range
 	elf_aux_info
+	eventfd
 	getauxval
 	getifaddrs
 	getpeerucred

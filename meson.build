@@ -2880,6 +2880,7 @@ func_checks = [
   # required. Just checking for dlsym() ought to suffice.
   ['dlsym', {'dependencies': [dl_dep], 'define': false}],
   ['elf_aux_info'],
+  ['eventfd'],
   ['explicit_bzero'],
   ['getauxval'],
   ['getifaddrs'],

@@ -33,6 +33,10 @@
 #include <unistd.h>
 #include <sys/time.h>
 
+#ifdef HAVE_EVENTFD
+#include <sys/eventfd.h>
+#endif
+
 #include "access/transam.h"
 #include "access/twophase.h"
 #include "access/xlogutils.h"
@@ -291,6 +295,15 @@ InitProcGlobal(void)
 		PGPROC	   *proc = &procs[i];
 
 		/* Common initialization for all PGPROCs, regardless of type. */
+
+#ifdef HAVE_EVENTFD
+		/*
+		 * Initialize eventfd to -1. The actual eventfds will be created by
+		 * the Postmaster process after shared memory setup, ensuring proper
+		 * inheritance by child processes.
+		 */
+		proc->latchEventFd = -1;
+#endif
 
 		/*
 		 * Set the fast-path lock arrays, and move the pointer. We interleave
