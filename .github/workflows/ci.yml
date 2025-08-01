@@ -81,6 +81,7 @@ jobs:
     - name: Configure with meson
       run: |
         sudo -u postgres bash -c "
+          cd $GITHUB_WORKSPACE
           export CCACHE_DIR=/tmp/ccache_dir
           export CC='ccache gcc'
           export CXX='ccache g++'
@@ -91,12 +92,13 @@ jobs:
             -Dllvm=enabled \
             -Duuid=e2fs \
             -Dtap_tests=enabled \
-            build .
+            build
         "
     
     - name: Build
       run: |
         sudo -u postgres bash -c "
+          cd $GITHUB_WORKSPACE
           export CCACHE_DIR=/tmp/ccache_dir
           ninja -C build -j${BUILD_JOBS} all testprep
         "
@@ -104,12 +106,14 @@ jobs:
     - name: Check for missing dependencies
       run: |
         sudo -u postgres bash -c "
+          cd $GITHUB_WORKSPACE
           ninja -C build -t missingdeps
         "
     
     - name: Run tests
       run: |
         sudo -u postgres bash -c "
+          cd $GITHUB_WORKSPACE
           ulimit -c unlimited
           meson test $MTEST_ARGS --num-processes ${TEST_JOBS}
         "
