@@ -13,7 +13,7 @@ env:
   CCACHE_MAXSIZE: "250M"
   MTEST_ARGS: --print-errorlogs --no-rebuild -C build
   PGCTLTIMEOUT: 120
-  PG_TEST_EXTRA: kerberos ldap ssl libpq_encryption load_balance oauth
+  PG_TEST_EXTRA:
 
 jobs:
   build-and-test:
