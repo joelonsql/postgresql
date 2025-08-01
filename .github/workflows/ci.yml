@@ -67,57 +67,35 @@ jobs:
         key: postgresql-${{ runner.os }}
         max-size: ${{ env.CCACHE_MAXSIZE }}
     
-    - name: Create postgres user and setup directories
+    - name: Setup build environment
       run: |
-        # Create postgres user if it doesn't exist
-        if ! id postgres &>/dev/null; then
-          sudo useradd -m postgres
-        fi
-        # Ensure postgres user has access to the workspace
-        sudo chown -R postgres:postgres $GITHUB_WORKSPACE
-        sudo mkdir -p /tmp/ccache_dir
-        sudo chown -R postgres:postgres /tmp/ccache_dir
         echo '* - memlock 134217728' | sudo tee /etc/security/limits.d/postgres.conf
     
     - name: Configure with meson
       run: |
-        sudo -u postgres bash -c "
-          cd $GITHUB_WORKSPACE
-          export CCACHE_DIR=/tmp/ccache_dir
-          export CC='ccache gcc'
-          export CXX='ccache g++'
-          meson setup \
-            --buildtype=debug \
-            -Dcassert=true \
-            -Dinjection_points=true \
-            -Dllvm=enabled \
-            -Duuid=e2fs \
-            -Dtap_tests=enabled \
-            build
-        "
+        export CC='ccache gcc'
+        export CXX='ccache g++'
+        meson setup \
+          --buildtype=debug \
+          -Dcassert=true \
+          -Dinjection_points=true \
+          -Dllvm=enabled \
+          -Duuid=e2fs \
+          -Dtap_tests=enabled \
+          build
     
     - name: Build
       run: |
-        sudo -u postgres bash -c "
-          cd $GITHUB_WORKSPACE
-          export CCACHE_DIR=/tmp/ccache_dir
-          ninja -C build -j${BUILD_JOBS} all testprep
-        "
+        ninja -C build -j${BUILD_JOBS} all testprep
     
     - name: Check for missing dependencies
       run: |
-        sudo -u postgres bash -c "
-          cd $GITHUB_WORKSPACE
-          ninja -C build -t missingdeps
-        "
+        ninja -C build -t missingdeps
     
     - name: Run tests
       run: |
-        sudo -u postgres bash -c "
-          cd $GITHUB_WORKSPACE
-          ulimit -c unlimited
-          meson test $MTEST_ARGS --num-processes ${TEST_JOBS}
-        "
+        ulimit -c unlimited
+        meson test $MTEST_ARGS --num-processes ${TEST_JOBS}
     
     - name: Upload test results on failure
       if: failure()
