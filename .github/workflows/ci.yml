@@ -1,0 +1,124 @@
+name: CI
+
+on:
+  push:
+    branches: [ github_actions ]
+  pull_request:
+    branches: [ github_actions ]
+
+env:
+  # Environment variables from Cirrus CI configuration
+  BUILD_JOBS: 4
+  TEST_JOBS: 8
+  CCACHE_MAXSIZE: "250M"
+  MTEST_ARGS: --print-errorlogs --no-rebuild -C build
+  PGCTLTIMEOUT: 120
+  PG_TEST_EXTRA: kerberos ldap ssl libpq_encryption load_balance oauth
+
+jobs:
+  build-and-test:
+    name: PostgreSQL Build and Test
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 500
+    
+    - name: Install system dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y \
+          build-essential \
+          ccache \
+          meson \
+          ninja-build \
+          python3-pip \
+          pkg-config \
+          libreadline-dev \
+          zlib1g-dev \
+          libssl-dev \
+          libgssapi-krb5-2 \
+          libkrb5-dev \
+          libldap2-dev \
+          libpam0g-dev \
+          libxml2-dev \
+          libxslt1-dev \
+          uuid-dev \
+          libossp-uuid-dev \
+          liblz4-dev \
+          libzstd-dev \
+          libcurl4-openssl-dev \
+          libsystemd-dev \
+          libnuma-dev \
+          liburing-dev \
+          gettext \
+          flex \
+          bison \
+          perl \
+          python3-dev \
+          tcl-dev \
+          libedit-dev
+    
+    - name: Setup ccache
+      uses: hendrikmuhs/ccache-action@v1.2
+      with:
+        key: postgresql-${{ runner.os }}
+        max-size: ${{ env.CCACHE_MAXSIZE }}
+    
+    - name: Create postgres user and setup directories
+      run: |
+        sudo useradd -m postgres
+        sudo chown -R postgres:postgres .
+        sudo mkdir -p /tmp/ccache_dir
+        sudo chown -R postgres:postgres /tmp/ccache_dir
+        echo '* - memlock 134217728' | sudo tee /etc/security/limits.d/postgres.conf
+    
+    - name: Configure with meson
+      run: |
+        sudo -u postgres bash -c "
+          export CCACHE_DIR=/tmp/ccache_dir
+          export CC='ccache gcc'
+          export CXX='ccache g++'
+          meson setup \
+            --buildtype=debug \
+            -Dcassert=true \
+            -Dinjection_points=true \
+            -Dllvm=enabled \
+            -Duuid=e2fs \
+            -Dtap_tests=enabled \
+            build
+        "
+    
+    - name: Build
+      run: |
+        sudo -u postgres bash -c "
+          export CCACHE_DIR=/tmp/ccache_dir
+          ninja -C build -j${BUILD_JOBS} all testprep
+        "
+    
+    - name: Check for missing dependencies
+      run: |
+        sudo -u postgres bash -c "
+          ninja -C build -t missingdeps
+        "
+    
+    - name: Run tests
+      run: |
+        sudo -u postgres bash -c "
+          ulimit -c unlimited
+          meson test $MTEST_ARGS --num-processes ${TEST_JOBS}
+        "
+    
+    - name: Upload test results on failure
+      if: failure()
+      uses: actions/upload-artifact@v4
+      with:
+        name: test-results
+        path: |
+          build/testrun/**/*.log
+          build/testrun/**/*.diffs
+          build/testrun/**/regress_log_*
+          build/meson-logs/*.txt
+        retention-days: 7
