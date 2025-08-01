@@ -91,7 +91,7 @@ jobs:
             -Dllvm=enabled \
             -Duuid=e2fs \
             -Dtap_tests=enabled \
-            build
+            build .
         "
     
     - name: Build
