@@ -69,7 +69,10 @@ jobs:
     
     - name: Create postgres user and setup directories
       run: |
-        sudo useradd -m postgres
+        # Create postgres user if it doesn't exist
+        if ! id postgres &>/dev/null; then
+          sudo useradd -m postgres
+        fi
         sudo chown -R postgres:postgres .
         sudo mkdir -p /tmp/ccache_dir
         sudo chown -R postgres:postgres /tmp/ccache_dir
