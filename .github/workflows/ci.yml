@@ -73,7 +73,8 @@ jobs:
         if ! id postgres &>/dev/null; then
           sudo useradd -m postgres
         fi
-        sudo chown -R postgres:postgres .
+        # Ensure postgres user has access to the workspace
+        sudo chown -R postgres:postgres $GITHUB_WORKSPACE
         sudo mkdir -p /tmp/ccache_dir
         sudo chown -R postgres:postgres /tmp/ccache_dir
         echo '* - memlock 134217728' | sudo tee /etc/security/limits.d/postgres.conf
