@@ -766,6 +766,7 @@ autovacuum_worker_slots = 16	# autovacuum worker slots to allocate
 #lock_timeout = 0				# in milliseconds, 0 is disabled
 #idle_in_transaction_session_timeout = 0	# in milliseconds, 0 is disabled
 #idle_session_timeout = 0			# in milliseconds, 0 is disabled
+#notify_latency_target = 0		# in milliseconds, 0 is disabled
 #bytea_output = 'hex'			# hex, escape
 #xmlbinary = 'base64'
 #xmloption = 'content'

@@ -10267,6 +10267,35 @@ COPY postgres_log FROM '/full/path/to/logfile.csv' WITH csv;
       </listitem>
      </varlistentry>
 
+     <varlistentry id="guc-notify-min-wakeup-delay" xreflabel="notify_latency_target">
+      <term><varname>notify_latency_target</varname> (<type>integer</type>)
+      <indexterm>
+       <primary><varname>notify_latency_target</varname> configuration parameter</primary>
+      </indexterm>
+      </term>
+      <listitem>
+       <para>
+        Sets the maximum acceptable additional latency for delivering
+        <command>LISTEN</command>/<command>NOTIFY</command>
+        notifications. During bursty periods, notifications that arrive
+        within this interval are coalesced and delivered together,
+        trading bounded extra latency for fewer wakeups and higher
+        throughput.
+       </para>
+
+       <para>
+        After a listening backend has been idle, the first
+        <command>NOTIFY</command> causes an immediately wakeup.
+        If additional notifications happen before
+        <varname>notify_latency_target</varname> has elapsed since the
+        start of that processing cycle, wakeup is deferred by one full
+        <varname>notify_latency_target</varname> interval from the point
+        of deferral. When that interval expires, the listening backend
+        wakes and catches up in a single wakeup.
+       </para>
+      </listitem>
+     </varlistentry>
+
      <varlistentry id="guc-bytea-output" xreflabel="bytea_output">
       <term><varname>bytea_output</varname> (<type>enum</type>)
       <indexterm>

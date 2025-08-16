@@ -1567,6 +1567,16 @@
   max => 'INT_MAX',
 },
 
+{ name => 'notify_latency_target', type => 'int', context => 'PGC_SUSET', group => 'CLIENT_CONN_OTHER',
+  short_desc => 'Latency target for waking listeners to process NOTIFY.',
+  long_desc => 'First notify after idle wakes immediately; arrivals within the interval defer the next wakeup by one full interval and are coalesced. 0 disables.',
+  flags => 'GUC_UNIT_MS',
+  variable => 'notify_latency_target',
+  boot_val => '0',
+  min => '0',
+  max => 'INT_MAX',
+},
+
 { name => 'wal_decode_buffer_size', type => 'int', context => 'PGC_POSTMASTER', group => 'WAL_RECOVERY',
   short_desc => 'Buffer size for reading ahead in the WAL during recovery.',
   long_desc => 'Maximum distance to read ahead in the WAL to prefetch referenced data blocks.',
