@@ -2924,6 +2924,17 @@ struct config_int ConfigureNamesInt[] =
 	},
 
 	{
+		{"notify_min_wakeup_delay", PGC_SUSET, CLIENT_CONN_OTHER,
+			gettext_noop("Minimum delay between NOTIFY wakeups."),
+			gettext_noop("If a listening session is awakened too soon after its last processing cycle, it defers work until this delay has elapsed. 0 disables."),
+			GUC_UNIT_MS
+		},
+		&notify_min_wakeup_delay,
+		0, 0, 1000,		/* 0 ms default (disabled), 0 min, 1s max */
+		NULL, NULL, NULL
+	},
+
+	{
 		{"wal_decode_buffer_size", PGC_POSTMASTER, WAL_RECOVERY,
 			gettext_noop("Buffer size for reading ahead in the WAL during recovery."),
 			gettext_noop("Maximum distance to read ahead in the WAL to prefetch referenced data blocks."),

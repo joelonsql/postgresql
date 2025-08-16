@@ -10260,6 +10260,30 @@ COPY postgres_log FROM '/full/path/to/logfile.csv' WITH csv;
       </listitem>
      </varlistentry>
 
+     <varlistentry id="guc-notify-min-wakeup-delay" xreflabel="notify_min_wakeup_delay">
+      <term><varname>notify_min_wakeup_delay</varname> (<type>integer</type>)
+      <indexterm>
+       <primary><varname>notify_min_wakeup_delay</varname> configuration parameter</primary>
+      </indexterm>
+      </term>
+      <listitem>
+       <para>
+        Sets a minimum delay between wakeups of sessions that are listening
+        for notifications via <command>LISTEN</command>/<command>NOTIFY</command>.
+        If a listening session is awakened too soon after its last processing
+        cycle, it defers processing and will re-awaken after this delay has
+        elapsed. If this value is specified without units, it is taken as
+        milliseconds. A value of zero (the default) disables the delay.
+       </para>
+
+       <para>
+        Larger delays can improve throughput under bursty notification loads
+        by coalescing multiple <command>NOTIFY</command> events into a single
+        wakeup, at the cost of additional per-notification latency.
+       </para>
+      </listitem>
+     </varlistentry>
+
      <varlistentry id="guc-bytea-output" xreflabel="bytea_output">
       <term><varname>bytea_output</varname> (<type>enum</type>)
       <indexterm>

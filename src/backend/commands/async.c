@@ -150,6 +150,7 @@
 #include "utils/ps_status.h"
 #include "utils/snapmgr.h"
 #include "utils/timestamp.h"
+#include "utils/timeout.h"
 
 
 /*
@@ -246,6 +247,9 @@ typedef struct QueueBackendStatus
 	Oid			dboid;			/* backend's database OID, or InvalidOid */
 	ProcNumber	nextListener;	/* id of next listener, or INVALID_PROC_NUMBER */
 	QueuePosition pos;			/* backend has read queue up to here */
+
+	/* Fields for listener wakeup throttling */
+	bool		wakeup_pending_flag;
 } QueueBackendStatus;
 
 /*
@@ -293,6 +297,9 @@ typedef struct AsyncQueueControl
 
 static AsyncQueueControl *asyncQueueControl;
 
+/* Timestamp for start of last processing cycle */
+static TimestampTz last_wakeup_start_time = 0;
+
 #define QUEUE_HEAD					(asyncQueueControl->head)
 #define QUEUE_TAIL					(asyncQueueControl->tail)
 #define QUEUE_STOP_PAGE				(asyncQueueControl->stopPage)
@@ -301,6 +308,9 @@ static AsyncQueueControl *asyncQueueControl;
 #define QUEUE_BACKEND_DBOID(i)		(asyncQueueControl->backend[i].dboid)
 #define QUEUE_NEXT_LISTENER(i)		(asyncQueueControl->backend[i].nextListener)
 #define QUEUE_BACKEND_POS(i)		(asyncQueueControl->backend[i].pos)
+#define QUEUE_BACKEND_WAKEUP_PENDING_FLAG(i) \
+	(asyncQueueControl->backend[i].wakeup_pending_flag)
+
 
 /*
  * The SLRU buffer area through which we access the notification queue
@@ -423,6 +433,7 @@ static bool tryAdvanceTail = false;
 
 /* GUC parameters */
 bool		Trace_notify = false;
+int			notify_min_wakeup_delay;
 
 /* For 8 KB pages this gives 8 GB of disk space */
 int			max_notify_queue_pages = 1048576;
@@ -527,6 +538,7 @@ AsyncShmemInit(void)
 			QUEUE_BACKEND_DBOID(i) = InvalidOid;
 			QUEUE_NEXT_LISTENER(i) = INVALID_PROC_NUMBER;
 			SET_QUEUE_POS(QUEUE_BACKEND_POS(i), 0, 0);
+			QUEUE_BACKEND_WAKEUP_PENDING_FLAG(i) = false;
 		}
 	}
 
@@ -1603,7 +1615,18 @@ SignalBackends(void)
 		QueuePosition pos;
 
 		Assert(pid != InvalidPid);
+
+		/*
+		 * If a wakeup is already pending for this listener, do nothing. The
+		 * pending signal guarantees it will wake up and process all messages
+		 * up to the current queue head, including the one we just wrote. This
+		 * coalesces multiple wakeups into one.
+		 */
+		if (QUEUE_BACKEND_WAKEUP_PENDING_FLAG(i))
+			continue;
+
 		pos = QUEUE_BACKEND_POS(i);
+
 		if (QUEUE_BACKEND_DBOID(i) == MyDatabaseId)
 		{
 			/*
@@ -1624,6 +1647,7 @@ SignalBackends(void)
 				continue;
 		}
 		/* OK, need to signal this one */
+		QUEUE_BACKEND_WAKEUP_PENDING_FLAG(i) = true;
 		pids[count] = pid;
 		procnos[count] = i;
 		count++;
@@ -1861,10 +1885,13 @@ asyncQueueReadAllNotifications(void)
 		AsyncQueueEntry align;
 	}			page_buffer;
 
-	/* Fetch current state */
+	last_wakeup_start_time = GetCurrentTimestamp();
+
+	/* Fetch current state and clear wakeup-pending flag */
 	LWLockAcquire(NotifyQueueLock, LW_SHARED);
 	/* Assert checks that we have a valid state entry */
 	Assert(MyProcPid == QUEUE_BACKEND_PID(MyProcNumber));
+	QUEUE_BACKEND_WAKEUP_PENDING_FLAG(MyProcNumber) = false;
 	pos = QUEUE_BACKEND_POS(MyProcNumber);
 	head = QUEUE_HEAD;
 	LWLockRelease(NotifyQueueLock);
@@ -2188,6 +2215,27 @@ ProcessIncomingNotify(bool flush)
 	/* Do nothing else if we aren't actively listening */
 	if (listenChannels == NIL)
 		return;
+
+	/*
+	 * Throttling check: if we were last active too recently, defer. This
+	 * check is safe without a lock because it's based on a backend-local
+	 * timestamp.
+	 */
+	if (notify_min_wakeup_delay > 0 &&
+		!TimestampDifferenceExceeds(last_wakeup_start_time,
+									GetCurrentTimestamp(),
+									notify_min_wakeup_delay))
+	{
+		/*
+		 * Too soon. We leave wakeup_pending_flag untouched (it must be true,
+		 * or we wouldn't have been signaled) to tell senders we are
+		 * intentionally delaying. Arm a timer to re-awaken and process the
+		 * backlog later.
+		 */
+		enable_timeout_after(NOTIFY_DEFERRED_WAKEUP_TIMEOUT,
+							 notify_min_wakeup_delay);
+		return;
+	}
 
 	if (Trace_notify)
 		elog(DEBUG1, "ProcessIncomingNotify");
