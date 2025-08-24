@@ -22,6 +22,7 @@
 #include "postgres_fe.h"
 
 #include <ctype.h>
+#include <errno.h>
 #include <fcntl.h>
 #include <unistd.h>
 #include <sys/stat.h>
@@ -812,6 +813,16 @@ RestoreArchive(Archive *AHX)
 		dumpTimestamp(AH, "Completed on", time(NULL));
 
 	ahprintf(AH, "--\n-- PostgreSQL database dump complete\n--\n\n");
+
+	/*
+	 * If we're still in unrestricted mode from split files,
+	 * re-enable restriction before the final unrestrict.
+	 */
+	if (AH->splitModeUnrestricted && ropt->restrict_key)
+	{
+		ahprintf(AH, "\\restrict %s\n", ropt->restrict_key);
+		AH->splitModeUnrestricted = false;
+	}
 
 	/*
 	 * If generating plain-text output, exit restricted mode at the very end
@@ -2423,6 +2434,8 @@ _allocAH(const char *FileSpec, const ArchiveFormat fmt,
 	AH->currTablespace = NULL;	/* ditto */
 	AH->currTableAm = NULL;		/* ditto */
 
+	AH->splitModeUnrestricted = false;	/* not in unrestricted mode for splits */
+
 	AH->toc = (TocEntry *) pg_malloc0(sizeof(TocEntry));
 
 	AH->toc->next = AH->toc;
@@ -3851,6 +3864,77 @@ _getObjectDescription(PQExpBuffer buf, const TocEntry *te)
 }
 
 /*
+ * Sanitize a name for use in a POSIX-compliant filename.
+ * Converts to lowercase and replaces non-alphanumeric characters with underscores.
+ * Returns a newly allocated string that must be freed by the caller.
+ */
+static char *
+sanitize_name_for_posix(const char *name)
+{
+	char *result;
+	size_t len;
+	size_t i;
+
+	if (!name)
+		return pg_strdup("unnamed");
+
+	len = strlen(name);
+	result = pg_malloc(len + 1);
+
+	for (i = 0; i < len; i++)
+	{
+		char ch = name[i];
+		if ((ch >= 'A' && ch <= 'Z'))
+			result[i] = ch + ('a' - 'A');  /* Convert to lowercase */
+		else if ((ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9'))
+			result[i] = ch;  /* Keep as is */
+		else
+			result[i] = '_';  /* Replace special chars with underscore */
+	}
+	result[len] = '\0';
+
+	/* Truncate to PostgreSQL identifier length limit */
+	if (len > NAMEDATALEN - 1)
+		result[NAMEDATALEN - 1] = '\0';
+
+	return result;
+}
+
+/*
+ * Get SHA hash for an object using pg_identify_object_as_address.
+ * Returns first 128 bits (32 hex chars) of the SHA256 hash as a newly allocated string.
+ * Uses 128 bits to ensure virtual collision immunity even with 2^32 objects.
+ */
+static char *
+get_object_sha_hash(ArchiveHandle *AH, Oid classoid, Oid objoid, int objsubid)
+{
+	PQExpBuffer query;
+	PGresult   *res;
+	char	   *hash;
+
+	/* We require a database connection to generate unique hashes */
+	if (!AH->connection)
+	{
+		pg_fatal("--split option requires a database connection to generate unique object identifiers");
+	}
+
+	query = createPQExpBuffer();
+	appendPQExpBuffer(query,
+		"SELECT substring(encode(sha256("
+		"pg_catalog.pg_identify_object_as_address(%u, %u, %d)::text::bytea"
+		"), 'hex'), 1, 32)",
+		classoid, objoid, objsubid);
+
+	res = ExecuteSqlQuery(&AH->public, query->data, PGRES_TUPLES_OK);
+	hash = pg_strdup(PQgetvalue(res, 0, 0));
+
+	PQclear(res);
+	destroyPQExpBuffer(query);
+
+	return hash;
+}
+
+/*
  * Emit the SQL commands to create the object represented by a TOC entry
  *
  * This now also includes issuing an ALTER OWNER command to restore the
@@ -3861,6 +3945,7 @@ static void
 _printTocEntry(ArchiveHandle *AH, TocEntry *te, const char *pfx)
 {
 	RestoreOptions *ropt = AH->public.ropt;
+	bool		is_split_object;
 
 	/*
 	 * Select owner, schema, tablespace and default AM as necessary. The
@@ -3873,6 +3958,130 @@ _printTocEntry(ArchiveHandle *AH, TocEntry *te, const char *pfx)
 	_selectTablespace(AH, te->tablespace);
 	if (te->relkind != RELKIND_PARTITIONED_TABLE)
 		_selectTableAccessMethod(AH, te->tableam);
+
+	/*
+	 * Determine if this object should be split into a separate file.
+	 * Objects are split when all conditions are met:
+	 * - The --split option is enabled
+	 * - The object has a catalog OID
+	 * - The object belongs to a namespace
+	 */
+	is_split_object = ropt->split_files && te->catalogId.oid && te->namespace;
+
+	/*
+	 * If we're about to output a non-split object but we're in unrestricted
+	 * mode from previous split files, re-enable restriction first.
+	 */
+	if (AH->splitModeUnrestricted && !is_split_object && ropt->restrict_key)
+	{
+		ahprintf(AH, "\\restrict %s\n", ropt->restrict_key);
+		AH->splitModeUnrestricted = false;
+	}
+
+	/*
+	 * Split object into separate file if it qualifies
+	 */
+	if (is_split_object)
+	{
+		char		splitFilename[MAXPGPATH];
+		char		*sanitized_tag;
+		char		*sanitized_schema;
+		char		*tag_hash;
+		char		*tag;
+		char		*tagArgPos;
+		char		*desc;
+		mode_t		omode;
+		CompressFileHandle *CFH;
+
+		/*
+		 * Strip eventual argument part from "tag" (e.g. the name of functions)
+		 * Example: "foobar(_arg1 int, _arg2 int)" --> "foobar"
+		 */
+		tagArgPos = strstr(te->tag, "(");
+		if (tagArgPos == NULL)
+			tag = pg_strdup(te->tag);
+		else
+			tag = pnstrdup(te->tag, tagArgPos - te->tag);
+
+		/* Get sanitized names */
+		sanitized_tag = sanitize_name_for_posix(tag);
+		sanitized_schema = sanitize_name_for_posix(te->namespace);
+
+		/* Get SHA hash for unique object identification
+		 * The hash already includes the schema name from pg_identify_object_as_address */
+		tag_hash = get_object_sha_hash(AH,
+			te->catalogId.tableoid, te->catalogId.oid, 0);
+
+		desc = pg_strdup(te->desc);
+		/*
+		 * Replace " " with "_" in "desc"
+		 * Example: "FK CONSTRAINT" --> "FK_CONSTRAINT"
+		 */
+		for (char *p = desc; *p; p++)
+		{
+			if (*p == ' ')
+				*p = '_';
+		}
+
+		/*
+		 * Build path consisting of:
+		 * [filename]-split/[sanitized-schema]/[desc]/[sanitized-tag]-[tag-hash].sql
+		 * Create the directories
+		 *
+		 * Example: dumpfile-split/public/TABLE/foo-e5f6g7h8.sql
+		 */
+		omode = S_IRWXU | S_IRWXG | S_IRWXO;
+		snprintf(splitFilename, MAXPGPATH, "%s-split", ropt->filename);
+		if (mkdir(splitFilename, omode) < 0 && errno != EEXIST)
+			pg_fatal("could not create directory \"%s\": %m", splitFilename);
+		snprintf(splitFilename, MAXPGPATH, "%s-split/%s",
+			ropt->filename, sanitized_schema);
+		if (mkdir(splitFilename, omode) < 0 && errno != EEXIST)
+			pg_fatal("could not create directory \"%s\": %m", splitFilename);
+		snprintf(splitFilename, MAXPGPATH, "%s-split/%s/%s",
+			ropt->filename, sanitized_schema, desc);
+		if (mkdir(splitFilename, omode) < 0 && errno != EEXIST)
+			pg_fatal("could not create directory \"%s\": %m", splitFilename);
+
+		snprintf(splitFilename, MAXPGPATH, "%s-split/%s/%s/%s-%s.sql",
+			ropt->filename, sanitized_schema, desc,
+			sanitized_tag, tag_hash);
+
+		/*
+		 * Add \ir <split file name> to main dump file.
+		 * If restrict mode is enabled and we're not already unrestricted,
+		 * emit \unrestrict and track the state.
+		 */
+		if (ropt->restrict_key && !AH->splitModeUnrestricted)
+		{
+			ahprintf(AH, "\\unrestrict %s\n", ropt->restrict_key);
+			AH->splitModeUnrestricted = true;
+		}
+
+		ahprintf(AH, "\\ir %s\n", splitFilename);
+
+		/*
+		 * Close the normal file handle to which non-splittable
+		 * objects are written.
+		 *
+		 * Open split file handle for splitFilename.
+		 *
+		 * In the end of the function,
+		 * the split file handle will be closed, and
+		 * the normal file handle will be reopened again.
+		 */
+		EndCompressFileHandle(AH->OF);
+		CFH = InitCompressFileHandle(AH->compression_spec);
+		if (!CFH || !CFH->open_func(splitFilename, -1, PG_BINARY_W, CFH))
+			pg_fatal("could not open output file \"%s\": %m", splitFilename);
+		AH->OF = CFH;
+
+		pg_free(tag);
+		pg_free(desc);
+		pg_free(sanitized_tag);
+		pg_free(sanitized_schema);
+		pg_free(tag_hash);
+	}
 
 	/* Emit header comment for item */
 	if (!AH->noTocComments)
@@ -4076,6 +4285,21 @@ _printTocEntry(ArchiveHandle *AH, TocEntry *te, const char *pfx)
 	{
 		free(AH->currUser);
 		AH->currUser = NULL;
+	}
+
+	/*
+	 * If we are using the --split option,
+	 * close the split file handle, and reopen the normal file handle.
+	 */
+	if (ropt->split_files && te->catalogId.oid && te->namespace)
+	{
+		CompressFileHandle *CFH;
+
+		EndCompressFileHandle(AH->OF);
+		CFH = InitCompressFileHandle(AH->compression_spec);
+		if (!CFH || !CFH->open_func(ropt->filename, -1, PG_BINARY_A, CFH))
+			pg_fatal("could not reopen output file \"%s\": %m", ropt->filename);
+		AH->OF = CFH;
 	}
 }
 

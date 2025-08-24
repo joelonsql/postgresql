@@ -165,6 +165,7 @@ typedef struct _restoreOptions
 	bool		dumpStatistics;
 
 	char	   *restrict_key;
+	int			split_files;	/* --split option, split objects into separate files */
 } RestoreOptions;
 
 typedef struct _dumpOptions

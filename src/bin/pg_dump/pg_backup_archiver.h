@@ -339,6 +339,9 @@ struct _archiveHandle
 	RestorePass restorePass;	/* used only during parallel restore */
 	struct _tocEntry *currentTE;
 	struct _tocEntry *lastErrorTE;
+
+	/* tracks if we're in unrestricted mode for split files */
+	bool		splitModeUnrestricted;
 };
 
 
