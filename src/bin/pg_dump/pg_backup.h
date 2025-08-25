@@ -43,6 +43,7 @@ typedef enum _archiveFormat
 	archTar = 3,
 	archNull = 4,
 	archDirectory = 5,
+	archSplit = 6,
 } ArchiveFormat;
 
 typedef enum _archiveMode
@@ -165,7 +166,6 @@ typedef struct _restoreOptions
 	bool		dumpStatistics;
 
 	char	   *restrict_key;
-	int			split_files;	/* --split option, split objects into separate files */
 } RestoreOptions;
 
 typedef struct _dumpOptions

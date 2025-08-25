@@ -2496,6 +2496,10 @@ _allocAH(const char *FileSpec, const ArchiveFormat fmt,
 			InitArchiveFmt_Tar(AH);
 			break;
 
+		case archSplit:
+			InitArchiveFmt_Split(AH);
+			break;
+
 		default:
 			pg_fatal("unrecognized file format \"%d\"", AH->format);
 	}
@@ -3962,11 +3966,11 @@ _printTocEntry(ArchiveHandle *AH, TocEntry *te, const char *pfx)
 	/*
 	 * Determine if this object should be split into a separate file.
 	 * Objects are split when all conditions are met:
-	 * - The --split option is enabled
+	 * - The archive format is archSplit
 	 * - The object has a catalog OID
 	 * - The object belongs to a namespace
 	 */
-	is_split_object = ropt->split_files && te->catalogId.oid && te->namespace;
+	is_split_object = (AH->format == archSplit) && te->catalogId.oid && te->namespace;
 
 	/*
 	 * If we're about to output a non-split object but we're in unrestricted
@@ -4288,10 +4292,10 @@ _printTocEntry(ArchiveHandle *AH, TocEntry *te, const char *pfx)
 	}
 
 	/*
-	 * If we are using the --split option,
+	 * If we are using the split format,
 	 * close the split file handle, and reopen the normal file handle.
 	 */
-	if (ropt->split_files && te->catalogId.oid && te->namespace)
+	if ((AH->format == archSplit) && te->catalogId.oid && te->namespace)
 	{
 		CompressFileHandle *CFH;
 

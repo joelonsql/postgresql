@@ -453,7 +453,6 @@ main(int argc, char **argv)
 	bool		no_data = false;
 	bool		no_schema = false;
 	bool		no_statistics = false;
-	static int	split_files = 0;
 
 	static DumpOptions dopt;
 
@@ -539,7 +538,6 @@ main(int argc, char **argv)
 		{"exclude-extension", required_argument, NULL, 17},
 		{"sequence-data", no_argument, &dopt.sequence_data, 1},
 		{"restrict-key", required_argument, NULL, 25},
-		{"split", no_argument, &split_files, 1},
 
 		{NULL, 0, NULL, 0}
 	};
@@ -895,7 +893,7 @@ main(int argc, char **argv)
 	archiveFormat = parseArchiveFormat(format, &archiveMode);
 
 	/* archiveFormat specific setup */
-	if (archiveFormat == archNull)
+	if (archiveFormat == archNull || archiveFormat == archSplit)
 	{
 		plainText = 1;
 
@@ -910,7 +908,7 @@ main(int argc, char **argv)
 			pg_fatal("invalid restrict key");
 	}
 	else if (dopt.restrict_key)
-		pg_fatal("option --restrict-key can only be used with --format=plain");
+		pg_fatal("option --restrict-key can only be used with plain text formats");
 
 	/*
 	 * Custom and directory formats are compressed by default with gzip when
@@ -1251,7 +1249,6 @@ main(int argc, char **argv)
 	ropt->sequence_data = dopt.sequence_data;
 	ropt->binary_upgrade = dopt.binary_upgrade;
 	ropt->restrict_key = dopt.restrict_key ? pg_strdup(dopt.restrict_key) : NULL;
-	ropt->split_files = split_files;
 
 	ropt->compression_spec = compression_spec;
 
@@ -1295,8 +1292,8 @@ help(const char *progname)
 
 	printf(_("\nGeneral options:\n"));
 	printf(_("  -f, --file=FILENAME          output file or directory name\n"));
-	printf(_("  -F, --format=c|d|t|p         output file format (custom, directory, tar,\n"
-			 "                               plain text (default))\n"));
+	printf(_("  -F, --format=c|d|t|s|p       output file format (custom, directory, tar,\n"
+			 "                               split, plain text (default))\n"));
 	printf(_("  -j, --jobs=NUM               use this many parallel jobs to dump\n"));
 	printf(_("  -v, --verbose                verbose mode\n"));
 	printf(_("  -V, --version                output version information, then exit\n"));
@@ -1369,7 +1366,6 @@ help(const char *progname)
 	printf(_("  --sequence-data              include sequence data in dump\n"));
 	printf(_("  --serializable-deferrable    wait until the dump can run without anomalies\n"));
 	printf(_("  --snapshot=SNAPSHOT          use given snapshot for the dump\n"));
-	printf(_("  --split                      split objects into separate plain text files\n"));
 	printf(_("  --statistics                 dump the statistics\n"));
 	printf(_("  --statistics-only            dump only the statistics, not schema or data\n"));
 	printf(_("  --strict-names               require table and/or schema include patterns to\n"
@@ -1619,6 +1615,10 @@ parseArchiveFormat(const char *format, ArchiveMode *mode)
 		archiveFormat = archNull;
 	else if (pg_strcasecmp(format, "plain") == 0)
 		archiveFormat = archNull;
+	else if (pg_strcasecmp(format, "s") == 0)
+		archiveFormat = archSplit;
+	else if (pg_strcasecmp(format, "split") == 0)
+		archiveFormat = archSplit;
 	else if (pg_strcasecmp(format, "t") == 0)
 		archiveFormat = archTar;
 	else if (pg_strcasecmp(format, "tar") == 0)
