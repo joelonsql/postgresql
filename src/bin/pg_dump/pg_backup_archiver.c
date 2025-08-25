@@ -268,7 +268,7 @@ CloseArchive(Archive *AHX)
 
 	/* Close the output */
 	errno = 0;
-	if (!EndCompressFileHandle(AH->OF))
+	if (AH->OF && !EndCompressFileHandle(AH->OF))
 		pg_fatal("could not close output file: %m");
 }
 
@@ -458,7 +458,7 @@ RestoreArchive(Archive *AHX)
 	 * Setup the output file if necessary.
 	 */
 	sav = SaveOutput(AH);
-	if (ropt->filename || ropt->compression_spec.algorithm != PG_COMPRESSION_NONE)
+	if ((ropt->filename || ropt->compression_spec.algorithm != PG_COMPRESSION_NONE) && AH->format != archSplit)
 		SetOutput(AH, ropt->filename, ropt->compression_spec);
 
 	ahprintf(AH, "--\n-- PostgreSQL database dump\n--\n\n");
@@ -3988,6 +3988,7 @@ _printTocEntry(ArchiveHandle *AH, TocEntry *te, const char *pfx)
 	if (is_split_object)
 	{
 		char		splitFilename[MAXPGPATH];
+		char		relativePath[MAXPGPATH];
 		char		*sanitized_tag;
 		char		*sanitized_schema;
 		char		*tag_hash;
@@ -3996,6 +3997,10 @@ _printTocEntry(ArchiveHandle *AH, TocEntry *te, const char *pfx)
 		char		*desc;
 		mode_t		omode;
 		CompressFileHandle *CFH;
+		const char	*baseDir;
+
+		/* Get the base directory from fSpec (the directory name) */
+		baseDir = AH->fSpec;
 
 		/*
 		 * Strip eventual argument part from "tag" (e.g. the name of functions)
@@ -4029,30 +4034,36 @@ _printTocEntry(ArchiveHandle *AH, TocEntry *te, const char *pfx)
 
 		/*
 		 * Build path consisting of:
-		 * [filename]-split/[sanitized-schema]/[desc]/[sanitized-tag]-[tag-hash].sql
+		 * [baseDir]/[sanitized-schema]/[desc]/[sanitized-tag]-[tag-hash].sql
 		 * Create the directories
 		 *
-		 * Example: dumpfile-split/public/TABLE/foo-e5f6g7h8.sql
+		 * Example: dumpdir/public/TABLE/foo-e5f6g7h8.sql
 		 */
 		omode = S_IRWXU | S_IRWXG | S_IRWXO;
-		snprintf(splitFilename, MAXPGPATH, "%s-split", ropt->filename);
+		
+		/* Create schema directory */
+		snprintf(splitFilename, MAXPGPATH, "%s/%s", baseDir, sanitized_schema);
 		if (mkdir(splitFilename, omode) < 0 && errno != EEXIST)
 			pg_fatal("could not create directory \"%s\": %m", splitFilename);
-		snprintf(splitFilename, MAXPGPATH, "%s-split/%s",
-			ropt->filename, sanitized_schema);
-		if (mkdir(splitFilename, omode) < 0 && errno != EEXIST)
-			pg_fatal("could not create directory \"%s\": %m", splitFilename);
-		snprintf(splitFilename, MAXPGPATH, "%s-split/%s/%s",
-			ropt->filename, sanitized_schema, desc);
+		
+		/* Create object type directory */
+		snprintf(splitFilename, MAXPGPATH, "%s/%s/%s",
+			baseDir, sanitized_schema, desc);
 		if (mkdir(splitFilename, omode) < 0 && errno != EEXIST)
 			pg_fatal("could not create directory \"%s\": %m", splitFilename);
 
-		snprintf(splitFilename, MAXPGPATH, "%s-split/%s/%s/%s-%s.sql",
-			ropt->filename, sanitized_schema, desc,
+		/* Build full path for the split file */
+		snprintf(splitFilename, MAXPGPATH, "%s/%s/%s/%s-%s.sql",
+			baseDir, sanitized_schema, desc,
+			sanitized_tag, tag_hash);
+
+		/* Build relative path for \ir command (relative to index.sql location) */
+		snprintf(relativePath, MAXPGPATH, "%s/%s/%s-%s.sql",
+			sanitized_schema, desc,
 			sanitized_tag, tag_hash);
 
 		/*
-		 * Add \ir <split file name> to main dump file.
+		 * Add \ir <relative path> to index file.
 		 * If restrict mode is enabled and we're not already unrestricted,
 		 * emit \unrestrict and track the state.
 		 */
@@ -4062,7 +4073,7 @@ _printTocEntry(ArchiveHandle *AH, TocEntry *te, const char *pfx)
 			AH->splitModeUnrestricted = true;
 		}
 
-		ahprintf(AH, "\\ir %s\n", splitFilename);
+		ahprintf(AH, "\\ir %s\n", relativePath);
 
 		/*
 		 * Close the normal file handle to which non-splittable
@@ -4293,16 +4304,21 @@ _printTocEntry(ArchiveHandle *AH, TocEntry *te, const char *pfx)
 
 	/*
 	 * If we are using the split format,
-	 * close the split file handle, and reopen the normal file handle.
+	 * close the split file handle, and reopen the index file handle.
 	 */
 	if ((AH->format == archSplit) && te->catalogId.oid && te->namespace)
 	{
 		CompressFileHandle *CFH;
+		char		indexPath[MAXPGPATH];
 
 		EndCompressFileHandle(AH->OF);
+		
+		/* Rebuild the path to index.sql */
+		snprintf(indexPath, MAXPGPATH, "%s/index.sql", AH->fSpec);
+		
 		CFH = InitCompressFileHandle(AH->compression_spec);
-		if (!CFH || !CFH->open_func(ropt->filename, -1, PG_BINARY_A, CFH))
-			pg_fatal("could not reopen output file \"%s\": %m", ropt->filename);
+		if (!CFH || !CFH->open_func(indexPath, -1, PG_BINARY_A, CFH))
+			pg_fatal("could not reopen index file \"%s\": %m", indexPath);
 		AH->OF = CFH;
 	}
 }
