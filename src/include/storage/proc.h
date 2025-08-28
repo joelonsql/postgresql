@@ -301,6 +301,9 @@ struct PGPROC
 
 	uint32		wait_event_info;	/* proc's wait information */
 
+	/* Support for async notifications */
+	XLogRecPtr	notifyCommitLsn;	/* LSN of notification data for current xact */
+
 	/* Support for group transaction status update. */
 	bool		clogGroupMember;	/* true, if member of clog group */
 	pg_atomic_uint32 clogGroupNext; /* next clog group member */

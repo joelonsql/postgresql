@@ -13,6 +13,7 @@
 
 #include <unistd.h>
 
+#include "access/async_xlog.h"
 #include "access/rmgr.h"
 #include "access/xact.h"
 #include "access/xlog_internal.h"
