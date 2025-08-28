@@ -264,6 +264,7 @@ extern PGDLLIMPORT bool log_btree_build_stats;
 extern PGDLLIMPORT char *event_source;
 
 extern PGDLLIMPORT bool check_function_bodies;
+extern PGDLLIMPORT bool assert_single_row;
 extern PGDLLIMPORT bool current_role_is_superuser;
 
 extern PGDLLIMPORT bool AllowAlterSystem;

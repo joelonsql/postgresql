@@ -526,6 +526,7 @@ char	   *event_source;
 
 bool		row_security;
 bool		check_function_bodies = true;
+bool		assert_single_row = false;
 
 /*
  * This GUC exists solely for backward compatibility, check its definition for
@@ -1699,6 +1700,16 @@ struct config_bool ConfigureNamesBool[] =
 		},
 		&check_function_bodies,
 		true,
+		NULL, NULL, NULL
+	},
+	{
+		{"assert_single_row", PGC_USERSET, CLIENT_CONN_STATEMENT,
+			gettext_noop("Assert that SQL function statements return exactly one row."),
+			gettext_noop("When enabled in a SQL function via SET, "
+						 "each statement that produces a result must return exactly one row.")
+		},
+		&assert_single_row,
+		false,
 		NULL, NULL, NULL
 	},
 	{

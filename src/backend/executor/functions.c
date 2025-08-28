@@ -32,6 +32,7 @@
 #include "utils/builtins.h"
 #include "utils/datum.h"
 #include "utils/funccache.h"
+#include "utils/guc.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
 #include "utils/plancache.h"
@@ -47,6 +48,7 @@ typedef struct
 	DestReceiver pub;			/* publicly-known function pointers */
 	Tuplestorestate *tstore;	/* where to put result tuples, or NULL */
 	JunkFilter *filter;			/* filter to convert tuple type */
+	uint64		row_count;		/* number of rows received */
 } DR_sqlfunction;
 
 /*
@@ -1429,6 +1431,39 @@ postquel_getnext(execution_state *es, SQLFunctionCachePtr fcache)
 		 * command must be complete.
 		 */
 		result = (count == 0 || es->qd->estate->es_processed == 0);
+
+		/*
+		 * Check for single row assertion if enabled and this statement
+		 * sets the function's result.
+		 */
+		if (assert_single_row && es->setsResult && !es->lazyEval)
+		{
+			uint64 processed;
+
+			/* For SELECT, get row count from DestReceiver; for DML, from es_processed */
+			if (es->qd->operation == CMD_SELECT)
+			{
+				DR_sqlfunction *receiver = (DR_sqlfunction *) es->qd->dest;
+				processed = receiver->row_count;
+			}
+			else
+			{
+				processed = es->qd->estate->es_processed;
+			}
+
+			if (processed == 0)
+				ereport(ERROR,
+						(errcode(ERRCODE_NO_DATA_FOUND),
+						 errmsg("query returned no rows"),
+						 errdetail("SQL function with assert_single_row requires exactly one row, but statement returned %lu rows.",
+								   (unsigned long) processed)));
+			else if (processed > 1)
+				ereport(ERROR,
+						(errcode(ERRCODE_TOO_MANY_ROWS),
+						 errmsg("query returned more than one row"),
+						 errdetail("SQL function with assert_single_row requires exactly one row, but statement returned %lu rows.",
+								   (unsigned long) processed)));
+		}
 	}
 
 	MemoryContextSwitchTo(oldcontext);
@@ -1453,6 +1488,40 @@ postquel_end(execution_state *es, SQLFunctionCachePtr fcache)
 	{
 		ExecutorFinish(es->qd);
 		ExecutorEnd(es->qd);
+	}
+
+	/*
+	 * Enforce single-row assertion for lazy-eval statements that set the
+	 * function's result. For non-lazy paths this is handled in
+	 * postquel_getnext(); for lazy-eval we only know the total rowcount after
+	 * ExecutorFinish has drained the plan.
+	 */
+	if (assert_single_row && es->setsResult && es->lazyEval)
+	{
+		uint64		processed;
+
+		if (es->qd->operation == CMD_SELECT)
+		{
+			DR_sqlfunction *receiver = (DR_sqlfunction *) es->qd->dest;
+			processed = receiver->row_count;
+		}
+		else
+		{
+			processed = es->qd->estate->es_processed;
+		}
+
+		if (processed == 0)
+			ereport(ERROR,
+					(errcode(ERRCODE_NO_DATA_FOUND),
+					 errmsg("query returned no rows"),
+					 errdetail("SQL function with assert_single_row requires exactly one row, but statement returned %lu rows.",
+						   (unsigned long) processed)));
+		else if (processed > 1)
+			ereport(ERROR,
+					(errcode(ERRCODE_TOO_MANY_ROWS),
+					 errmsg("query returned more than one row"),
+					 errdetail("SQL function with assert_single_row requires exactly one row, but statement returned %lu rows.",
+						   (unsigned long) processed)));
 	}
 
 	es->qd->dest->rDestroy(es->qd->dest);
@@ -2625,6 +2694,7 @@ CreateSQLFunctionDestReceiver(void)
 	self->pub.mydest = DestSQLFunction;
 
 	/* private fields will be set by postquel_start */
+	self->row_count = 0;
 
 	return (DestReceiver *) self;
 }
@@ -2645,6 +2715,9 @@ static bool
 sqlfunction_receive(TupleTableSlot *slot, DestReceiver *self)
 {
 	DR_sqlfunction *myState = (DR_sqlfunction *) self;
+
+	/* Count the row */
+	myState->row_count++;
 
 	if (myState->tstore)
 	{
