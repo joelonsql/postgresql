@@ -1336,6 +1336,9 @@ PrintTOCSummary(Archive *AHX)
 		case archDirectory:
 			fmtName = "DIRECTORY";
 			break;
+		case archSplit:
+			fmtName = "SPLIT";
+			break;
 		case archTar:
 			fmtName = "TAR";
 			break;
@@ -2479,6 +2482,10 @@ _allocAH(const char *FileSpec, const ArchiveFormat fmt,
 			InitArchiveFmt_Directory(AH);
 			break;
 
+		case archSplit:
+			InitArchiveFmt_Split(AH);
+			break;
+
 		case archTar:
 			InitArchiveFmt_Tar(AH);
 			break;
@@ -2672,6 +2679,11 @@ WriteToc(ArchiveHandle *AH)
 
 			if (fseeko(AH->FH, te->defnLen, SEEK_CUR) != 0)
 				pg_fatal("error during file seek: %m");
+		}
+		else if (AH->format == archSplit)
+		{
+			/* For split format, don't write defn to TOC - it goes to individual files */
+			WriteStr(AH, "");
 		}
 		else if (te->defnDumper)
 		{

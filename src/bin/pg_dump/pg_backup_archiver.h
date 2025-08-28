@@ -462,6 +462,7 @@ extern void EndRestoreLOs(ArchiveHandle *AH);
 extern void InitArchiveFmt_Custom(ArchiveHandle *AH);
 extern void InitArchiveFmt_Null(ArchiveHandle *AH);
 extern void InitArchiveFmt_Directory(ArchiveHandle *AH);
+extern void InitArchiveFmt_Split(ArchiveHandle *AH);
 extern void InitArchiveFmt_Tar(ArchiveHandle *AH);
 
 extern bool isValidTarHeader(char *header);
