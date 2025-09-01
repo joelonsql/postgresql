@@ -13185,6 +13185,21 @@ dumpProcLang(Archive *fout, const ProcLangInfo *plang)
 	if (!dopt->dumpSchema)
 		return;
 
+	/* DEBUG: Print plang (ProcLangInfo) fields */
+/*
+	fprintf(stderr, "DEBUG plang (ProcLangInfo): objType=%d, catId.tableoid=%u, catId.oid=%u, dumpId=%d, name='%s', "
+			"namespace=%p, dump=%u, dump_contains=%u, components=%u, ext_member=%s, depends_on_ext=%s, "
+			"dependencies=%p, nDeps=%d, allocDeps=%d, lanpltrusted=%s, lanplcallfoid=%u, laninline=%u, "
+			"lanvalidator=%u, lanowner='%s'\n",
+			plang->dobj.objType, plang->dobj.catId.tableoid, plang->dobj.catId.oid,
+			plang->dobj.dumpId, plang->dobj.name ? plang->dobj.name : "(null)",
+			(void*)plang->dobj.namespace, plang->dobj.dump, plang->dobj.dump_contains,
+			plang->dobj.components, plang->dobj.ext_member ? "true" : "false",
+			plang->dobj.depends_on_ext ? "true" : "false", (void*)plang->dobj.dependencies,
+			plang->dobj.nDeps, plang->dobj.allocDeps, plang->lanpltrusted ? "true" : "false",
+			plang->lanplcallfoid, plang->laninline, plang->lanvalidator,
+			plang->lanowner ? plang->lanowner : "(null)");
+*/
 	/*
 	 * Try to find the support function(s).  It is not an error if we don't
 	 * find them --- if the functions are in the pg_catalog schema, as is
@@ -13197,11 +13212,65 @@ dumpProcLang(Archive *fout, const ProcLangInfo *plang)
 	if (funcInfo != NULL && !funcInfo->dobj.dump)
 		funcInfo = NULL;		/* treat not-dumped same as not-found */
 
+	/* DEBUG: Additional info about why funcInfo might be NULL */
+/*
+	fprintf(stderr, "DEBUG: Looking for function with OID %u (lanplcallfoid)\n", plang->lanplcallfoid);
+	if (funcInfo == NULL)
+	{
+		fprintf(stderr, "DEBUG: Function OID %u not found in loaded functions - likely pg_catalog function excluded by getFuncs()\n", plang->lanplcallfoid);
+	}
+*/
+	/* DEBUG: Print funcInfo fields */
+/*
+	if (funcInfo != NULL)
+	{
+		fprintf(stderr, "DEBUG funcInfo: objType=%d, catId.tableoid=%u, catId.oid=%u, dumpId=%d, name='%s', "
+				"namespace=%p, dump=%u, dump_contains=%u, components=%u, ext_member=%s, depends_on_ext=%s, "
+				"dependencies=%p, nDeps=%d, allocDeps=%d, rolname='%s', lang=%u, nargs=%d, argtypes=%p, "
+				"prorettype=%u, postponed_def=%s\n",
+				funcInfo->dobj.objType, funcInfo->dobj.catId.tableoid, funcInfo->dobj.catId.oid,
+				funcInfo->dobj.dumpId, funcInfo->dobj.name ? funcInfo->dobj.name : "(null)",
+				(void*)funcInfo->dobj.namespace, funcInfo->dobj.dump, funcInfo->dobj.dump_contains,
+				funcInfo->dobj.components, funcInfo->dobj.ext_member ? "true" : "false",
+				funcInfo->dobj.depends_on_ext ? "true" : "false", (void*)funcInfo->dobj.dependencies,
+				funcInfo->dobj.nDeps, funcInfo->dobj.allocDeps,
+				funcInfo->rolname ? funcInfo->rolname : "(null)", funcInfo->lang, funcInfo->nargs,
+				(void*)funcInfo->argtypes, funcInfo->prorettype, funcInfo->postponed_def ? "true" : "false");
+	}
+	else
+	{
+		fprintf(stderr, "DEBUG funcInfo: NULL\n");
+	}
+*/
+
 	if (OidIsValid(plang->laninline))
 	{
 		inlineInfo = findFuncByOid(plang->laninline);
 		if (inlineInfo != NULL && !inlineInfo->dobj.dump)
 			inlineInfo = NULL;
+
+		/* DEBUG: Print inlineInfo fields */
+/*
+		if (inlineInfo != NULL)
+		{
+			fprintf(stderr, "DEBUG inlineInfo: objType=%d, catId.tableoid=%u, catId.oid=%u, dumpId=%d, name='%s', "
+					"namespace=%p, dump=%u, dump_contains=%u, components=%u, ext_member=%s, depends_on_ext=%s, "
+					"dependencies=%p, nDeps=%d, allocDeps=%d, rolname='%s', lang=%u, nargs=%d, argtypes=%p, "
+					"prorettype=%u, postponed_def=%s\n",
+					inlineInfo->dobj.objType, inlineInfo->dobj.catId.tableoid, inlineInfo->dobj.catId.oid,
+					inlineInfo->dobj.dumpId, inlineInfo->dobj.name ? inlineInfo->dobj.name : "(null)",
+					(void*)inlineInfo->dobj.namespace, inlineInfo->dobj.dump, inlineInfo->dobj.dump_contains,
+					inlineInfo->dobj.components, inlineInfo->dobj.ext_member ? "true" : "false",
+					inlineInfo->dobj.depends_on_ext ? "true" : "false", (void*)inlineInfo->dobj.dependencies,
+					inlineInfo->dobj.nDeps, inlineInfo->dobj.allocDeps,
+					inlineInfo->rolname ? inlineInfo->rolname : "(null)", inlineInfo->lang, inlineInfo->nargs,
+					(void*)inlineInfo->argtypes, inlineInfo->prorettype, inlineInfo->postponed_def ? "true" : "false");
+		}
+		else
+		{
+			fprintf(stderr, "DEBUG inlineInfo: NULL\n");
+		}
+*/
 	}
 
 	if (OidIsValid(plang->lanvalidator))
@@ -13209,17 +13278,61 @@ dumpProcLang(Archive *fout, const ProcLangInfo *plang)
 		validatorInfo = findFuncByOid(plang->lanvalidator);
 		if (validatorInfo != NULL && !validatorInfo->dobj.dump)
 			validatorInfo = NULL;
+
+		/* DEBUG: Print validatorInfo fields */
+/*
+		if (validatorInfo != NULL)
+		{
+			fprintf(stderr, "DEBUG validatorInfo: objType=%d, catId.tableoid=%u, catId.oid=%u, dumpId=%d, name='%s', "
+					"namespace=%p, dump=%u, dump_contains=%u, components=%u, ext_member=%s, depends_on_ext=%s, "
+					"dependencies=%p, nDeps=%d, allocDeps=%d, rolname='%s', lang=%u, nargs=%d, argtypes=%p, "
+					"prorettype=%u, postponed_def=%s\n",
+					validatorInfo->dobj.objType, validatorInfo->dobj.catId.tableoid, validatorInfo->dobj.catId.oid,
+					validatorInfo->dobj.dumpId, validatorInfo->dobj.name ? validatorInfo->dobj.name : "(null)",
+					(void*)validatorInfo->dobj.namespace, validatorInfo->dobj.dump, validatorInfo->dobj.dump_contains,
+					validatorInfo->dobj.components, validatorInfo->dobj.ext_member ? "true" : "false",
+					validatorInfo->dobj.depends_on_ext ? "true" : "false", (void*)validatorInfo->dobj.dependencies,
+					validatorInfo->dobj.nDeps, validatorInfo->dobj.allocDeps,
+					validatorInfo->rolname ? validatorInfo->rolname : "(null)", validatorInfo->lang, validatorInfo->nargs,
+					(void*)validatorInfo->argtypes, validatorInfo->prorettype, validatorInfo->postponed_def ? "true" : "false");
+		}
+		else
+		{
+			fprintf(stderr, "DEBUG validatorInfo: NULL\n");
+		}
+*/
 	}
 
 	/*
 	 * If the functions are dumpable then emit a complete CREATE LANGUAGE with
 	 * parameters.  Otherwise, we'll write a parameterless command, which will
 	 * be interpreted as CREATE EXTENSION.
+	 *
+	 * HOWEVER: if we have a valid handler OID, we should emit the HANDLER
+	 * clause even if the function isn't loaded (e.g., built-in functions),
+	 * because this is a user-defined language that needs the handler to be
+	 * restored properly.
 	 */
-	useParams = (funcInfo != NULL &&
+	useParams = (OidIsValid(plang->lanplcallfoid) &&
 				 (inlineInfo != NULL || !OidIsValid(plang->laninline)) &&
 				 (validatorInfo != NULL || !OidIsValid(plang->lanvalidator)));
 
+	/* DEBUG: Print useParams decision components */
+/*
+	fprintf(stderr, "DEBUG useParams decision (NEW LOGIC):\n");
+	fprintf(stderr, "  OidIsValid(plang->lanplcallfoid): %s\n", OidIsValid(plang->lanplcallfoid) ? "true" : "false");
+	fprintf(stderr, "  OidIsValid(plang->laninline): %s\n", OidIsValid(plang->laninline) ? "true" : "false");
+	fprintf(stderr, "  inlineInfo != NULL: %s\n", (inlineInfo != NULL) ? "true" : "false");
+	fprintf(stderr, "  !OidIsValid(plang->laninline): %s\n", !OidIsValid(plang->laninline) ? "true" : "false");
+	fprintf(stderr, "  (inlineInfo != NULL || !OidIsValid(plang->laninline)): %s\n", 
+			(inlineInfo != NULL || !OidIsValid(plang->laninline)) ? "true" : "false");
+	fprintf(stderr, "  OidIsValid(plang->lanvalidator): %s\n", OidIsValid(plang->lanvalidator) ? "true" : "false");
+	fprintf(stderr, "  validatorInfo != NULL: %s\n", (validatorInfo != NULL) ? "true" : "false");
+	fprintf(stderr, "  !OidIsValid(plang->lanvalidator): %s\n", !OidIsValid(plang->lanvalidator) ? "true" : "false");
+	fprintf(stderr, "  (validatorInfo != NULL || !OidIsValid(plang->lanvalidator)): %s\n", 
+			(validatorInfo != NULL || !OidIsValid(plang->lanvalidator)) ? "true" : "false");
+	fprintf(stderr, "  FINAL useParams: %s\n", useParams ? "true" : "false");
+*/
 	defqry = createPQExpBuffer();
 	delqry = createPQExpBuffer();
 
@@ -13230,17 +13343,48 @@ dumpProcLang(Archive *fout, const ProcLangInfo *plang)
 
 	if (useParams)
 	{
+		PQExpBuffer funcNameQuery;
+		PGresult   *funcNameRes;
+		const char *handlerName;
+		
 		appendPQExpBuffer(defqry, "CREATE %sPROCEDURAL LANGUAGE %s",
 						  plang->lanpltrusted ? "TRUSTED " : "",
 						  qlanname);
-		appendPQExpBuffer(defqry, " HANDLER %s",
-						  fmtQualifiedDumpable(funcInfo));
+		
+		/* Get handler function name */
+		if (funcInfo != NULL)
+		{
+			/* Function is loaded, use the normal formatting */
+			handlerName = fmtQualifiedDumpable(funcInfo);
+		}
+		else
+		{
+			/* Function not loaded (built-in), query its name from database */
+			funcNameQuery = createPQExpBuffer();
+			appendPQExpBuffer(funcNameQuery,
+							  "SELECT quote_ident(nspname) || '.' || quote_ident(proname) "
+							  "FROM pg_proc p JOIN pg_namespace n ON p.pronamespace = n.oid "
+							  "WHERE p.oid = %u", plang->lanplcallfoid);
+			funcNameRes = ExecuteSqlQueryForSingleRow(fout, funcNameQuery->data);
+			handlerName = PQgetvalue(funcNameRes, 0, 0);
+			fprintf(stderr, "DEBUG: Retrieved built-in handler name: %s\n", handlerName);
+		}
+		
+		appendPQExpBuffer(defqry, " HANDLER %s", handlerName);
+		
 		if (OidIsValid(plang->laninline))
 			appendPQExpBuffer(defqry, " INLINE %s",
 							  fmtQualifiedDumpable(inlineInfo));
 		if (OidIsValid(plang->lanvalidator))
 			appendPQExpBuffer(defqry, " VALIDATOR %s",
 							  fmtQualifiedDumpable(validatorInfo));
+		
+		/* Clean up if we queried the function name */
+		if (funcInfo == NULL)
+		{
+			PQclear(funcNameRes);
+			destroyPQExpBuffer(funcNameQuery);
+		}
 	}
 	else
 	{
