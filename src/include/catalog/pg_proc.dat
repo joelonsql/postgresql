@@ -12604,4 +12604,21 @@
   proargnames => '{pid,io_id,io_generation,state,operation,off,length,target,handle_data_len,raw_result,result,target_desc,f_sync,f_localmem,f_buffered}',
   prosrc => 'pg_get_aios' },
 
+
+# JSON Schema generator functions
+{ oid => '8001', descr => 'generate JSON Schema for a function (by oid)',
+  proname => 'json_schema_generate', prolang => 'internal', provolatile => 's',
+  prorettype => 'jsonb', proargtypes => 'oid',
+  prosrc => 'json_schema_generate_oid' },
+
+{ oid => '8002', descr => 'generate JSON Schema for a function (by regprocedure)',
+  proname => 'json_schema_generate', prolang => 'internal', provolatile => 's',
+  prorettype => 'jsonb', proargtypes => 'regprocedure',
+  prosrc => 'json_schema_generate_regprocedure' },
+
+{ oid => '8003', descr => 'generate JSON Schema for a function (by regproc)',
+  proname => 'json_schema_generate', prolang => 'internal', provolatile => 's',
+  prorettype => 'jsonb', proargtypes => 'regproc',
+  prosrc => 'json_schema_generate_regproc' },
+
 ]

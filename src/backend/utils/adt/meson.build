@@ -56,6 +56,7 @@ backend_sources += files(
   'jsonfuncs.c',
   'jsonpath.c',
   'jsonpath_exec.c',
+  'jsonschema.c',
   'like.c',
   'like_support.c',
   'lockfuncs.c',

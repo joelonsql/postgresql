@@ -75,6 +75,11 @@ extern int	oid_cmp(const void *p1, const void *p2);
 extern char *regexp_fixed_prefix(text *text_re, bool case_insensitive,
 								 Oid collation, bool *exact);
 
+/* jsonschema.c */
+extern PGDLLEXPORT Datum json_schema_generate_oid(PG_FUNCTION_ARGS);
+extern PGDLLEXPORT Datum json_schema_generate_regprocedure(PG_FUNCTION_ARGS);
+extern PGDLLEXPORT Datum json_schema_generate_regproc(PG_FUNCTION_ARGS);
+
 /* ruleutils.c */
 extern PGDLLIMPORT bool quote_all_identifiers;
 extern const char *quote_identifier(const char *ident);
