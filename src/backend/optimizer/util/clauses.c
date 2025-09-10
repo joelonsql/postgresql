@@ -5621,3 +5621,274 @@ make_SAOP_expr(Oid oper, Node *leftexpr, Oid coltype, Oid arraycollid,
 
 	return saopexpr;
 }
+/*
+ * Common Subexpression Elimination Implementation
+ *
+ * These functions detect and eliminate duplicate expressions in query trees
+ * by replacing them with references to single evaluations.
+ */
+
+#include "utils/hsearch.h"
+#include "optimizer/placeholder.h"
+#include "lib/stringinfo.h"
+#include "access/hash.h"
+
+/* Hash function for expressions */
+static uint32
+hash_expr(Node *expr)
+{
+	StringInfoData str;
+	uint32 hash;
+	
+	if (expr == NULL)
+		return 0;
+	
+	/* Convert expression to string for hashing */
+	initStringInfo(&str);
+	appendStringInfoString(&str, nodeToString(expr));
+	
+	/* Use PostgreSQL's hash function */
+	hash = DatumGetUInt32(hash_any((unsigned char *) str.data, str.len));
+	
+	pfree(str.data);
+	return hash;
+}
+
+/* Deep equality check for expressions, ignoring location */
+static bool
+exprs_equivalent_for_cse(Node *expr1, Node *expr2)
+{
+	if (expr1 == NULL && expr2 == NULL)
+		return true;
+	if (expr1 == NULL || expr2 == NULL)
+		return false;
+	
+	/* Must be same node type */
+	if (nodeTag(expr1) != nodeTag(expr2))
+		return false;
+	
+	/* For now, use equal() but we should enhance this to ignore location */
+	return equal(expr1, expr2);
+}
+
+/* Check if an expression is safe for CSE */
+bool
+is_cse_safe_expression(Node *expr)
+{
+	if (expr == NULL)
+		return false;
+	
+	/* Only handle immutable expressions - mutable functions return true if found */
+	if (contain_mutable_functions(expr))
+		return false;
+	
+	/* Don't CSE volatile expressions */
+	if (contain_volatile_functions(expr))
+		return false;
+	
+	/* Don't CSE expressions with subplans */
+	if (contain_subplans(expr))
+		return false;
+	
+	/* Don't CSE simple Var nodes or constants */
+	if (IsA(expr, Var) || IsA(expr, Const))
+		return false;
+	
+	/* Don't CSE very simple expressions */
+	if (IsA(expr, Param))
+		return false;
+	
+	return true;
+}
+
+/* Walker to find common subexpressions */
+static bool
+find_common_subexpressions_walker(Node *node, CSEContext *context)
+{
+	if (node == NULL)
+		return false;
+	
+	/* Skip if not safe for CSE */
+	if (!is_cse_safe_expression(node))
+		return expression_tree_walker(node, find_common_subexpressions_walker, context);
+	
+	/* Calculate hash for this expression */
+	uint32 hash = hash_expr(node);
+	
+	/* Look up in hash table */
+	ExprHashEntry *entry;
+	bool found;
+	
+	entry = (ExprHashEntry *) hash_search(context->expr_hash_table,
+										  &hash,
+										  HASH_ENTER,
+										  &found);
+	
+	if (!found)
+	{
+		/* First time seeing this expression */
+		entry->expr = node;
+		entry->expr_hash = hash;
+		entry->equivalent_exprs = NIL;
+		entry->usage_count = 1;
+		entry->is_cse_candidate = false;
+		entry->phv = NULL;
+	}
+	else
+	{
+		/* Check if this is actually equivalent */
+		bool is_equivalent = false;
+		
+		if (exprs_equivalent_for_cse(entry->expr, node))
+		{
+			is_equivalent = true;
+		}
+		else
+		{
+			/* Check equivalent expressions list */
+			ListCell *lc;
+			foreach(lc, entry->equivalent_exprs)
+			{
+				Node *equiv_expr = (Node *) lfirst(lc);
+				if (exprs_equivalent_for_cse(equiv_expr, node))
+				{
+					is_equivalent = true;
+					break;
+				}
+			}
+		}
+		
+		if (is_equivalent)
+		{
+			entry->usage_count++;
+			
+			/* Mark as CSE candidate if usage exceeds threshold */
+			if (entry->usage_count >= context->cse_threshold)
+				entry->is_cse_candidate = true;
+		}
+		else
+		{
+			/* Hash collision - add to equivalent expressions */
+			entry->equivalent_exprs = lappend(entry->equivalent_exprs, node);
+		}
+	}
+	
+	/* Continue walking */
+	return expression_tree_walker(node, find_common_subexpressions_walker, context);
+}
+
+/* Analyze expressions to find CSE candidates */
+void
+analyze_common_subexpressions(PlannerInfo *root, Node *expr, CSEContext *context)
+{
+	if (!context->enabled || expr == NULL)
+		return;
+	
+	/* Set analyzing mode */
+	context->analyzing = true;
+	
+	/* Walk the expression tree to find common subexpressions */
+	find_common_subexpressions_walker(expr, context);
+}
+
+/* Walker to replace common subexpressions with PlaceHolderVars */
+static Node *
+replace_cse_expressions_mutator(Node *node, CSEContext *context)
+{
+	if (node == NULL)
+		return NULL;
+	
+	/* Skip if not safe for CSE */
+	if (!is_cse_safe_expression(node))
+		return expression_tree_mutator(node, replace_cse_expressions_mutator, context);
+	
+	/* Look up this expression in the hash table */
+	uint32 hash = hash_expr(node);
+	ExprHashEntry *entry;
+	bool found;
+	
+	entry = (ExprHashEntry *) hash_search(context->expr_hash_table,
+										  &hash,
+										  HASH_FIND,
+										  &found);
+	
+	if (found && entry->is_cse_candidate && exprs_equivalent_for_cse(entry->expr, node))
+	{
+		/* This expression should be replaced */
+		if (entry->phv == NULL)
+		{
+			/* Create PlaceHolderVar for this expression */
+			PlaceHolderVar *phv = makeNode(PlaceHolderVar);
+			phv->phexpr = (Expr *) copyObject(entry->expr);
+			phv->phrels = NULL;  /* Will be set properly later */
+			phv->phnullingrels = NULL;
+			phv->phid = ++(context->root->glob->lastPHId);
+			phv->phlevelsup = 0;
+			
+			entry->phv = phv;
+			
+			/* Add to CSE targets list */
+			context->cse_targets = lappend(context->cse_targets, phv);
+		}
+		
+		/* Return a copy of the PlaceHolderVar */
+		return (Node *) copyObject(entry->phv);
+	}
+	
+	/* Not a CSE candidate, continue mutation */
+	return expression_tree_mutator(node, replace_cse_expressions_mutator, context);
+}
+
+/* Main entry point for CSE */
+Node *
+apply_common_subexpression_elimination(PlannerInfo *root, Node *expr)
+{
+	CSEContext context;
+	HASHCTL hash_ctl;
+	
+	/* Check if CSE is enabled */
+	if (!enable_cse || expr == NULL)
+		return expr;
+	
+	/* Initialize context */
+	memset(&context, 0, sizeof(CSEContext));
+	context.root = root;
+	context.cse_threshold = cse_min_usage_threshold;
+	context.enabled = true;
+	context.analyzing = false;
+	context.cse_targets = NIL;
+	
+	/* Create hash table for expressions */
+	memset(&hash_ctl, 0, sizeof(hash_ctl));
+	hash_ctl.keysize = sizeof(uint32);
+	hash_ctl.entrysize = sizeof(ExprHashEntry);
+	hash_ctl.hcxt = CurrentMemoryContext;
+	
+	context.expr_hash_table = hash_create("CSE expression hash",
+										  256,
+										  &hash_ctl,
+										  HASH_ELEM | HASH_CONTEXT | HASH_BLOBS);
+	
+	/* Phase 1: Analyze to find common subexpressions */
+	analyze_common_subexpressions(root, expr, &context);
+	
+	/* Phase 2: Replace common subexpressions if any found */
+	Node *result = expr;
+	if (context.cse_targets != NIL)
+	{
+		context.analyzing = false;
+		result = replace_cse_expressions_mutator(expr, &context);
+		
+		/* Store CSE targets in planner info for later use */
+		if (root->cse_placeholder_list == NIL)
+			root->cse_placeholder_list = context.cse_targets;
+		else
+			root->cse_placeholder_list = list_concat(root->cse_placeholder_list, 
+													 context.cse_targets);
+	}
+	
+	/* Clean up */
+	hash_destroy(context.expr_hash_table);
+	
+	return result;
+}

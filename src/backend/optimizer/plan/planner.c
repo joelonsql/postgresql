@@ -1279,6 +1279,21 @@ preprocess_expression(PlannerInfo *root, Node *expr, int kind)
 		expr = eval_const_expressions(root, expr);
 
 	/*
+	 * Apply Common Subexpression Elimination if enabled and appropriate.
+	 * We do this after eval_const_expressions to work with simplified expressions,
+	 * but before canonicalize_qual to maintain expression structure.
+	 * Skip CSE for function RTEs and certain other contexts where it's not useful.
+	 */
+	if (enable_cse && 
+		kind != EXPRKIND_RTFUNC &&
+		kind != EXPRKIND_VALUES &&
+		kind != EXPRKIND_TABLESAMPLE &&
+		kind != EXPRKIND_TABLEFUNC)
+	{
+		expr = apply_common_subexpression_elimination(root, expr);
+	}
+
+	/*
 	 * If it's a qual or havingQual, canonicalize it.
 	 */
 	if (kind == EXPRKIND_QUAL)

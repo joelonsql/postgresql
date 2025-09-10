@@ -203,6 +203,14 @@
   boot_val => 'true',
 },
 
+
+{ name => 'enable_cse', type => 'bool', context => 'PGC_USERSET', group => 'QUERY_TUNING_METHOD',
+  short_desc => 'Enables the planner\'s use of common subexpression elimination.',
+  long_desc => 'When enabled, the planner will detect and eliminate duplicate expressions in queries.',
+  flags => 'GUC_EXPLAIN',
+  variable => 'enable_cse',
+  boot_val => 'false',
+},
 { name => 'geqo', type => 'bool', context => 'PGC_USERSET', group => 'QUERY_TUNING_GEQO',
   short_desc => 'Enables genetic query optimization.',
   long_desc => 'This algorithm attempts to do planning without exhaustive searching.',
@@ -964,6 +972,16 @@
   boot_val => '8',
   min => '1',
   max => 'INT_MAX',
+},
+
+{ name => 'cse_min_usage_threshold', type => 'int', context => 'PGC_USERSET', group => 'QUERY_TUNING_OTHER',
+  short_desc => 'Sets the minimum usage count for common subexpression elimination.',
+  long_desc => 'Expressions must appear at least this many times to be considered for CSE.',
+  flags => 'GUC_EXPLAIN',
+  variable => 'cse_min_usage_threshold',
+  boot_val => '2',
+  min => '2',
+  max => '100',
 },
 
 { name => 'geqo_threshold', type => 'int', context => 'PGC_USERSET', group => 'QUERY_TUNING_GEQO',

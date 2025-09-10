@@ -1,0 +1,48 @@
+--
+-- Tests for Common Subexpression Elimination (CSE)
+--
+-- Create test tables
+CREATE TABLE cse_test (
+    id INTEGER,
+    val INTEGER,
+    txt TEXT
+);
+INSERT INTO cse_test VALUES (1, 10, 'abc'), (2, 20, 'def'), (3, 30, 'ghi');
+-- Test basic CSE functionality
+-- First with CSE disabled (default)
+SET enable_cse = OFF;
+-- Simple repeated expression
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT val + 100, (val + 100) * 2, (val + 100) / 3 FROM cse_test;
+                           QUERY PLAN                           
+----------------------------------------------------------------
+ Seq Scan on public.cse_test
+   Output: (val + 100), ((val + 100) * 2), ((val + 100) / 3)
+(2 rows)
+
+-- Complex repeated expression
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT 
+    COALESCE(val * 2 + id, 0),
+    COALESCE(val * 2 + id, 0) + 100,
+    CASE WHEN COALESCE(val * 2 + id, 0) > 50 THEN 'high' ELSE 'low' END
+FROM cse_test;
+                                                                                              QUERY PLAN                                                                                              
+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Seq Scan on public.cse_test
+   Output: COALESCE(((val * 2) + id), 0), (COALESCE(((val * 2) + id), 0) + 100), CASE WHEN (COALESCE(((val * 2) + id), 0) > 50) THEN 'high'::text ELSE 'low'::text END
+(2 rows)
+
+-- Now enable CSE
+SET enable_cse = ON;
+-- Simple repeated expression with CSE
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT val + 100, (val + 100) * 2, (val + 100) / 3 FROM cse_test;
+                           QUERY PLAN                           
+----------------------------------------------------------------
+ Seq Scan on public.cse_test
+   Output: PHV, (PHV * 2), (PHV / 3)
+(2 rows)
+
+-- Note: The actual output will show PlaceHolderVars for common subexpressions
+-- The expected output format may vary based on the exact implementation

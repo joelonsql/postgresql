@@ -15,6 +15,32 @@
 #define CLAUSES_H
 
 #include "nodes/pathnodes.h"
+#include "utils/hsearch.h"
+
+/* Forward declaration */
+typedef struct CSEContext CSEContext;
+
+/* Hash table entry for tracking equivalent expressions */
+typedef struct ExprHashEntry
+{
+	Node	   *expr;			/* Canonical expression */
+	uint32		expr_hash;		/* Hash of the expression */
+	List	   *equivalent_exprs;	/* List of equivalent expressions */
+	int			usage_count;	/* Number of times referenced */
+	bool		is_cse_candidate;	/* Worth extracting as CSE */
+	PlaceHolderVar *phv;		/* PlaceHolderVar for this expression, if created */
+} ExprHashEntry;
+
+/* CSE context for expression tree walking */
+struct CSEContext
+{
+	PlannerInfo *root;			/* Current planner context */
+	HTAB	   *expr_hash_table;	/* Hash table of expressions */
+	List	   *cse_targets;	/* Expressions selected for CSE */
+	int			cse_threshold;	/* Min usage count for CSE */
+	bool		enabled;		/* CSE enabled for this query */
+	bool		analyzing;		/* True if analyzing, false if replacing */
+};
 
 typedef struct
 {
@@ -54,5 +80,10 @@ extern Query *inline_set_returning_function(PlannerInfo *root,
 											RangeTblEntry *rte);
 
 extern Bitmapset *pull_paramids(Expr *expr);
+
+/* Common Subexpression Elimination functions */
+extern Node *apply_common_subexpression_elimination(PlannerInfo *root, Node *expr);
+extern void analyze_common_subexpressions(PlannerInfo *root, Node *expr, CSEContext *context);
+extern bool is_cse_safe_expression(Node *expr);
 
 #endif							/* CLAUSES_H */

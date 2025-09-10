@@ -586,6 +586,9 @@ struct PlannerInfo
 
 	/* PartitionPruneInfos added in this query's plan. */
 	List	   *partPruneInfos;
+
+	/* List of PlaceHolderVars created for CSE */
+	List	   *cse_placeholder_list;
 };
 
 
