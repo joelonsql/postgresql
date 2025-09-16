@@ -14,6 +14,7 @@ pg_dump_common_sources = files(
   'pg_backup_db.c',
   'pg_backup_directory.c',
   'pg_backup_null.c',
+  'pg_backup_split.c',
   'pg_backup_tar.c',
   'pg_backup_utils.c',
 )
