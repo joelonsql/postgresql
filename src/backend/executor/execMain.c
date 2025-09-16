@@ -447,6 +447,22 @@ standard_ExecutorFinish(QueryDesc *queryDesc)
 
 	MemoryContextSwitchTo(oldcontext);
 
+	/* Check ROW_COUNT assertion if present */
+	if (queryDesc->plannedstmt->rowCountAssert != NULL)
+	{
+		RowCountAssert *assert = queryDesc->plannedstmt->rowCountAssert;
+		uint64 actual = estate->es_processed;
+
+		if (actual != (uint64) assert->expected)
+		{
+			ereport(ERROR,
+					(errcode(ERRCODE_CARDINALITY_VIOLATION),
+					 errmsg("ROW_COUNT assertion failed: expected = " INT64_FORMAT ", got = " UINT64_FORMAT,
+							assert->expected, actual),
+					 errposition(assert->location)));
+		}
+	}
+
 	estate->es_finished = true;
 }
 

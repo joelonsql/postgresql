@@ -149,6 +149,9 @@ typedef struct PlannedStmt
 	/* non-null if this is utility stmt */
 	Node	   *utilityStmt;
 
+	/* CHECK DIAGNOSTICS assertion (copied from Query) */
+	struct RowCountAssert *rowCountAssert;
+
 	/* statement location in source string (copied from Query) */
 	/* start location, or -1 if unknown */
 	ParseLoc	stmt_location;

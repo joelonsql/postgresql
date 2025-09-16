@@ -176,6 +176,7 @@ static void insertSelectOptions(SelectStmt *stmt,
 								List *sortClause, List *lockingClause,
 								SelectLimit *limitClause,
 								WithClause *withClause,
+								List *checkDiagnosticsClause,
 								core_yyscan_t yyscanner);
 static Node *makeSetOp(SetOperation op, bool all, Node *larg, Node *rarg);
 static Node *doNegate(Node *n, int location);
@@ -447,6 +448,7 @@ static Node *makeRecursiveViewSelect(char *relname, List *aliases, Node *query);
 				TriggerTransitions TriggerReferencing
 				vacuum_relation_list opt_vacuum_relation_list
 				drop_option_list pub_obj_list
+				check_diagnostics_list
 
 %type <retclause> returning_clause
 %type <node>	returning_option
@@ -521,6 +523,7 @@ static Node *makeRecursiveViewSelect(char *relname, List *aliases, Node *query);
 %type <node>	TableElement TypedTableElement ConstraintElem DomainConstraintElem TableFuncElement
 %type <node>	columnDef columnOptions optionalPeriodName
 %type <defelt>	def_elem reloption_elem old_aggr_elem operator_def_elem
+				check_diagnostics_item
 %type <node>	def_arg columnElem where_clause where_or_current_clause
 				a_expr b_expr c_expr AexprConst indirection_el opt_slice_bound
 				columnref having_clause func_table xmltable array_expr
@@ -687,7 +690,7 @@ static Node *makeRecursiveViewSelect(char *relname, List *aliases, Node *query);
 %token <str>	IDENT UIDENT FCONST SCONST USCONST BCONST XCONST Op
 %token <ival>	ICONST PARAM
 %token			TYPECAST DOT_DOT COLON_EQUALS EQUALS_GREATER
-%token			LESS_EQUALS GREATER_EQUALS NOT_EQUALS
+%token			LESS_EQUALS GREATER_EQUALS NOT_EQUALS ROW_COUNT
 
 /*
  * If you want to make any keyword changes, update the keyword table in
@@ -715,7 +718,7 @@ static Node *makeRecursiveViewSelect(char *relname, List *aliases, Node *query);
 
 	DATA_P DATABASE DAY_P DEALLOCATE DEC DECIMAL_P DECLARE DEFAULT DEFAULTS
 	DEFERRABLE DEFERRED DEFINER DELETE_P DELIMITER DELIMITERS DEPENDS DEPTH DESC
-	DETACH DICTIONARY DISABLE_P DISCARD DISTINCT DO DOCUMENT_P DOMAIN_P
+	DETACH DIAGNOSTICS DICTIONARY DISABLE_P DISCARD DISTINCT DO DOCUMENT_P DOMAIN_P
 	DOUBLE_P DROP
 
 	EACH ELSE EMPTY_P ENABLE_P ENCODING ENCRYPTED END_P ENFORCED ENUM_P ERROR_P
@@ -802,10 +805,10 @@ static Node *makeRecursiveViewSelect(char *relname, List *aliases, Node *query);
  * NOT_LA exists so that productions such as NOT LIKE can be given the same
  * precedence as LIKE; otherwise they'd effectively have the same precedence
  * as NOT, at least with respect to their left-hand subexpression.
- * FORMAT_LA, NULLS_LA, WITH_LA, and WITHOUT_LA are needed to make the grammar
+ * FORMAT_LA, NULLS_LA, WITH_LA, WITHOUT_LA, and CHECK_LA are needed to make the grammar
  * LALR(1).
  */
-%token		FORMAT_LA NOT_LA NULLS_LA WITH_LA WITHOUT_LA
+%token		FORMAT_LA NOT_LA NULLS_LA WITH_LA WITHOUT_LA CHECK_LA
 
 /*
  * The grammar likewise thinks these tokens are keywords, but they are never
@@ -901,6 +904,7 @@ static Node *makeRecursiveViewSelect(char *relname, List *aliases, Node *query);
  * left-associativity among the JOIN rules themselves.
  */
 %left		JOIN CROSS LEFT FULL RIGHT INNER_P NATURAL
+%right		CHECK_LA
 
 %%
 
@@ -1065,6 +1069,13 @@ stmt:
 			| DeclareCursorStmt
 			| DefineStmt
 			| DeleteStmt
+			| DeleteStmt CHECK_LA DIAGNOSTICS '(' check_diagnostics_list ')'
+				{
+					/* Handle CHECK DIAGNOSTICS for DELETE at the top level */
+					DeleteStmt *n = (DeleteStmt *) $1;
+					n->checkDiagnosticsClause = $5;
+					$$ = (Node *) n;
+				}
 			| DiscardStmt
 			| DoStmt
 			| DropCastStmt
@@ -1086,6 +1097,13 @@ stmt:
 			| ImportForeignSchemaStmt
 			| IndexStmt
 			| InsertStmt
+			| InsertStmt CHECK_LA DIAGNOSTICS '(' check_diagnostics_list ')'
+				{
+					/* Handle CHECK DIAGNOSTICS for INSERT at the top level */
+					InsertStmt *n = (InsertStmt *) $1;
+					n->checkDiagnosticsClause = $5;
+					$$ = (Node *) n;
+				}
 			| ListenStmt
 			| RefreshMatViewStmt
 			| LoadStmt
@@ -1104,10 +1122,27 @@ stmt:
 			| RuleStmt
 			| SecLabelStmt
 			| SelectStmt
+			| SelectStmt CHECK_LA DIAGNOSTICS '(' check_diagnostics_list ')'
+				{
+					/* Handle CHECK DIAGNOSTICS for SELECT at the top level */
+					/* SelectStmt might be complex, need to handle insertSelectOptions properly */
+					insertSelectOptions((SelectStmt *) $1, NIL, NIL,
+										NULL,
+										NULL, $5,
+										yyscanner);
+					$$ = $1;
+				}
 			| TransactionStmt
 			| TruncateStmt
 			| UnlistenStmt
 			| UpdateStmt
+			| UpdateStmt CHECK_LA DIAGNOSTICS '(' check_diagnostics_list ')'
+				{
+					/* Handle CHECK DIAGNOSTICS for UPDATE at the top level */
+					UpdateStmt *n = (UpdateStmt *) $1;
+					n->checkDiagnosticsClause = $5;
+					$$ = (Node *) n;
+				}
 			| VacuumStmt
 			| VariableResetStmt
 			| VariableSetStmt
@@ -12143,6 +12178,33 @@ ExplainableStmt:
 			| CreateMatViewStmt
 			| RefreshMatViewStmt
 			| ExecuteStmt					/* by default all are $$=$1 */
+			| SelectStmt CHECK_LA DIAGNOSTICS '(' check_diagnostics_list ')'
+				{
+					/* Handle CHECK DIAGNOSTICS for SELECT in EXPLAIN */
+					insertSelectOptions((SelectStmt *) $1, NIL, NIL,
+										NULL,
+										NULL, $5,
+										yyscanner);
+					$$ = $1;
+				}
+			| InsertStmt CHECK_LA DIAGNOSTICS '(' check_diagnostics_list ')'
+				{
+					InsertStmt *n = (InsertStmt *) $1;
+					n->checkDiagnosticsClause = $5;
+					$$ = (Node *) n;
+				}
+			| UpdateStmt CHECK_LA DIAGNOSTICS '(' check_diagnostics_list ')'
+				{
+					UpdateStmt *n = (UpdateStmt *) $1;
+					n->checkDiagnosticsClause = $5;
+					$$ = (Node *) n;
+				}
+			| DeleteStmt CHECK_LA DIAGNOSTICS '(' check_diagnostics_list ')'
+				{
+					DeleteStmt *n = (DeleteStmt *) $1;
+					n->checkDiagnosticsClause = $5;
+					$$ = (Node *) n;
+				}
 		;
 
 /*****************************************************************************
@@ -12291,6 +12353,7 @@ InsertStmt:
 					$5->relation = $4;
 					$5->onConflictClause = $6;
 					$5->returningClause = $7;
+					$5->checkDiagnosticsClause = NIL;
 					$5->withClause = $1;
 					$$ = (Node *) $5;
 				}
@@ -12437,6 +12500,7 @@ returning_clause:
 				}
 		;
 
+
 returning_with_clause:
 			WITH '(' returning_options ')'		{ $$ = $3; }
 			| /* EMPTY */						{ $$ = NIL; }
@@ -12481,6 +12545,7 @@ DeleteStmt: opt_with_clause DELETE_P FROM relation_expr_opt_alias
 					n->usingClause = $5;
 					n->whereClause = $6;
 					n->returningClause = $7;
+					n->checkDiagnosticsClause = NIL;
 					n->withClause = $1;
 					$$ = (Node *) n;
 				}
@@ -12555,6 +12620,7 @@ UpdateStmt: opt_with_clause UPDATE relation_expr_opt_alias
 					n->fromClause = $6;
 					n->whereClause = $7;
 					n->returningClause = $8;
+					n->checkDiagnosticsClause = NIL;
 					n->withClause = $1;
 					$$ = (Node *) n;
 				}
@@ -12890,61 +12956,61 @@ select_with_parens:
  */
 select_no_parens:
 			simple_select						{ $$ = $1; }
-			| select_clause sort_clause
-				{
-					insertSelectOptions((SelectStmt *) $1, $2, NIL,
-										NULL, NULL,
-										yyscanner);
-					$$ = $1;
-				}
-			| select_clause opt_sort_clause for_locking_clause opt_select_limit
-				{
-					insertSelectOptions((SelectStmt *) $1, $2, $3,
-										$4,
-										NULL,
-										yyscanner);
-					$$ = $1;
-				}
-			| select_clause opt_sort_clause select_limit opt_for_locking_clause
-				{
-					insertSelectOptions((SelectStmt *) $1, $2, $4,
-										$3,
-										NULL,
-										yyscanner);
-					$$ = $1;
-				}
-			| with_clause select_clause
-				{
-					insertSelectOptions((SelectStmt *) $2, NULL, NIL,
-										NULL,
-										$1,
-										yyscanner);
-					$$ = $2;
-				}
-			| with_clause select_clause sort_clause
-				{
-					insertSelectOptions((SelectStmt *) $2, $3, NIL,
-										NULL,
-										$1,
-										yyscanner);
-					$$ = $2;
-				}
-			| with_clause select_clause opt_sort_clause for_locking_clause opt_select_limit
-				{
-					insertSelectOptions((SelectStmt *) $2, $3, $4,
-										$5,
-										$1,
-										yyscanner);
-					$$ = $2;
-				}
-			| with_clause select_clause opt_sort_clause select_limit opt_for_locking_clause
-				{
-					insertSelectOptions((SelectStmt *) $2, $3, $5,
-										$4,
-										$1,
-										yyscanner);
-					$$ = $2;
-				}
+		| select_clause sort_clause
+			{
+				insertSelectOptions((SelectStmt *) $1, $2, NIL,
+									NULL, NULL, NIL,
+									yyscanner);
+				$$ = $1;
+			}
+		| select_clause opt_sort_clause for_locking_clause opt_select_limit
+			{
+				insertSelectOptions((SelectStmt *) $1, $2, $3,
+									$4,
+									NULL, NIL,
+									yyscanner);
+				$$ = $1;
+			}
+		| select_clause opt_sort_clause select_limit opt_for_locking_clause
+			{
+				insertSelectOptions((SelectStmt *) $1, $2, $4,
+									$3,
+									NULL, NIL,
+									yyscanner);
+				$$ = $1;
+			}
+		| with_clause select_clause
+			{
+				insertSelectOptions((SelectStmt *) $2, NULL, NIL,
+									NULL,
+									$1, NIL,
+									yyscanner);
+				$$ = $2;
+			}
+		| with_clause select_clause sort_clause
+			{
+				insertSelectOptions((SelectStmt *) $2, $3, NIL,
+									NULL,
+									$1, NIL,
+									yyscanner);
+				$$ = $2;
+			}
+		| with_clause select_clause opt_sort_clause for_locking_clause opt_select_limit
+			{
+				insertSelectOptions((SelectStmt *) $2, $3, $4,
+									$5,
+									$1, NIL,
+									yyscanner);
+				$$ = $2;
+			}
+		| with_clause select_clause opt_sort_clause select_limit opt_for_locking_clause
+			{
+				insertSelectOptions((SelectStmt *) $2, $3, $5,
+									$4,
+									$1, NIL,
+									yyscanner);
+				$$ = $2;
+			}
 		;
 
 select_clause:
@@ -12995,6 +13061,7 @@ simple_select:
 					n->groupDistinct = ($7)->distinct;
 					n->havingClause = $8;
 					n->windowClause = $9;
+					n->checkDiagnosticsClause = NIL;
 					$$ = (Node *) n;
 				}
 			| SELECT distinct_clause target_list
@@ -13012,6 +13079,7 @@ simple_select:
 					n->groupDistinct = ($7)->distinct;
 					n->havingClause = $8;
 					n->windowClause = $9;
+					n->checkDiagnosticsClause = NIL;
 					$$ = (Node *) n;
 				}
 			| values_clause							{ $$ = $1; }
@@ -13032,6 +13100,7 @@ simple_select:
 
 					n->targetList = list_make1(rt);
 					n->fromClause = list_make1($2);
+					n->checkDiagnosticsClause = NIL;
 					$$ = (Node *) n;
 				}
 			| select_clause UNION set_quantifier select_clause
@@ -13623,6 +13692,7 @@ values_clause:
 					SelectStmt *n = makeNode(SelectStmt);
 
 					n->valuesLists = list_make1($3);
+					n->checkDiagnosticsClause = NIL;
 					$$ = (Node *) n;
 				}
 			| values_clause ',' '(' expr_list ')'
@@ -14137,6 +14207,19 @@ where_or_current_clause:
 					$$ = (Node *) n;
 				}
 			| /*EMPTY*/								{ $$ = NULL; }
+		;
+
+
+check_diagnostics_list:
+			check_diagnostics_item						{ $$ = list_make1($1); }
+			| check_diagnostics_list ',' check_diagnostics_item	{ $$ = lappend($1, $3); }
+		;
+
+check_diagnostics_item:
+			ROW_COUNT '=' a_expr
+				{
+					$$ = makeDefElem("row_count", (Node *) $3, @1);
+				}
 		;
 
 
@@ -17634,6 +17717,7 @@ PLpgSQL_Expr: opt_distinct_clause opt_target_list
 						n->limitOption = $9->limitOption;
 					}
 					n->lockingClause = $10;
+					n->checkDiagnosticsClause = NIL;
 					$$ = (Node *) n;
 				}
 		;
@@ -17802,6 +17886,7 @@ unreserved_keyword:
 			| DEPENDS
 			| DEPTH
 			| DETACH
+			| DIAGNOSTICS
 			| DICTIONARY
 			| DISABLE_P
 			| DISCARD
@@ -18378,6 +18463,7 @@ bare_label_keyword:
 			| DEPTH
 			| DESC
 			| DETACH
+			| DIAGNOSTICS
 			| DICTIONARY
 			| DISABLE_P
 			| DISCARD
@@ -19075,6 +19161,7 @@ insertSelectOptions(SelectStmt *stmt,
 					List *sortClause, List *lockingClause,
 					SelectLimit *limitClause,
 					WithClause *withClause,
+					List *checkDiagnosticsClause,
 					core_yyscan_t yyscanner)
 {
 	Assert(IsA(stmt, SelectStmt));
@@ -19148,6 +19235,15 @@ insertSelectOptions(SelectStmt *stmt,
 					 parser_errposition(exprLocation((Node *) withClause))));
 		stmt->withClause = withClause;
 	}
+	if (checkDiagnosticsClause)
+	{
+		if (stmt->checkDiagnosticsClause)
+			ereport(ERROR,
+					(errcode(ERRCODE_SYNTAX_ERROR),
+					 errmsg("multiple CHECK DIAGNOSTICS clauses not allowed"),
+					 parser_errposition(exprLocation((Node *) checkDiagnosticsClause))));
+		stmt->checkDiagnosticsClause = checkDiagnosticsClause;
+	}
 }
 
 static Node *
@@ -19159,6 +19255,7 @@ makeSetOp(SetOperation op, bool all, Node *larg, Node *rarg)
 	n->all = all;
 	n->larg = (SelectStmt *) larg;
 	n->rarg = (SelectStmt *) rarg;
+	n->checkDiagnosticsClause = NIL;
 	return (Node *) n;
 }
 
@@ -19762,6 +19859,7 @@ makeRecursiveViewSelect(char *relname, List *aliases, Node *query)
 	s->withClause = w;
 	s->targetList = tl;
 	s->fromClause = list_make1(makeRangeVar(NULL, relname, -1));
+	s->checkDiagnosticsClause = NIL;
 
 	return (Node *) s;
 }

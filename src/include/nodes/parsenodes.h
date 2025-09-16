@@ -222,6 +222,8 @@ typedef struct Query
 
 	List	   *windowClause;	/* a list of WindowClause's */
 
+	struct RowCountAssert *rowCountAssert;	/* CHECK DIAGNOSTICS assertion */
+
 	List	   *distinctClause; /* a list of SortGroupClause's */
 
 	List	   *sortClause;		/* a list of SortGroupClause's */
@@ -2110,6 +2112,7 @@ typedef struct InsertStmt
 	ReturningClause *returningClause;	/* RETURNING clause */
 	WithClause *withClause;		/* WITH clause */
 	OverridingKind override;	/* OVERRIDING clause */
+	List	   *checkDiagnosticsClause; /* CHECK DIAGNOSTICS clause */
 } InsertStmt;
 
 /* ----------------------
@@ -2124,6 +2127,7 @@ typedef struct DeleteStmt
 	Node	   *whereClause;	/* qualifications */
 	ReturningClause *returningClause;	/* RETURNING clause */
 	WithClause *withClause;		/* WITH clause */
+	List	   *checkDiagnosticsClause; /* CHECK DIAGNOSTICS clause */
 } DeleteStmt;
 
 /* ----------------------
@@ -2139,6 +2143,7 @@ typedef struct UpdateStmt
 	List	   *fromClause;		/* optional from clause for more tables */
 	ReturningClause *returningClause;	/* RETURNING clause */
 	WithClause *withClause;		/* WITH clause */
+	List	   *checkDiagnosticsClause; /* CHECK DIAGNOSTICS clause */
 } UpdateStmt;
 
 /* ----------------------
@@ -2194,6 +2199,7 @@ typedef struct SelectStmt
 	bool		groupDistinct;	/* Is this GROUP BY DISTINCT? */
 	Node	   *havingClause;	/* HAVING conditional-expression */
 	List	   *windowClause;	/* WINDOW window_name AS (...), ... */
+	List	   *checkDiagnosticsClause;	/* CHECK DIAGNOSTICS clause */
 
 	/*
 	 * In a "leaf" node representing a VALUES list, the above fields are all
@@ -2226,6 +2232,19 @@ typedef struct SelectStmt
 	/* Eventually add fields for CORRESPONDING spec here */
 } SelectStmt;
 
+/* ----------------------
+ *		Row Count Assert node
+ *
+ * This represents a CHECK DIAGNOSTICS (ROW_COUNT = n) clause.
+ * Used to assert that a SELECT statement returns exactly n rows.
+ * ----------------------
+ */
+typedef struct RowCountAssert
+{
+	NodeTag		type;
+	int64		expected;		/* expected row count (must be >= 0) */
+	ParseLoc	location;		/* location of CHECK token for error reporting */
+} RowCountAssert;
 
 /* ----------------------
  *		Set Operation node for post-analysis query trees
