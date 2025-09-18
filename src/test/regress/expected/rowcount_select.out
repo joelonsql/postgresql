@@ -1,0 +1,104 @@
+--
+-- Test CHECK DIAGNOSTICS (ROW_COUNT = n) functionality
+--
+-- Setup test table
+CREATE TEMP TABLE test_rowcount(a int);
+INSERT INTO test_rowcount VALUES (1), (2), (3);
+-- Test 1: Pass - exactly one row
+SELECT a FROM test_rowcount WHERE a = 1
+CHECK DIAGNOSTICS (ROW_COUNT = 1);
+ a 
+---
+ 1
+(1 row)
+
+-- Test 2: Pass - exactly zero rows
+SELECT a FROM test_rowcount WHERE a = 999
+CHECK DIAGNOSTICS (ROW_COUNT = 0);
+ a 
+---
+(0 rows)
+
+-- Test 3: Pass - exactly three rows
+SELECT a FROM test_rowcount
+CHECK DIAGNOSTICS (ROW_COUNT = 3);
+ a 
+---
+ 1
+ 2
+ 3
+(3 rows)
+
+-- Test 4: Pass with LIMIT (post-LIMIT value)
+SELECT a FROM test_rowcount ORDER BY a LIMIT 2
+CHECK DIAGNOSTICS (ROW_COUNT = 2);
+ a 
+---
+ 1
+ 2
+(2 rows)
+
+-- Test 5: Fail - expected 1, got 0
+SELECT a FROM test_rowcount WHERE a = 999
+CHECK DIAGNOSTICS (ROW_COUNT = 1);
+ERROR:  ROW_COUNT assertion failed: expected = 1, got = 0
+LINE 2: CHECK DIAGNOSTICS (ROW_COUNT = 1);
+                          ^
+-- Test 6: Fail - expected 1, got 2
+SELECT a FROM test_rowcount WHERE a IN (1,2)
+CHECK DIAGNOSTICS (ROW_COUNT = 1);
+ERROR:  ROW_COUNT assertion failed: expected = 1, got = 2
+LINE 2: CHECK DIAGNOSTICS (ROW_COUNT = 1);
+                          ^
+-- Test 7: Syntax error - negative literal
+SELECT a FROM test_rowcount
+CHECK DIAGNOSTICS (ROW_COUNT = -1);
+ERROR:  ROW_COUNT must be a non-negative integer literal
+LINE 2: CHECK DIAGNOSTICS (ROW_COUNT = -1);
+                                       ^
+-- Test 8: Syntax error - non-literal
+PREPARE p(int) AS
+  SELECT a FROM test_rowcount WHERE a = $1
+  CHECK DIAGNOSTICS (ROW_COUNT = $1);
+ERROR:  syntax error at or near "CHECK"
+LINE 3:   CHECK DIAGNOSTICS (ROW_COUNT = $1);
+          ^
+-- Test 9: Feature not supported - VALUES clause
+VALUES (1), (2)
+CHECK DIAGNOSTICS (ROW_COUNT = 2);
+ERROR:  CHECK DIAGNOSTICS is not allowed in VALUES clause
+-- Test 10: Feature not supported - set operations
+SELECT a FROM test_rowcount WHERE a = 1
+UNION
+SELECT a FROM test_rowcount WHERE a = 2
+CHECK DIAGNOSTICS (ROW_COUNT = 2);
+ERROR:  CHECK DIAGNOSTICS is not allowed in set operations (UNION/INTERSECT/EXCEPT)
+-- Test 11: Syntax error - duplicate ROW_COUNT
+SELECT a FROM test_rowcount WHERE a = 1
+CHECK DIAGNOSTICS (ROW_COUNT = 1, ROW_COUNT = 1);
+ERROR:  ROW_COUNT can only be specified once
+LINE 2: CHECK DIAGNOSTICS (ROW_COUNT = 1, ROW_COUNT = 1);
+                                          ^
+-- Test 12: Syntax error - empty clause
+SELECT a FROM test_rowcount WHERE a = 1
+CHECK DIAGNOSTICS ();
+ERROR:  syntax error at or near ")"
+LINE 2: CHECK DIAGNOSTICS ();
+                           ^
+-- Test 13: Pass - within SQL-standard function body
+CREATE FUNCTION test_func(x int) RETURNS int
+BEGIN ATOMIC
+  SELECT a FROM test_rowcount WHERE a = x
+  CHECK DIAGNOSTICS (ROW_COUNT = 1);
+END;
+-- Test the function - should pass
+SELECT test_func(1);
+ test_func 
+-----------
+         1
+(1 row)
+
+-- Test the function - should fail
+SELECT test_func(999);
+ERROR:  ROW_COUNT assertion failed: expected = 1, got = 0
+CONTEXT:  SQL function "test_func" statement 1

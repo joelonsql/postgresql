@@ -156,6 +156,9 @@ base_yylex(YYSTYPE *lvalp, YYLTYPE *llocp, core_yyscan_t yyscanner)
 		case WITHOUT:
 			cur_token_length = 7;
 			break;
+		case CHECK:
+			cur_token_length = 5;
+			break;
 		default:
 			return cur_token;
 	}
@@ -246,6 +249,16 @@ base_yylex(YYSTYPE *lvalp, YYLTYPE *llocp, core_yyscan_t yyscanner)
 			{
 				case TIME:
 					cur_token = WITHOUT_LA;
+					break;
+			}
+			break;
+
+		case CHECK:
+			/* Replace CHECK by CHECK_LA if it's followed by DIAGNOSTICS */
+			switch (next_token)
+			{
+				case DIAGNOSTICS:
+					cur_token = CHECK_LA;
 					break;
 			}
 			break;

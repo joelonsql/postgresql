@@ -77,6 +77,8 @@ static Query *transformPLAssignStmt(ParseState *pstate,
 									PLAssignStmt *stmt);
 static Query *transformDeclareCursorStmt(ParseState *pstate,
 										 DeclareCursorStmt *stmt);
+static RowCountAssert *transformCheckDiagnosticsClause(ParseState *pstate,
+													   List *checkDiagnosticsClause);
 static Query *transformExplainStmt(ParseState *pstate,
 								   ExplainStmt *stmt);
 static Query *transformCreateTableAsStmt(ParseState *pstate,
@@ -608,6 +610,9 @@ transformDeleteStmt(ParseState *pstate, DeleteStmt *stmt)
 	qry->hasTargetSRFs = pstate->p_hasTargetSRFs;
 	qry->hasAggs = pstate->p_hasAggs;
 
+	qry->rowCountAssert = transformCheckDiagnosticsClause(pstate,
+														   stmt->checkDiagnosticsClause);
+
 	assign_query_collations(pstate, qry);
 
 	/* this must be done after collations, for reliable comparison of exprs */
@@ -1032,6 +1037,9 @@ transformInsertStmt(ParseState *pstate, InsertStmt *stmt)
 
 	qry->hasTargetSRFs = pstate->p_hasTargetSRFs;
 	qry->hasSubLinks = pstate->p_hasSubLinks;
+
+	qry->rowCountAssert = transformCheckDiagnosticsClause(pstate,
+														   stmt->checkDiagnosticsClause);
 
 	assign_query_collations(pstate, qry);
 
@@ -1485,6 +1493,9 @@ transformSelectStmt(ParseState *pstate, SelectStmt *stmt)
 												   pstate->p_windowdefs,
 												   &qry->targetList);
 
+	qry->rowCountAssert = transformCheckDiagnosticsClause(pstate,
+														  stmt->checkDiagnosticsClause);
+
 	/* resolve any still-unresolved output columns as being type text */
 	if (pstate->p_resolve_unknowns)
 		resolveTargetListUnknowns(pstate, qry->targetList);
@@ -1537,6 +1548,11 @@ transformValuesClause(ParseState *pstate, SelectStmt *stmt)
 	int			i;
 
 	qry->commandType = CMD_SELECT;
+
+	if (stmt->checkDiagnosticsClause != NIL)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("CHECK DIAGNOSTICS is not allowed in VALUES clause")));
 
 	/* Most SELECT stuff doesn't apply in a VALUES clause */
 	Assert(stmt->distinctClause == NIL);
@@ -1768,6 +1784,11 @@ transformSetOperationStmt(ParseState *pstate, SelectStmt *stmt)
 	int			tllen;
 
 	qry->commandType = CMD_SELECT;
+
+	if (stmt->checkDiagnosticsClause != NIL)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("CHECK DIAGNOSTICS is not allowed in set operations (UNION/INTERSECT/EXCEPT)")));
 
 	/*
 	 * Find leftmost leaf SelectStmt.  We currently only need to do this in
@@ -2513,6 +2534,9 @@ transformUpdateStmt(ParseState *pstate, UpdateStmt *stmt)
 
 	qry->hasTargetSRFs = pstate->p_hasTargetSRFs;
 	qry->hasSubLinks = pstate->p_hasSubLinks;
+
+	qry->rowCountAssert = transformCheckDiagnosticsClause(pstate,
+														   stmt->checkDiagnosticsClause);
 
 	assign_query_collations(pstate, qry);
 
@@ -3739,3 +3763,83 @@ test_raw_expression_coverage(Node *node, void *context)
 									  context);
 }
 #endif							/* DEBUG_NODE_TESTS_ENABLED */
+
+/*
+ * Transform CHECK DIAGNOSTICS clause
+ */
+static RowCountAssert *
+transformCheckDiagnosticsClause(ParseState *pstate, List *checkDiagnosticsClause)
+{
+	ListCell   *lc;
+	RowCountAssert *result = NULL;
+
+	if (checkDiagnosticsClause == NIL)
+		return NULL;
+
+	if (pstate->parentParseState != NULL)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("CHECK DIAGNOSTICS is only allowed on top-level statements")));
+
+	foreach(lc, checkDiagnosticsClause)
+	{
+		DefElem *elem = (DefElem *) lfirst(lc);
+
+		if (strcmp(elem->defname, "row_count") == 0)
+		{
+			Node *expr = elem->arg;
+			A_Const *con;
+			int64 expected;
+
+			if (result != NULL)
+				ereport(ERROR,
+						(errcode(ERRCODE_SYNTAX_ERROR),
+						 errmsg("ROW_COUNT can only be specified once"),
+						 parser_errposition(pstate, elem->location)));
+
+			if (expr == NULL)
+				ereport(ERROR,
+						(errcode(ERRCODE_SYNTAX_ERROR),
+						 errmsg("ROW_COUNT requires a value"),
+						 parser_errposition(pstate, elem->location)));
+
+			if (!IsA(expr, A_Const))
+				ereport(ERROR,
+						(errcode(ERRCODE_SYNTAX_ERROR),
+						 errmsg("ROW_COUNT must be a non-negative integer literal"),
+						 parser_errposition(pstate, exprLocation(expr))));
+
+			con = (A_Const *) expr;
+			if (con->isnull || !IsA(&con->val, Integer))
+				ereport(ERROR,
+						(errcode(ERRCODE_SYNTAX_ERROR),
+						 errmsg("ROW_COUNT must be a non-negative integer literal"),
+						 parser_errposition(pstate, exprLocation(expr))));
+
+			expected = (int64) intVal(&con->val);
+			if (expected < 0)
+				ereport(ERROR,
+						(errcode(ERRCODE_SYNTAX_ERROR),
+						 errmsg("ROW_COUNT must be a non-negative integer literal"),
+						 parser_errposition(pstate, exprLocation(expr))));
+
+			result = makeNode(RowCountAssert);
+			result->expected = expected;
+			result->location = elem->location;
+		}
+		else
+		{
+			ereport(ERROR,
+					(errcode(ERRCODE_SYNTAX_ERROR),
+					 errmsg("unrecognized CHECK DIAGNOSTICS item \"%s\"", elem->defname),
+					 parser_errposition(pstate, elem->location)));
+		}
+	}
+
+	if (result == NULL)
+		ereport(ERROR,
+				(errcode(ERRCODE_SYNTAX_ERROR),
+				 errmsg("CHECK DIAGNOSTICS clause cannot be empty")));
+
+	return result;
+}
