@@ -237,6 +237,9 @@ struct NumericData
 
 #define NUMERIC_DSCALE_MASK			0x3FFF
 #define NUMERIC_DSCALE_MAX			NUMERIC_DSCALE_MASK
+#define NUMERIC_DSCALE_MIN			0
+#define NUMERIC_WEIGHT_MAX			((0x20000/DEC_DIGITS)-1)
+#define NUMERIC_WEIGHT_MIN			(-(NUMERIC_DSCALE_MAX+1)/DEC_DIGITS)
 
 #define NUMERIC_SIGN(n) \
 	(NUMERIC_IS_SHORT(n) ? \
@@ -7699,12 +7702,18 @@ make_result_safe(const NumericVar *var, Node *escontext)
 		memcpy(NUMERIC_DIGITS(result), digits, n_bytes);
 	}
 
-	/* Check for overflow of int16 fields */
-	if (NUMERIC_WEIGHT(result) != weight ||
-		NUMERIC_DSCALE(result) != var->dscale)
+	/* Check for overflow */
+	if (weight > NUMERIC_WEIGHT_MAX ||
+		weight < NUMERIC_WEIGHT_MIN ||
+		var->dscale < NUMERIC_DSCALE_MIN ||
+		var->dscale > NUMERIC_DSCALE_MAX)
 		ereturn(escontext, NULL,
 				(errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
 				 errmsg("value overflows numeric format")));
+
+	/* Assert no overflow of int16 fields */
+	Assert(NUMERIC_WEIGHT(result) == weight);
+	Assert(NUMERIC_DSCALE(result) == var->dscale);
 
 	dump_numeric("make_result()", result);
 	return result;
