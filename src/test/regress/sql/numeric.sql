@@ -1609,7 +1609,7 @@ VALUES
 CHECKPOINT;
 
 SELECT regexp_replace(
-    right(encode(pg_read_binary_file(pg_relation_filepath('num_test_disk_format')),'hex'),16*8),
+    right(encode(pg_read_binary_file(pg_relation_filepath('num_test_disk_format')),'hex'),16*7),
     '([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})',
     '\1 \2 \3 \4 \5 \6 \7 \8'||E'\n',
     'g'
