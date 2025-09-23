@@ -101,7 +101,7 @@ typedef signed char NumericDigit;
 #define DIV_GUARD_DIGITS	4
 
 typedef uint8 NumericDigitData;
-typedef int16 NumericDigit;
+typedef int32 NumericDigit;
 #endif
 
 #define NBASE_SQR	(NBASE * NBASE)
@@ -238,7 +238,6 @@ struct NumericData
 #define NUMERIC_DSCALE_MASK			0x3FFF
 #define NUMERIC_DSCALE_MAX			NUMERIC_DSCALE_MASK
 #define NUMERIC_DSCALE_MIN			0
-#define NUMERIC_WEIGHT_MAX			((0x20000/DEC_DIGITS)-1)
 #define NUMERIC_WEIGHT_MIN			(-(NUMERIC_DSCALE_MAX+1)/DEC_DIGITS)
 
 #define NUMERIC_SIGN(n) \
@@ -493,7 +492,8 @@ static void dump_var(const char *str, NumericVar *var);
 #define NUMERIC_DIGITS(num) (NUMERIC_HEADER_IS_SHORT(num) ? \
 	(num)->choice.n_short.n_data : (num)->choice.n_long.n_data)
 #define NUMERIC_NBYTES(num) (VARSIZE(num) - NUMERIC_HEADER_SIZE(num))
-#define NUMERIC_NDIGITS(num) ((NUMERIC_NBYTES(num) + 1) / sizeof(NumericDigit))
+#define NUMERIC_NDIGITS(num) \
+	((NUMERIC_NBYTES(num) + sizeof(NumericDigit) - 1) / sizeof(NumericDigit))
 #define NUMERIC_CAN_BE_SHORT(scale,weight) \
 	((scale) <= NUMERIC_SHORT_DSCALE_MAX && \
 	(weight) <= NUMERIC_SHORT_WEIGHT_MAX && \
@@ -1059,8 +1059,9 @@ numeric_normalize(Numeric num)
 /*
  *		numeric_recv			- converts external binary format to numeric
  *
- * External format is a sequence of int16's:
- * ndigits, weight, sign, dscale, NumericDigits.
+ * External header format is a sequence of int16's:
+ * ndigits, weight, sign, dscale.
+ * followed by a sequence of bytes for NumericDigits.
  */
 Datum
 numeric_recv(PG_FUNCTION_ARGS)
@@ -1164,7 +1165,7 @@ numeric_send(PG_FUNCTION_ARGS)
 	pq_sendint16(&buf, x.sign);
 	pq_sendint16(&buf, x.dscale);
 	for (i = 0; i < x.ndigits; i++)
-		pq_sendint16(&buf, x.digits[i]);
+		pq_sendint32(&buf, x.digits[i]);
 
 	PG_RETURN_BYTEA_P(pq_endtypsend(&buf));
 }
@@ -2576,8 +2577,8 @@ cmp_numerics(Numeric num1, Numeric num2)
 		NumericDigit fixed_buf2[2] = {0};
 		int nbytes1 = NUMERIC_NBYTES(num1);
 		int nbytes2 = NUMERIC_NBYTES(num2);
-		int ndigits1 = (nbytes1 + 1) / sizeof(NumericDigit);
-		int ndigits2 = (nbytes2 + 1) / sizeof(NumericDigit);
+		int ndigits1 = (nbytes1 + sizeof(NumericDigit) - 1) / sizeof(NumericDigit);
+		int ndigits2 = (nbytes2 + sizeof(NumericDigit) - 1) / sizeof(NumericDigit);
 
 		if (nbytes1 == 1)
 		{
@@ -2779,7 +2780,7 @@ hash_numeric(PG_FUNCTION_ARGS)
 	 */
 	disk_digits = NUMERIC_DIGITS(key);
 	nbytes = NUMERIC_NBYTES(key);
-	ndigits = (nbytes + 1) / sizeof(NumericDigit);
+	ndigits = (nbytes + sizeof(NumericDigit) - 1) / sizeof(NumericDigit);
 	if (nbytes == 1)
 	{
 		fixed_buf[0] = 0;
@@ -2871,7 +2872,7 @@ hash_numeric_extended(PG_FUNCTION_ARGS)
 
 	disk_digits = NUMERIC_DIGITS(key);
 	nbytes = NUMERIC_NBYTES(key);
-	ndigits = (nbytes + 1) / sizeof(NumericDigit);
+	ndigits = (nbytes + sizeof(NumericDigit) - 1) / sizeof(NumericDigit);
 	if (nbytes == 1)
 	{
 		fixed_buf[0] = 0;
@@ -6658,17 +6659,26 @@ int2int4_sum(PG_FUNCTION_ARGS)
 static void
 dump_numeric(const char *str, Numeric num)
 {
-	NumericDigitData *disk_digits;
+	NumericDigitData *digit_data;
 	NumericDigit *digits;
+	int			nbytes;
 	int			ndigits;
 	int			i;
 
-	disk_digits = NUMERIC_DIGITS(num);
+	digit_data = NUMERIC_DIGITS(num);
+	nbytes = NUMERIC_NBYTES(num);
 	ndigits = NUMERIC_NDIGITS(num);
 	digits = digitbuf_alloc(ndigits);
-	for (i = 0; i < ndigits; i++)
+	if (nbytes == 1)
 	{
-		digits[i] = (NumericDigit) *((int16 *) &disk_digits[i*2]);
+		digits[0] = (NumericDigit) digit_data[0];
+	}
+	else
+	{
+		for (i = 0; i < ndigits; i++)
+		{
+			digits[i] = (NumericDigit) *((NumericDigit *) &digit_data[i*2]);
+		}
 	}
 
 	printf("%s: NUMERIC w=%d d=%d ", str,
@@ -6698,6 +6708,7 @@ dump_numeric(const char *str, Numeric num)
 	for (i = 0; i < ndigits; i++)
 		printf(" %0*d", DEC_DIGITS, digits[i]);
 	printf("\n");
+	digitbuf_free(digits);
 }
 
 
@@ -7237,7 +7248,7 @@ set_var_from_num(Numeric num, NumericVar *dest)
 {
 	int nbytes = NUMERIC_NBYTES(num);
 
-	alloc_var(dest, (nbytes + 1) / sizeof(NumericDigit));
+	alloc_var(dest, (nbytes + sizeof(NumericDigit) - 1) / sizeof(NumericDigit));
 
 	dest->weight = NUMERIC_WEIGHT(num);
 	dest->sign = NUMERIC_SIGN(num);
@@ -7282,7 +7293,7 @@ init_var_from_num(Numeric num, NumericVar *dest)
 	}
 	else
 	{
-		dest->ndigits = (nbytes + 1) / sizeof(NumericDigit);
+		dest->ndigits = (nbytes + sizeof(NumericDigit) - 1) / sizeof(NumericDigit);
 		dest->digits = (NumericDigit *) NUMERIC_DIGITS(num);
 	}
 
@@ -7564,7 +7575,7 @@ numericvar_serialize(StringInfo buf, const NumericVar *var)
 	pq_sendint32(buf, var->sign);
 	pq_sendint32(buf, var->dscale);
 	for (i = 0; i < var->ndigits; i++)
-		pq_sendint16(buf, var->digits[i]);
+		pq_sendint32(buf, var->digits[i]);
 }
 
 /*
@@ -7584,7 +7595,7 @@ numericvar_deserialize(StringInfo buf, NumericVar *var)
 	var->sign = pq_getmsgint(buf, sizeof(int32));
 	var->dscale = pq_getmsgint(buf, sizeof(int32));
 	for (i = 0; i < len; i++)
-		var->digits[i] = pq_getmsgint(buf, sizeof(int16));
+		var->digits[i] = pq_getmsgint(buf, sizeof(int32));
 }
 
 
@@ -12207,10 +12218,10 @@ accum_sum_final(NumericSumAccum *accum, NumericVar *result)
 	for (i = 0; i < accum->ndigits; i++)
 	{
 		Assert(accum->pos_digits[i] < NBASE);
-		pos_var.digits[i] = (int16) accum->pos_digits[i];
+		pos_var.digits[i] = accum->pos_digits[i];
 
 		Assert(accum->neg_digits[i] < NBASE);
-		neg_var.digits[i] = (int16) accum->neg_digits[i];
+		neg_var.digits[i] = accum->neg_digits[i];
 	}
 
 	/* And add them together */
