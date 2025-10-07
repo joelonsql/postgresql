@@ -24,8 +24,10 @@
  *	  All notification messages are placed in the queue and later read out
  *	  by listening backends.
  *
- *	  There is no central knowledge of which backend listens on which channel;
- *	  every backend has its own list of interesting channels.
+ *	  We also maintain a dynamic shared hash table (dshash) that maps channel
+ *	  names to the set of backends listening on each channel. This table is
+ *	  created lazily on the first LISTEN command and grows dynamically as
+ *	  needed.
  *
  *	  Although there is only one queue, notifications are treated as being
  *	  database-local; this is done by including the sender's database OID
@@ -68,16 +70,20 @@
  *	  CommitTransaction() which will then do the actual transaction commit.
  *
  *	  After commit we are called another time (AtCommit_Notify()). Here we
- *	  make any actual updates to the effective listen state (listenChannels).
+ *	  make any actual updates to the effective listen state (channelHash).
  *	  Then we signal any backends that may be interested in our messages
  *	  (including our own backend, if listening).  This is done by
- *	  SignalBackends(), which scans the list of listening backends and sends a
- *	  PROCSIG_NOTIFY_INTERRUPT signal to every listening backend (we don't
- *	  know which backend is listening on which channel so we must signal them
- *	  all).  We can exclude backends that are already up to date, though, and
- *	  we can also exclude backends that are in other databases (unless they
- *	  are way behind and should be kicked to make them advance their
- *	  pointers).
+ *	  SignalBackends(), which consults the shared channel hash table to
+ *	  identify listeners for the channels that have pending notifications
+ *	  in the current database.  Each selected backend is marked as having a
+ *	  wakeup pending to avoid duplicate signals, and a PROCSIG_NOTIFY_INTERRUPT
+ *	  signal is sent to it.
+ *
+ *	  To maintain queue health, SignalBackends() also wakes one backend
+ *	  positioned at the global queue tail to help advance it, and signals
+ *	  any backend that has fallen too far behind to catch up.  These measures
+ *	  prevent the notification queue from growing indefinitely, while mostly
+ *	  limiting wakeups to the backends that actually need them.
  *
  *	  Finally, after we are out of the transaction altogether and about to go
  *	  idle, we scan the queue for messages that need to be sent to our
@@ -128,6 +134,7 @@
 #include <limits.h>
 #include <unistd.h>
 #include <signal.h>
+#include <string.h>
 
 #include "access/parallel.h"
 #include "access/slru.h"
@@ -137,14 +144,17 @@
 #include "commands/async.h"
 #include "common/hashfn.h"
 #include "funcapi.h"
+#include "lib/dshash.h"
 #include "libpq/libpq.h"
 #include "libpq/pqformat.h"
 #include "miscadmin.h"
+#include "storage/dsm_registry.h"
 #include "storage/ipc.h"
 #include "storage/lmgr.h"
 #include "storage/procsignal.h"
 #include "tcop/tcopprot.h"
 #include "utils/builtins.h"
+#include "utils/dsa.h"
 #include "utils/guc_hooks.h"
 #include "utils/memutils.h"
 #include "utils/ps_status.h"
@@ -161,6 +171,29 @@
  * restrictions.
  */
 #define NOTIFY_PAYLOAD_MAX_LENGTH	(BLCKSZ - NAMEDATALEN - 128)
+
+/*
+ * Channel hash table definitions
+ *
+ * This hash table maps (database OID, channel name) keys to arrays of
+ * ProcNumbers representing the backends listening on each channel.
+ */
+
+#define INITIAL_LISTENERS_ARRAY_SIZE 4
+
+typedef struct ChannelHashKey
+{
+	Oid			dboid;
+	char		channel[NAMEDATALEN];
+} ChannelHashKey;
+
+typedef struct ChannelEntry
+{
+	ChannelHashKey key;
+	dsa_pointer listenersArray; /* DSA pointer to ProcNumber array */
+	int			numListeners;	/* Number of listeners currently stored */
+	int			allocatedListeners; /* Allocated size of array */
+} ChannelEntry;
 
 /*
  * Struct representing an entry in the global notify queue
@@ -227,8 +260,8 @@ typedef struct QueuePosition
 /*
  * Parameter determining how often we try to advance the tail pointer:
  * we do that after every QUEUE_CLEANUP_DELAY pages of NOTIFY data.  This is
- * also the distance by which a backend in another database needs to be
- * behind before we'll decide we need to wake it up to advance its pointer.
+ * also the distance by which a backend needs to be behind before we'll
+ * decide we need to wake it up to advance its pointer.
  *
  * Resist the temptation to make this really large.  While that would save
  * work in some places, it would add cost in others.  In particular, this
@@ -246,6 +279,7 @@ typedef struct QueueBackendStatus
 	Oid			dboid;			/* backend's database OID, or InvalidOid */
 	ProcNumber	nextListener;	/* id of next listener, or INVALID_PROC_NUMBER */
 	QueuePosition pos;			/* backend has read queue up to here */
+	bool		wakeupPending;	/* signal sent but not yet processed */
 } QueueBackendStatus;
 
 /*
@@ -288,10 +322,90 @@ typedef struct AsyncQueueControl
 	ProcNumber	firstListener;	/* id of first listener, or
 								 * INVALID_PROC_NUMBER */
 	TimestampTz lastQueueFillWarn;	/* time of last queue-full msg */
+	dsa_handle	channelHashDSA;
+	dshash_table_handle channelHashDSH;
 	QueueBackendStatus backend[FLEXIBLE_ARRAY_MEMBER];
 } AsyncQueueControl;
 
 static AsyncQueueControl *asyncQueueControl;
+
+static dsa_area *channelDSA = NULL;
+static dshash_table *channelHash = NULL;
+static dshash_hash channelHashFunc(const void *key, size_t size, void *arg);
+
+/* parameters for the channel hash table */
+static const dshash_parameters channelDSHParams = {
+	sizeof(ChannelHashKey),
+	sizeof(ChannelEntry),
+	dshash_memcmp,
+	channelHashFunc,
+	dshash_memcpy,
+	LWTRANCHE_NOTIFY_CHANNEL_HASH
+};
+
+/*
+ * channelHashFunc
+ *		Hash function for channel keys.
+ */
+static dshash_hash
+channelHashFunc(const void *key, size_t size, void *arg)
+{
+	const ChannelHashKey *k = (const ChannelHashKey *) key;
+	dshash_hash h;
+
+	h = DatumGetUInt32(hash_uint32(k->dboid));
+	h ^= DatumGetUInt32(hash_any((const unsigned char *) k->channel,
+								 strnlen(k->channel, NAMEDATALEN)));
+
+	return h;
+}
+
+/*
+ * initChannelHash
+ *		Lazy initialization of the channel hash table.
+ */
+static void
+initChannelHash(void)
+{
+	MemoryContext oldcontext;
+
+	/* Quick exit if we already did this */
+	if (asyncQueueControl->channelHashDSH != DSHASH_HANDLE_INVALID &&
+		channelHash != NULL)
+		return;
+
+	/* Otherwise, use a lock to ensure only one process creates the table */
+	LWLockAcquire(NotifyQueueLock, LW_EXCLUSIVE);
+
+	/* Be sure any local memory allocated by DSA routines is persistent */
+	oldcontext = MemoryContextSwitchTo(TopMemoryContext);
+
+	if (asyncQueueControl->channelHashDSH == DSHASH_HANDLE_INVALID)
+	{
+		/* Initialize dynamic shared hash table for channel hash */
+		channelDSA = dsa_create(LWTRANCHE_NOTIFY_CHANNEL_HASH);
+		dsa_pin(channelDSA);
+		dsa_pin_mapping(channelDSA);
+		channelHash = dshash_create(channelDSA, &channelDSHParams, NULL);
+
+		/* Store handles in shared memory for other backends to use */
+		asyncQueueControl->channelHashDSA = dsa_get_handle(channelDSA);
+		asyncQueueControl->channelHashDSH =
+			dshash_get_hash_table_handle(channelHash);
+	}
+	else if (!channelHash)
+	{
+		/* Attach to existing dynamic shared hash table */
+		channelDSA = dsa_attach(asyncQueueControl->channelHashDSA);
+		dsa_pin_mapping(channelDSA);
+		channelHash = dshash_attach(channelDSA, &channelDSHParams,
+									asyncQueueControl->channelHashDSH,
+									NULL);
+	}
+
+	MemoryContextSwitchTo(oldcontext);
+	LWLockRelease(NotifyQueueLock);
+}
 
 #define QUEUE_HEAD					(asyncQueueControl->head)
 #define QUEUE_TAIL					(asyncQueueControl->tail)
@@ -301,6 +415,7 @@ static AsyncQueueControl *asyncQueueControl;
 #define QUEUE_BACKEND_DBOID(i)		(asyncQueueControl->backend[i].dboid)
 #define QUEUE_NEXT_LISTENER(i)		(asyncQueueControl->backend[i].nextListener)
 #define QUEUE_BACKEND_POS(i)		(asyncQueueControl->backend[i].pos)
+#define QUEUE_BACKEND_WAKEUP_PENDING(i)	(asyncQueueControl->backend[i].wakeupPending)
 
 /*
  * The SLRU buffer area through which we access the notification queue
@@ -313,16 +428,10 @@ static SlruCtlData NotifyCtlData;
 #define QUEUE_FULL_WARN_INTERVAL	5000	/* warn at most once every 5s */
 
 /*
- * listenChannels identifies the channels we are actually listening to
- * (ie, have committed a LISTEN on).  It is a simple list of channel names,
- * allocated in TopMemoryContext.
- */
-static List *listenChannels = NIL;	/* list of C strings */
-
-/*
  * State for pending LISTEN/UNLISTEN actions consists of an ordered list of
  * all actions requested in the current transaction.  As explained above,
- * we don't actually change listenChannels until we reach transaction commit.
+ * we don't actually change the shared channelHash until we reach transaction
+ * commit.
  *
  * The list is kept in CurTransactionContext.  In subtransactions, each
  * subtransaction has its own list in its own CurTransactionContext, but
@@ -418,6 +527,9 @@ static bool unlistenExitRegistered = false;
 /* True if we're currently registered as a listener in asyncQueueControl */
 static bool amRegisteredListener = false;
 
+/* Count of channels we're currently listening on */
+static int	numChannelsListeningOn = 0;
+
 /* have we advanced to a page that's a multiple of QUEUE_CLEANUP_DELAY? */
 static bool tryAdvanceTail = false;
 
@@ -457,6 +569,8 @@ static void AddEventToPendingNotifies(Notification *n);
 static uint32 notification_hash(const void *key, Size keysize);
 static int	notification_match(const void *key1, const void *key2, Size keysize);
 static void ClearPendingActionsAndNotifies(void);
+static inline void ChannelHashPrepareKey(ChannelHashKey *key, Oid dboid, const char *channel);
+static List *GetPendingNotifyChannels(void);
 
 /*
  * Compute the difference between two queue page numbers.
@@ -521,12 +635,16 @@ AsyncShmemInit(void)
 		QUEUE_STOP_PAGE = 0;
 		QUEUE_FIRST_LISTENER = INVALID_PROC_NUMBER;
 		asyncQueueControl->lastQueueFillWarn = 0;
+		asyncQueueControl->channelHashDSA = DSA_HANDLE_INVALID;
+		asyncQueueControl->channelHashDSH = DSHASH_HANDLE_INVALID;
+
 		for (int i = 0; i < MaxBackends; i++)
 		{
 			QUEUE_BACKEND_PID(i) = InvalidPid;
 			QUEUE_BACKEND_DBOID(i) = InvalidOid;
 			QUEUE_NEXT_LISTENER(i) = INVALID_PROC_NUMBER;
 			SET_QUEUE_POS(QUEUE_BACKEND_POS(i), 0, 0);
+			QUEUE_BACKEND_WAKEUP_PENDING(i) = false;
 		}
 	}
 
@@ -683,7 +801,7 @@ Async_Notify(const char *channel, const char *payload)
  *		Common code for listen, unlisten, unlisten all commands.
  *
  *		Adds the request to the list of pending actions.
- *		Actual update of the listenChannels list happens during transaction
+ *		Actual update of the shared channelHash happens during transaction
  *		commit.
  */
 static void
@@ -782,24 +900,60 @@ Async_UnlistenAll(void)
 /*
  * SQL function: return a set of the channel names this backend is actively
  * listening to.
- *
- * Note: this coding relies on the fact that the listenChannels list cannot
- * change within a transaction.
  */
 Datum
 pg_listening_channels(PG_FUNCTION_ARGS)
 {
 	FuncCallContext *funcctx;
+	List	   *listenChannels;
 
 	/* stuff done only on the first call of the function */
 	if (SRF_IS_FIRSTCALL())
 	{
+		MemoryContext oldcontext;
+		dshash_seq_status status;
+		ChannelEntry *entry;
+
 		/* create a function context for cross-call persistence */
 		funcctx = SRF_FIRSTCALL_INIT();
+
+		/* get channels from channelHash and store in function context */
+		oldcontext = MemoryContextSwitchTo(funcctx->multi_call_memory_ctx);
+
+		listenChannels = NIL;
+
+		if (channelHash != NULL)
+		{
+			dshash_seq_init(&status, channelHash, false);
+			while ((entry = dshash_seq_next(&status)) != NULL)
+			{
+				if (entry->key.dboid == MyDatabaseId)
+				{
+					ProcNumber *listeners;
+
+					listeners = (ProcNumber *) dsa_get_address(channelDSA,
+															   entry->listenersArray);
+
+					for (int i = 0; i < entry->numListeners; i++)
+					{
+						if (listeners[i] == MyProcNumber)
+						{
+							listenChannels = lappend(listenChannels, pstrdup(entry->key.channel));
+							break;
+						}
+					}
+				}
+			}
+			dshash_seq_term(&status);
+		}
+
+		funcctx->user_fctx = listenChannels;
+		MemoryContextSwitchTo(oldcontext);
 	}
 
 	/* stuff done on every call of the function */
 	funcctx = SRF_PERCALL_SETUP();
+	listenChannels = (List *) funcctx->user_fctx;
 
 	if (funcctx->call_cntr < list_length(listenChannels))
 	{
@@ -957,7 +1111,7 @@ PreCommit_Notify(void)
  *
  *		This is called at transaction commit, after committing to clog.
  *
- *		Update listenChannels and clear transaction-local state.
+ *		Update channelHash and clear transaction-local state.
  *
  *		If we issued any notifications in the transaction, send signals to
  *		listening backends (possibly including ourselves) to process them.
@@ -1002,7 +1156,7 @@ AtCommit_Notify(void)
 	}
 
 	/* If no longer listening to anything, get out of listener array */
-	if (amRegisteredListener && listenChannels == NIL)
+	if (amRegisteredListener && numChannelsListeningOn == 0)
 		asyncQueueUnregister();
 
 	/*
@@ -1130,54 +1284,130 @@ Exec_ListenPreCommit(void)
 /*
  * Exec_ListenCommit --- subroutine for AtCommit_Notify
  *
- * Add the channel to the list of channels we are listening on.
+ * Add the channel to the shared channelHash.
  */
 static void
 Exec_ListenCommit(const char *channel)
 {
-	MemoryContext oldcontext;
+	ChannelHashKey key;
+	ChannelEntry *entry;
+	bool		found;
+	ProcNumber *listeners;
 
-	/* Do nothing if we are already listening on this channel */
-	if (IsListeningOn(channel))
-		return;
+	initChannelHash();
+
+	ChannelHashPrepareKey(&key, MyDatabaseId, channel);
 
 	/*
-	 * Add the new channel name to listenChannels.
-	 *
-	 * XXX It is theoretically possible to get an out-of-memory failure here,
-	 * which would be bad because we already committed.  For the moment it
-	 * doesn't seem worth trying to guard against that, but maybe improve this
-	 * later.
+	 * For new entries, we initialize listenersArray to InvalidDsaPointer as a
+	 * marker. This handles both the initial creation and potential retry
+	 * after OOM.
 	 */
-	oldcontext = MemoryContextSwitchTo(TopMemoryContext);
-	listenChannels = lappend(listenChannels, pstrdup(channel));
-	MemoryContextSwitchTo(oldcontext);
+	entry = dshash_find_or_insert(channelHash, &key, &found);
+
+	if (!found)
+		entry->listenersArray = InvalidDsaPointer;
+
+	if (!DsaPointerIsValid(entry->listenersArray))
+	{
+		/* First listener for this channel */
+		entry->listenersArray = dsa_allocate(channelDSA,
+											 sizeof(ProcNumber) * INITIAL_LISTENERS_ARRAY_SIZE);
+		entry->numListeners = 0;
+		entry->allocatedListeners = INITIAL_LISTENERS_ARRAY_SIZE;
+	}
+
+	listeners = (ProcNumber *) dsa_get_address(channelDSA,
+											   entry->listenersArray);
+
+	for (int i = 0; i < entry->numListeners; i++)
+	{
+		if (listeners[i] == MyProcNumber)
+		{
+			dshash_release_lock(channelHash, entry);
+			return;				/* Already registered */
+		}
+	}
+
+	if (entry->numListeners >= entry->allocatedListeners)
+	{
+		int			new_size = entry->allocatedListeners * 2;
+		dsa_pointer new_array = dsa_allocate(channelDSA,
+											 sizeof(ProcNumber) * new_size);
+		ProcNumber *new_listeners = (ProcNumber *) dsa_get_address(channelDSA,
+																   new_array);
+
+		memcpy(new_listeners, listeners,
+			   sizeof(ProcNumber) * entry->numListeners);
+
+		dsa_free(channelDSA, entry->listenersArray);
+		entry->listenersArray = new_array;
+		entry->allocatedListeners = new_size;
+		listeners = new_listeners;
+	}
+
+	listeners[entry->numListeners] = MyProcNumber;
+	entry->numListeners++;
+	numChannelsListeningOn++;
+
+	dshash_release_lock(channelHash, entry);
 }
 
 /*
  * Exec_UnlistenCommit --- subroutine for AtCommit_Notify
  *
- * Remove the specified channel name from listenChannels.
+ * Remove the specified channel from channelHash.
  */
 static void
 Exec_UnlistenCommit(const char *channel)
 {
-	ListCell   *q;
+	ChannelHashKey key;
+	ChannelEntry *entry;
+	ProcNumber *listeners;
+	int			i;
 
 	if (Trace_notify)
 		elog(DEBUG1, "Exec_UnlistenCommit(%s,%d)", channel, MyProcPid);
 
-	foreach(q, listenChannels)
-	{
-		char	   *lchan = (char *) lfirst(q);
+	if (channelHash == NULL)
+		return;
 
-		if (strcmp(lchan, channel) == 0)
+	ChannelHashPrepareKey(&key, MyDatabaseId, channel);
+
+	/* Look up the channel with exclusive lock so we can modify it */
+	entry = dshash_find(channelHash, &key, true);
+	if (entry == NULL)
+		return;
+
+	listeners = (ProcNumber *) dsa_get_address(channelDSA,
+											   entry->listenersArray);
+
+	for (i = 0; i < entry->numListeners; i++)
+	{
+		if (listeners[i] == MyProcNumber)
 		{
-			listenChannels = foreach_delete_current(listenChannels, q);
-			pfree(lchan);
-			break;
+			entry->numListeners--;
+			if (i < entry->numListeners)
+				memmove(&listeners[i], &listeners[i + 1],
+						sizeof(ProcNumber) * (entry->numListeners - i));
+
+			if (entry->numListeners == 0)
+			{
+				/* Last listener for this channel */
+				dsa_free(channelDSA, entry->listenersArray);
+				dshash_delete_entry(channelHash, entry);
+			}
+			else
+			{
+				dshash_release_lock(channelHash, entry);
+			}
+
+			numChannelsListeningOn--;
+			return;
 		}
 	}
+
+	dshash_release_lock(channelHash, entry);
 
 	/*
 	 * We do not complain about unlistening something not being listened;
@@ -1193,33 +1423,82 @@ Exec_UnlistenCommit(const char *channel)
 static void
 Exec_UnlistenAllCommit(void)
 {
+	dshash_seq_status status;
+	ChannelEntry *entry;
+
 	if (Trace_notify)
 		elog(DEBUG1, "Exec_UnlistenAllCommit(%d)", MyProcPid);
 
-	list_free_deep(listenChannels);
-	listenChannels = NIL;
+	if (channelHash == NULL)
+		return;
+
+	dshash_seq_init(&status, channelHash, true);
+	while ((entry = dshash_seq_next(&status)) != NULL)
+	{
+		if (entry->key.dboid == MyDatabaseId)
+		{
+			ProcNumber *listeners;
+			int			i;
+
+			listeners = (ProcNumber *) dsa_get_address(channelDSA,
+													   entry->listenersArray);
+
+			for (i = 0; i < entry->numListeners; i++)
+			{
+				if (listeners[i] == MyProcNumber)
+				{
+					entry->numListeners--;
+					if (i < entry->numListeners)
+						memmove(&listeners[i], &listeners[i + 1],
+								sizeof(ProcNumber) * (entry->numListeners - i));
+
+					if (entry->numListeners == 0)
+					{
+						dsa_free(channelDSA, entry->listenersArray);
+						dshash_delete_current(&status);
+					}
+					break;
+				}
+			}
+		}
+	}
+	dshash_seq_term(&status);
+	numChannelsListeningOn = 0;
 }
 
 /*
  * Test whether we are actively listening on the given channel name.
  *
  * Note: this function is executed for every notification found in the queue.
- * Perhaps it is worth further optimization, eg convert the list to a sorted
- * array so we can binary-search it.  In practice the list is likely to be
- * fairly short, though.
  */
 static bool
 IsListeningOn(const char *channel)
 {
-	ListCell   *p;
+	ChannelHashKey key;
+	ChannelEntry *entry;
+	ProcNumber *listeners;
 
-	foreach(p, listenChannels)
+	initChannelHash();
+
+	ChannelHashPrepareKey(&key, MyDatabaseId, channel);
+
+	entry = dshash_find(channelHash, &key, false);
+	if (entry == NULL)
+		return false;			/* No listeners registered for this channel */
+
+	listeners = (ProcNumber *) dsa_get_address(channelDSA,
+											   entry->listenersArray);
+
+	for (int i = 0; i < entry->numListeners; i++)
 	{
-		char	   *lchan = (char *) lfirst(p);
-
-		if (strcmp(lchan, channel) == 0)
+		if (listeners[i] == MyProcNumber)
+		{
+			dshash_release_lock(channelHash, entry);
 			return true;
+		}
 	}
+
+	dshash_release_lock(channelHash, entry);
 	return false;
 }
 
@@ -1230,7 +1509,7 @@ IsListeningOn(const char *channel)
 static void
 asyncQueueUnregister(void)
 {
-	Assert(listenChannels == NIL);	/* else caller error */
+	Assert(numChannelsListeningOn == 0);	/* else caller error */
 
 	if (!amRegisteredListener)	/* nothing to do */
 		return;
@@ -1565,12 +1844,16 @@ asyncQueueFillWarning(void)
 /*
  * Send signals to listening backends.
  *
- * Normally we signal only backends in our own database, since only those
- * backends could be interested in notifies we send.  However, if there's
- * notify traffic in our database but no traffic in another database that
- * does have listener(s), those listeners will fall further and further
- * behind.  Waken them anyway if they're far enough behind, so that they'll
- * advance their queue position pointers, allowing the global tail to advance.
+ * Normally we signal only backends registered as listeners for channels
+ * with pending notifications.  However, when there is no traffic on some
+ * channels, listeners on such channels will fall further and further
+ * behind.  Waken them if they are too far behind, so that they'll
+ * advance their queue position pointers, allowing the global tail to
+ * advance.
+ *
+ * To stagger wakeups of lagging backends, wake the backend furthest
+ * behind (at the tail), amortizing the context-switching cost across
+ * successive notifications instead of paying it all at once.
  *
  * Since we know the ProcNumber and the Pid the signaling is quite cheap.
  *
@@ -1583,6 +1866,9 @@ SignalBackends(void)
 	int32	   *pids;
 	ProcNumber *procnos;
 	int			count;
+	List	   *channels;
+	ListCell   *lc;
+	int64		queue_length;
 
 	/*
 	 * Identify backends that we need to signal.  We don't want to send
@@ -1596,37 +1882,109 @@ SignalBackends(void)
 	procnos = (ProcNumber *) palloc(MaxBackends * sizeof(ProcNumber));
 	count = 0;
 
-	LWLockAcquire(NotifyQueueLock, LW_EXCLUSIVE);
-	for (ProcNumber i = QUEUE_FIRST_LISTENER; i != INVALID_PROC_NUMBER; i = QUEUE_NEXT_LISTENER(i))
-	{
-		int32		pid = QUEUE_BACKEND_PID(i);
-		QueuePosition pos;
+	channels = GetPendingNotifyChannels();
 
-		Assert(pid != InvalidPid);
-		pos = QUEUE_BACKEND_POS(i);
-		if (QUEUE_BACKEND_DBOID(i) == MyDatabaseId)
+	LWLockAcquire(NotifyQueueLock, LW_EXCLUSIVE);
+	foreach(lc, channels)
+	{
+		char	   *channel = (char *) lfirst(lc);
+		ChannelEntry *entry = NULL;
+		ProcNumber *listeners;
+
+		if (channelHash != NULL)
 		{
-			/*
-			 * Always signal listeners in our own database, unless they're
-			 * already caught up (unlikely, but possible).
-			 */
+			ChannelHashKey key;
+
+			ChannelHashPrepareKey(&key, MyDatabaseId, channel);
+			entry = dshash_find(channelHash, &key, false);
+		}
+
+		if (entry == NULL)
+			continue;			/* No listeners registered for this channel */
+
+		listeners = (ProcNumber *) dsa_get_address(channelDSA,
+												   entry->listenersArray);
+
+		for (int j = 0; j < entry->numListeners; j++)
+		{
+			ProcNumber	i = listeners[j];
+			int32		pid;
+			QueuePosition pos;
+
+			if (QUEUE_BACKEND_WAKEUP_PENDING(i))
+				continue;
+
+			pos = QUEUE_BACKEND_POS(i);
+			pid = QUEUE_BACKEND_PID(i);
+
+			/* Skip if caught up or wrong database */
 			if (QUEUE_POS_EQUAL(pos, QUEUE_HEAD))
 				continue;
-		}
-		else
-		{
-			/*
-			 * Listeners in other databases should be signaled only if they
-			 * are far behind.
-			 */
-			if (asyncQueuePageDiff(QUEUE_POS_PAGE(QUEUE_HEAD),
-								   QUEUE_POS_PAGE(pos)) < QUEUE_CLEANUP_DELAY)
+			if (QUEUE_BACKEND_DBOID(i) != MyDatabaseId)
 				continue;
+
+			Assert(pid != InvalidPid);
+
+			QUEUE_BACKEND_WAKEUP_PENDING(i) = true;
+			pids[count] = pid;
+			procnos[count] = i;
+			count++;
 		}
-		/* OK, need to signal this one */
-		pids[count] = pid;
-		procnos[count] = i;
-		count++;
+
+		dshash_release_lock(channelHash, entry);
+	}
+
+	queue_length = asyncQueuePageDiff(QUEUE_POS_PAGE(QUEUE_HEAD),
+									  QUEUE_POS_PAGE(QUEUE_TAIL));
+
+	/* Check for lagging backends when the queue spans multiple pages */
+	if (queue_length > 0)
+	{
+		bool		tail_woken = false;
+
+		for (ProcNumber i = QUEUE_FIRST_LISTENER;
+			 i != INVALID_PROC_NUMBER;
+			 i = QUEUE_NEXT_LISTENER(i))
+		{
+			QueuePosition pos;
+			int64		lag;
+			int32		pid;
+
+			if (QUEUE_BACKEND_WAKEUP_PENDING(i))
+				continue;
+
+			pos = QUEUE_BACKEND_POS(i);
+
+			/* Signal one backend positioned at the global tail */
+			if (!tail_woken && asyncQueuePageDiff(QUEUE_POS_PAGE(QUEUE_TAIL),
+												  QUEUE_POS_PAGE(pos)) == 0)
+			{
+				pid = QUEUE_BACKEND_PID(i);
+				Assert(pid != InvalidPid);
+
+				QUEUE_BACKEND_WAKEUP_PENDING(i) = true;
+				pids[count] = pid;
+				procnos[count] = i;
+				count++;
+				tail_woken = true;
+				continue;
+			}
+
+			lag = asyncQueuePageDiff(QUEUE_POS_PAGE(QUEUE_HEAD),
+									 QUEUE_POS_PAGE(pos));
+
+			/* Need to signal if a backend has fallen too far behind */
+			if (lag >= QUEUE_CLEANUP_DELAY)
+			{
+				pid = QUEUE_BACKEND_PID(i);
+				Assert(pid != InvalidPid);
+
+				QUEUE_BACKEND_WAKEUP_PENDING(i) = true;
+				pids[count] = pid;
+				procnos[count] = i;
+				count++;
+			}
+		}
 	}
 	LWLockRelease(NotifyQueueLock);
 
@@ -1673,9 +2031,9 @@ AtAbort_Notify(void)
 	/*
 	 * If we LISTEN but then roll back the transaction after PreCommit_Notify,
 	 * we have registered as a listener but have not made any entry in
-	 * listenChannels.  In that case, deregister again.
+	 * channelHash.  In that case, deregister again.
 	 */
-	if (amRegisteredListener && listenChannels == NIL)
+	if (amRegisteredListener && numChannelsListeningOn == 0)
 		asyncQueueUnregister();
 
 	/* And clean up */
@@ -1865,6 +2223,7 @@ asyncQueueReadAllNotifications(void)
 	LWLockAcquire(NotifyQueueLock, LW_SHARED);
 	/* Assert checks that we have a valid state entry */
 	Assert(MyProcPid == QUEUE_BACKEND_PID(MyProcNumber));
+	QUEUE_BACKEND_WAKEUP_PENDING(MyProcNumber) = false;
 	pos = QUEUE_BACKEND_POS(MyProcNumber);
 	head = QUEUE_HEAD;
 	LWLockRelease(NotifyQueueLock);
@@ -2186,7 +2545,7 @@ ProcessIncomingNotify(bool flush)
 	notifyInterruptPending = false;
 
 	/* Do nothing else if we aren't actively listening */
-	if (listenChannels == NIL)
+	if (numChannelsListeningOn == 0)
 		return;
 
 	if (Trace_notify)
@@ -2394,4 +2753,56 @@ bool
 check_notify_buffers(int *newval, void **extra, GucSource source)
 {
 	return check_slru_buffers("notify_buffers", newval);
+}
+
+
+/*
+ * ChannelHashPrepareKey
+ *		Prepare a channel key for use as a hash key.
+ */
+static inline void
+ChannelHashPrepareKey(ChannelHashKey *key, Oid dboid, const char *channel)
+{
+	memset(key, 0, sizeof(ChannelHashKey));
+	key->dboid = dboid;
+	strlcpy(key->channel, channel, NAMEDATALEN);
+}
+
+/*
+ * GetPendingNotifyChannels
+ *		Get list of unique channel names from pending notifications.
+ */
+static List *
+GetPendingNotifyChannels(void)
+{
+	List	   *channels = NIL;
+	ListCell   *p;
+	ListCell   *q;
+	bool		found;
+
+	if (!pendingNotifies)
+		return NIL;
+
+	foreach(p, pendingNotifies->events)
+	{
+		Notification *n = (Notification *) lfirst(p);
+		char	   *channel = n->data;
+
+		found = false;
+		foreach(q, channels)
+		{
+			char	   *existing = (char *) lfirst(q);
+
+			if (strcmp(existing, channel) == 0)
+			{
+				found = true;
+				break;
+			}
+		}
+
+		if (!found)
+			channels = lappend(channels, channel);
+	}
+
+	return channels;
 }
