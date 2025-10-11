@@ -500,6 +500,8 @@ typedef struct NotificationList
 	int			nestingLevel;	/* current transaction nesting depth */
 	List	   *events;			/* list of Notification structs */
 	HTAB	   *hashtab;		/* hash of NotificationHash structs, or NULL */
+	QueuePosition queueHeadBeforeWrite; /* QUEUE_HEAD before writing notifies */
+	QueuePosition queueHeadAfterWrite;	/* QUEUE_HEAD after writing notifies */
 	struct NotificationList *upper; /* details for upper transaction levels */
 } NotificationList;
 
@@ -1048,6 +1050,7 @@ PreCommit_Notify(void)
 	if (pendingNotifies)
 	{
 		ListCell   *nextNotify;
+		bool		firstIteration = true;
 
 		/*
 		 * Make sure that we have an XID assigned to the current transaction.
@@ -1076,6 +1079,9 @@ PreCommit_Notify(void)
 		LockSharedObject(DatabaseRelationId, InvalidOid, 0,
 						 AccessExclusiveLock);
 
+		/* Initialize queueHeadBeforeWrite to a safe default */
+		SET_QUEUE_POS(pendingNotifies->queueHeadBeforeWrite, 0, 0);
+
 		/* Now push the notifications into the queue */
 		nextNotify = list_head(pendingNotifies->events);
 		while (nextNotify != NULL)
@@ -1093,6 +1099,19 @@ PreCommit_Notify(void)
 			 * point in time we can still roll the transaction back.
 			 */
 			LWLockAcquire(NotifyQueueLock, LW_EXCLUSIVE);
+
+			/*
+			 * On the first iteration, save the queue head position before we
+			 * write any notifications.  This is used by SignalBackends() to
+			 * identify backends that can be advanced directly without waking
+			 * them up.
+			 */
+			if (firstIteration)
+			{
+				pendingNotifies->queueHeadBeforeWrite = QUEUE_HEAD;
+				firstIteration = false;
+			}
+
 			asyncQueueFillWarning();
 			if (asyncQueueIsFull())
 				ereport(ERROR,
@@ -1101,6 +1120,18 @@ PreCommit_Notify(void)
 			nextNotify = asyncQueueAddEntries(nextNotify);
 			LWLockRelease(NotifyQueueLock);
 		}
+
+		/*
+		 * Save the queue head after writing all our notifications.  This is
+		 * used by SignalBackends() to know where to advance idle backends to.
+		 * We must save this now because other backends may write their own
+		 * notifications after we release the heavyweight lock but before we
+		 * call SignalBackends(), and we must not advance backends over those
+		 * other notifications.
+		 */
+		LWLockAcquire(NotifyQueueLock, LW_SHARED);
+		pendingNotifies->queueHeadAfterWrite = QUEUE_HEAD;
+		LWLockRelease(NotifyQueueLock);
 
 		/* Note that we don't clear pendingNotifies; AtCommit_Notify will. */
 	}
@@ -1934,14 +1965,43 @@ SignalBackends(void)
 		dshash_release_lock(channelHash, entry);
 	}
 
+	/*
+	 * Avoid needing to wake listening backends that are at the old queue head
+	 * (before we wrote our notifications) that we know are not interested in
+	 * our notifications, since otherwise they would have been marked for
+	 * wakeup by now.  Do this by advancing them directly to the new queue
+	 * head.
+	 */
+	if (pendingNotifies != NULL)
+	{
+		QueuePosition oldHead = pendingNotifies->queueHeadBeforeWrite;
+		QueuePosition newHead = pendingNotifies->queueHeadAfterWrite;
+
+		for (ProcNumber i = QUEUE_FIRST_LISTENER;
+			 i != INVALID_PROC_NUMBER;
+			 i = QUEUE_NEXT_LISTENER(i))
+		{
+			QueuePosition pos;
+
+			if (QUEUE_BACKEND_WAKEUP_PENDING(i))
+				continue;
+
+			pos = QUEUE_BACKEND_POS(i);
+
+			if (QUEUE_POS_EQUAL(pos, oldHead) &&
+				QUEUE_BACKEND_DBOID(i) == MyDatabaseId)
+			{
+				QUEUE_BACKEND_POS(i) = newHead;
+			}
+		}
+	}
+
 	queue_length = asyncQueuePageDiff(QUEUE_POS_PAGE(QUEUE_HEAD),
 									  QUEUE_POS_PAGE(QUEUE_TAIL));
 
 	/* Check for lagging backends when the queue spans multiple pages */
 	if (queue_length > 0)
 	{
-		bool		tail_woken = false;
-
 		for (ProcNumber i = QUEUE_FIRST_LISTENER;
 			 i != INVALID_PROC_NUMBER;
 			 i = QUEUE_NEXT_LISTENER(i))
@@ -1954,21 +2014,6 @@ SignalBackends(void)
 				continue;
 
 			pos = QUEUE_BACKEND_POS(i);
-
-			/* Signal one backend positioned at the global tail */
-			if (!tail_woken && asyncQueuePageDiff(QUEUE_POS_PAGE(QUEUE_TAIL),
-												  QUEUE_POS_PAGE(pos)) == 0)
-			{
-				pid = QUEUE_BACKEND_PID(i);
-				Assert(pid != InvalidPid);
-
-				QUEUE_BACKEND_WAKEUP_PENDING(i) = true;
-				pids[count] = pid;
-				procnos[count] = i;
-				count++;
-				tail_woken = true;
-				continue;
-			}
 
 			lag = asyncQueuePageDiff(QUEUE_POS_PAGE(QUEUE_HEAD),
 									 QUEUE_POS_PAGE(pos));
