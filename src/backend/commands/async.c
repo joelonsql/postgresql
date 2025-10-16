@@ -955,6 +955,63 @@ pg_listening_channels(PG_FUNCTION_ARGS)
 }
 
 /*
+ * SQL function: return a set of all channels being listened to across all
+ * backends, with their database OID and listener process number.
+ *
+ * Returns one row per (procnumber, dboid, channel_name) combination.
+ */
+Datum
+pg_global_listening_channels(PG_FUNCTION_ARGS)
+{
+#define PG_GLOBAL_LISTENING_CHANNELS_COLS 3
+	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
+	dshash_seq_status status;
+	ChannelEntry *entry;
+
+	InitMaterializedSRF(fcinfo, 0);
+
+	initChannelHash();
+	
+	/*
+	 * Scan through all channel entries in the shared hash table.
+	 * We need SHARED lock on NotifyQueueLock to safely read backend entries.
+	 */
+	LWLockAcquire(NotifyQueueLock, LW_SHARED);
+
+	dshash_seq_init(&status, channelHash, false);
+	while ((entry = dshash_seq_next(&status)) != NULL)
+	{
+		ProcNumber *listeners;
+		int			i;
+
+		/* Get the listeners array for this channel */
+		listeners = (ProcNumber *) dsa_get_address(channelDSA,
+												   entry->listenersArray);
+
+		/* Output one row for each listener */
+		for (i = 0; i < entry->numListeners; i++)
+		{
+			Datum		values[PG_GLOBAL_LISTENING_CHANNELS_COLS];
+			bool		nulls[PG_GLOBAL_LISTENING_CHANNELS_COLS];
+
+			memset(nulls, 0, sizeof(nulls));
+
+			values[0] = Int32GetDatum(listeners[i]);
+			values[1] = ObjectIdGetDatum(entry->key.dboid);
+			values[2] = CStringGetTextDatum(entry->key.channel);
+
+			tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc,
+								 values, nulls);
+		}
+	}
+	dshash_seq_term(&status);
+
+	LWLockRelease(NotifyQueueLock);
+
+	return (Datum) 0;
+}
+
+/*
  * Async_UnlistenOnExit
  *
  * This is executed at backend exit if we have done any LISTENs in this
