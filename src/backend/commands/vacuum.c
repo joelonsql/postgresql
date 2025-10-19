@@ -37,6 +37,7 @@
 #include "catalog/namespace.h"
 #include "catalog/pg_database.h"
 #include "catalog/pg_inherits.h"
+#include "commands/async.h"
 #include "commands/cluster.h"
 #include "commands/defrem.h"
 #include "commands/progress.h"
@@ -1732,6 +1733,19 @@ vac_update_datfrozenxid(void)
 	/* chicken out if bogus data found */
 	if (bogus)
 		return;
+
+	/*
+	 * Also consider the oldest XID in the notification queue, since
+	 * backends will need to call TransactionIdDidCommit() on those
+	 * XIDs when processing the notifications.
+	 */
+	{
+		TransactionId oldestNotifyXid = GetOldestQueuedNotifyXid();
+
+		if (TransactionIdIsValid(oldestNotifyXid) &&
+			TransactionIdPrecedes(oldestNotifyXid, newFrozenXid))
+			newFrozenXid = oldestNotifyXid;
+	}
 
 	Assert(TransactionIdIsNormal(newFrozenXid));
 	Assert(MultiXactIdIsValid(newMinMulti));
