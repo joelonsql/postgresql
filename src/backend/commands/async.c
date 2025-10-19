@@ -264,6 +264,12 @@ typedef struct QueuePosition
 	 (x).page != (y).page ? (x) : \
 	 (x).offset > (y).offset ? (x) : (y))
 
+/* choose logically smaller QueuePosition */
+#define QUEUE_POS_MIN(x,y) \
+	(asyncQueuePagePrecedes((x).page, (y).page) ? (x) : \
+	 (x).page != (y).page ? (y) : \
+	 (x).offset < (y).offset ? (x) : (y))
+
 /* returns true if x comes before y in queue order */
 #define QUEUE_POS_PRECEDES(x,y) \
 	(asyncQueuePagePrecedes((x).page, (y).page) || \
@@ -283,6 +289,25 @@ typedef struct QueuePosition
 #define QUEUE_CLEANUP_DELAY 4
 
 /*
+ * Maximum number of skip ranges per backend.
+ * This limits memory usage while still allowing multiple non-contiguous
+ * ranges of notifications to be skipped.
+ */
+#define MAX_SKIP_RANGES 5
+
+/*
+ * A range of queue positions that can be skipped during notification reading.
+ * This allows notifying backends to tell listeners about queue regions that
+ * contain no notifications of interest, even when the listener is actively
+ * processing other notifications.
+ */
+typedef struct SkipRange
+{
+	QueuePosition start;		/* first position to skip */
+	QueuePosition end;			/* position after last to skip */
+} SkipRange;
+
+/*
  * Struct describing a listening backend's status
  */
 typedef struct QueueBackendStatus
@@ -291,8 +316,9 @@ typedef struct QueueBackendStatus
 	Oid			dboid;			/* backend's database OID, or InvalidOid */
 	ProcNumber	nextListener;	/* id of next listener, or INVALID_PROC_NUMBER */
 	QueuePosition pos;			/* backend has read queue up to here */
-	QueuePosition advisoryPos;	/* backend could skip queue to here */
 	bool		wakeupPending;	/* signal sent but not yet processed */
+	int			numSkipRanges;	/* number of active skip ranges */
+	SkipRange	skipRanges[MAX_SKIP_RANGES]; /* ranges to skip when reading */
 } QueueBackendStatus;
 
 /*
@@ -353,8 +379,9 @@ static dshash_table *channelHash = NULL;
 #define QUEUE_BACKEND_DBOID(i)		(asyncQueueControl->backend[i].dboid)
 #define QUEUE_NEXT_LISTENER(i)		(asyncQueueControl->backend[i].nextListener)
 #define QUEUE_BACKEND_POS(i)		(asyncQueueControl->backend[i].pos)
-#define QUEUE_BACKEND_ADVISORY_POS(i)	(asyncQueueControl->backend[i].advisoryPos)
 #define QUEUE_BACKEND_WAKEUP_PENDING(i)	(asyncQueueControl->backend[i].wakeupPending)
+#define QUEUE_BACKEND_NUM_SKIP_RANGES(i)	(asyncQueueControl->backend[i].numSkipRanges)
+#define QUEUE_BACKEND_SKIP_RANGES(i)	(asyncQueueControl->backend[i].skipRanges)
 
 /*
  * The SLRU buffer area through which we access the notification queue
@@ -523,7 +550,9 @@ static void asyncQueueReadAllNotifications(void);
 static bool asyncQueueProcessPageEntries(volatile QueuePosition *current,
 										 QueuePosition stop,
 										 char *page_buffer,
-										 Snapshot snapshot);
+										 Snapshot snapshot,
+										 const SkipRange *skipRanges,
+										 int numSkipRanges);
 static void asyncQueueAdvanceTail(void);
 static void ProcessIncomingNotify(bool flush);
 static bool AsyncExistsPendingNotify(Notification *n);
@@ -534,6 +563,9 @@ static void ClearPendingActionsAndNotifies(void);
 static inline void ChannelHashPrepareKey(ChannelHashKey *key, Oid dboid, const char *channel);
 static dshash_hash channelHashFunc(const void *key, size_t size, void *arg);
 static void initChannelHash(void);
+static void AddSkipRange(ProcNumber proc, QueuePosition start, QueuePosition end);
+static bool ShouldSkipPosition(QueuePosition pos, const SkipRange *ranges, int numRanges);
+static QueuePosition GetFurthestPosition(QueuePosition pos, const SkipRange *ranges, int numRanges);
 
 /*
  * Compute the difference between two queue page numbers.
@@ -630,6 +662,132 @@ initChannelHash(void)
 }
 
 /*
+ * AddSkipRange
+ *		Add a skip range to the specified backend's skip range array.
+ *
+ * This function attempts to merge the new range with existing adjacent or
+ * overlapping ranges. If the array is full and no merge is possible, we
+ * extend existing ranges to accommodate the new range.
+ *
+ * The caller must hold NotifyQueueLock in at least SHARED mode.
+ */
+static void
+AddSkipRange(ProcNumber proc, QueuePosition start, QueuePosition end)
+{
+	SkipRange  *ranges = QUEUE_BACKEND_SKIP_RANGES(proc);
+	int		   *numRanges = &QUEUE_BACKEND_NUM_SKIP_RANGES(proc);
+	int			i;
+
+	/* Don't add empty ranges */
+	if (QUEUE_POS_EQUAL(start, end))
+		return;
+
+	/*
+	 * Try to merge with existing ranges. We look for ranges that are adjacent
+	 * or overlapping with the new range [start, end).
+	 */
+	for (i = 0; i < *numRanges; i++)
+	{
+		/*
+		 * Check if the new range can be merged with this existing range.
+		 * Ranges can be merged if they overlap or are adjacent.
+		 */
+		if (QUEUE_POS_PRECEDES(start, ranges[i].end) &&
+			QUEUE_POS_PRECEDES(ranges[i].start, end))
+		{
+			/* Ranges overlap or are adjacent - merge them */
+			ranges[i].start = QUEUE_POS_MIN(ranges[i].start, start);
+			ranges[i].end = QUEUE_POS_MAX(ranges[i].end, end);
+
+			/*
+			 * Now check if this merged range can be further merged with any
+			 * subsequent ranges.
+			 */
+			for (int j = i + 1; j < *numRanges; j++)
+			{
+				if (QUEUE_POS_PRECEDES(ranges[i].start, ranges[j].end) &&
+					QUEUE_POS_PRECEDES(ranges[j].start, ranges[i].end))
+				{
+					/* Merge range j into range i */
+					ranges[i].start = QUEUE_POS_MIN(ranges[i].start, ranges[j].start);
+					ranges[i].end = QUEUE_POS_MAX(ranges[i].end, ranges[j].end);
+
+					/* Remove range j by shifting remaining ranges down */
+					for (int k = j; k < *numRanges - 1; k++)
+						ranges[k] = ranges[k + 1];
+					(*numRanges)--;
+					j--; /* Recheck this position */
+				}
+			}
+			return;
+		}
+	}
+
+	/*
+	 * No merge possible. If there's room, add as a new range.
+	 */
+	if (*numRanges < MAX_SKIP_RANGES)
+	{
+		ranges[*numRanges].start = start;
+		ranges[*numRanges].end = end;
+		(*numRanges)++;
+		return;
+	}
+
+	/*
+	 * Array is full and no merge was possible.
+	 *
+	 * We cannot safely extend existing ranges to cover the new range because
+	 * that would skip notifications in the gaps between ranges - gaps that we
+	 * were never told were safe to skip. For example, if we have ranges
+	 * [100,200) and [300,400), and we try to add [500,600), extending the
+	 * last range to [300,600) would incorrectly skip [400,500) which may
+	 * contain notifications this backend needs to read.
+	 *
+	 * Instead, we simply don't add this range. The backend will read these
+	 * notifications normally, which is safe (just less optimal). Skip ranges
+	 * are an optimization, not required for correctness.
+	 */
+	return;
+}
+
+/*
+ * ShouldSkipPosition
+ *		Check if the given position falls within any of the skip ranges.
+ */
+static bool
+ShouldSkipPosition(QueuePosition pos, const SkipRange *ranges, int numRanges)
+{
+	for (int i = 0; i < numRanges; i++)
+	{
+		if (!QUEUE_POS_PRECEDES(pos, ranges[i].start) &&
+			QUEUE_POS_PRECEDES(pos, ranges[i].end))
+			return true;
+	}
+	return false;
+}
+
+/*
+ * GetFurthestPosition
+ *		Get the furthest position considering both the base position and
+ *		all skip ranges.
+ *
+ * This is used for lag calculation in SignalBackends().
+ */
+static QueuePosition
+GetFurthestPosition(QueuePosition pos, const SkipRange *ranges, int numRanges)
+{
+	QueuePosition furthest = pos;
+
+	for (int i = 0; i < numRanges; i++)
+	{
+		furthest = QUEUE_POS_MAX(furthest, ranges[i].end);
+	}
+
+	return furthest;
+}
+
+/*
  * Report space needed for our shared memory area
  */
 Size
@@ -681,8 +839,8 @@ AsyncShmemInit(void)
 			QUEUE_BACKEND_DBOID(i) = InvalidOid;
 			QUEUE_NEXT_LISTENER(i) = INVALID_PROC_NUMBER;
 			SET_QUEUE_POS(QUEUE_BACKEND_POS(i), 0, 0);
-			SET_QUEUE_POS(QUEUE_BACKEND_ADVISORY_POS(i), 0, 0);
 			QUEUE_BACKEND_WAKEUP_PENDING(i) = false;
+			QUEUE_BACKEND_NUM_SKIP_RANGES(i) = 0;
 		}
 	}
 
@@ -1320,7 +1478,7 @@ Exec_ListenPreCommit(void)
 			prevListener = i;
 	}
 	QUEUE_BACKEND_POS(MyProcNumber) = max;
-	QUEUE_BACKEND_ADVISORY_POS(MyProcNumber) = max;
+	QUEUE_BACKEND_NUM_SKIP_RANGES(MyProcNumber) = 0;
 	QUEUE_BACKEND_PID(MyProcNumber) = MyProcPid;
 	QUEUE_BACKEND_DBOID(MyProcNumber) = MyDatabaseId;
 	/* Insert backend into list of listeners at correct position */
@@ -2030,28 +2188,30 @@ SignalBackends(void)
 	}
 
 	/*
-	 * Direct advancement and lagging backend detection.
+	 * Skip range addition and lagging backend detection.
 	 *
-	 * Direct advancement: avoid waking backends still positioned at the old
-	 * queue head that aren't interested in our notifications.
+	 * Skip ranges: tell backends about queue regions they can skip without
+	 * reading. This works even when backends are actively processing
+	 * notifications, unlike the old advisoryPos which only worked for idle
+	 * backends.
 	 *
 	 * The heavyweight lock on database 0 (held in PreCommit_Notify) ensures
 	 * no other backend can insert notifications in the region we just wrote.
 	 * Even though we may take and release NotifyQueueLock multiple times
 	 * while writing, the heavyweight lock guarantees this region contains
-	 * only our messages.  Therefore, any backend still positioned at the
-	 * queue head from before our write can be advised to skip to the current
-	 * queue head without waking it.
+	 * only our messages. Therefore, any backend can safely skip this region
+	 * if it's not interested in our notifications.
 	 *
-	 * We use the advisoryPos field rather than directly modifying pos.
-	 * The backend controls its own pos field and will check advisoryPos
-	 * when it's safe to do so.
+	 * We add skip ranges for all backends in our database, not just those
+	 * that are listening on channels other than ours. The AddSkipRange
+	 * function handles merging with existing ranges to keep the array
+	 * manageable.
 	 *
 	 * False-positive possibility: if a backend was previously signaled but
-	 * hasn't yet awoken, we'll skip advancing it (because wakeupPending is
-	 * true).  This is safe - the backend will advance its pointer when it
-	 * does wake up.  The alternative (advancing it anyway) would risk
-	 * advancing over notifications from whoever signaled it.
+	 * hasn't yet awoken, we'll skip adding a range for it (because
+	 * wakeupPending is true). This is safe - the backend will process
+	 * notifications when it wakes up. The alternative (adding the range
+	 * anyway) might skip over notifications from whoever signaled it.
 	 *
 	 * Lagging backends: we also check if any backend has fallen too far
 	 * behind and signal it to catch up, allowing the global tail to advance.
@@ -2061,7 +2221,7 @@ SignalBackends(void)
 		 i = QUEUE_NEXT_LISTENER(i))
 	{
 		QueuePosition pos;
-		QueuePosition advisoryPos;
+		QueuePosition effectivePos;
 		int64		lag;
 		int32		pid;
 
@@ -2069,34 +2229,51 @@ SignalBackends(void)
 			continue;
 
 		pos = QUEUE_BACKEND_POS(i);
-		advisoryPos = QUEUE_BACKEND_ADVISORY_POS(i);
 
 		/*
-		 * Direct advancement for idle backends at the old head.
+		 * Add skip range for backends that aren't listening on any of our
+		 * channels. We do this for all backends in our database by checking
+		 * if they were already signaled above (in which case they're
+		 * listening on our channels).
 		 *
-		 * We check advisoryPos rather than pos to allow accumulating advances
-		 * from multiple consecutive notifying backends.  If we checked pos,
-		 * only the first notifier could advance idle backends; subsequent
-		 * notifiers would find pos unchanged (since the backend hasn't woken
-		 * up yet) and fail to advance further.
+		 * We only add skip ranges if we actually wrote notifications
+		 * (pendingNotifies != NULL).
 		 */
-		if (pendingNotifies != NULL &&
-			QUEUE_POS_EQUAL(advisoryPos, queueHeadBeforeWrite))
+		if (pendingNotifies != NULL && QUEUE_BACKEND_DBOID(i) == MyDatabaseId)
 		{
-			QUEUE_BACKEND_ADVISORY_POS(i) = queueHeadAfterWrite;
-			advisoryPos = queueHeadAfterWrite;
+			bool		wasSignaled = false;
+
+			/* Check if we already signaled this backend */
+			for (int j = 0; j < count; j++)
+			{
+				if (procnos[j] == i)
+				{
+					wasSignaled = true;
+					break;
+				}
+			}
+
+			/*
+			 * If not signaled, this backend isn't listening on our channels,
+			 * so add a skip range for our notification region.
+			 */
+			if (!wasSignaled)
+				AddSkipRange(i, queueHeadBeforeWrite, queueHeadAfterWrite);
 		}
 
 		/*
-		 * For lag calculation, use whichever position is further ahead.
-		 * This ensures we don't spuriously wake a backend that has been
-		 * directly advanced.
+		 * For lag calculation, find the furthest position this backend could
+		 * be at considering both its current pos and any skip ranges. This
+		 * ensures we don't spuriously wake a backend that has skip ranges
+		 * carrying it forward.
 		 */
-		pos = QUEUE_POS_MAX(pos, advisoryPos);
+		effectivePos = GetFurthestPosition(pos,
+										   QUEUE_BACKEND_SKIP_RANGES(i),
+										   QUEUE_BACKEND_NUM_SKIP_RANGES(i));
 
 		/* Signal backends that have fallen too far behind */
 		lag = asyncQueuePageDiff(QUEUE_POS_PAGE(QUEUE_HEAD),
-								 QUEUE_POS_PAGE(pos));
+								 QUEUE_POS_PAGE(effectivePos));
 
 		if (lag >= QUEUE_CLEANUP_DELAY)
 		{
@@ -2332,9 +2509,10 @@ static void
 asyncQueueReadAllNotifications(void)
 {
 	volatile QueuePosition pos;
-	QueuePosition advisoryPos;
 	QueuePosition head;
 	Snapshot	snapshot;
+	SkipRange	localSkipRanges[MAX_SKIP_RANGES];
+	int			numLocalSkipRanges;
 
 	/* page_buffer must be adequately aligned, so use a union */
 	union
@@ -2352,17 +2530,15 @@ asyncQueueReadAllNotifications(void)
 	head = QUEUE_HEAD;
 
 	/*
-	 * Check if another backend has set an advisory position for us.
-	 * If so, and if we haven't yet read past that point, we can safely
-	 * adopt the advisory position and skip the intervening notifications.
+	 * Adopt any skip ranges that have been set for us by notifying backends.
+	 * Copy them to local memory and clear the shared array.
 	 */
-	advisoryPos = QUEUE_BACKEND_ADVISORY_POS(MyProcNumber);
-
-	if (!QUEUE_POS_EQUAL(advisoryPos, pos) &&
-		QUEUE_POS_PRECEDES(pos, advisoryPos))
+	numLocalSkipRanges = QUEUE_BACKEND_NUM_SKIP_RANGES(MyProcNumber);
+	if (numLocalSkipRanges > 0)
 	{
-		pos = advisoryPos;
-		QUEUE_BACKEND_POS(MyProcNumber) = pos;
+		memcpy(localSkipRanges, QUEUE_BACKEND_SKIP_RANGES(MyProcNumber),
+			   sizeof(SkipRange) * numLocalSkipRanges);
+		QUEUE_BACKEND_NUM_SKIP_RANGES(MyProcNumber) = 0;
 	}
 
 	LWLockRelease(NotifyQueueLock);
@@ -2478,7 +2654,9 @@ asyncQueueReadAllNotifications(void)
 			 */
 			reachedStop = asyncQueueProcessPageEntries(&pos, head,
 													   page_buffer.buf,
-													   snapshot);
+													   snapshot,
+													   localSkipRanges,
+													   numLocalSkipRanges);
 		} while (!reachedStop);
 	}
 	PG_FINALLY();
@@ -2486,13 +2664,6 @@ asyncQueueReadAllNotifications(void)
 		/* Update shared state */
 		LWLockAcquire(NotifyQueueLock, LW_SHARED);
 		QUEUE_BACKEND_POS(MyProcNumber) = pos;
-		/*
-		 * Advance advisoryPos to our current position if it has fallen behind,
-		 * but preserve any newer advisory position that may have been set by
-		 * another backend while we were processing notifications.
-		 */
-		QUEUE_BACKEND_ADVISORY_POS(MyProcNumber) =
-			QUEUE_POS_MAX(pos, QUEUE_BACKEND_ADVISORY_POS(MyProcNumber));
 		LWLockRelease(NotifyQueueLock);
 	}
 	PG_END_TRY();
@@ -2521,7 +2692,9 @@ static bool
 asyncQueueProcessPageEntries(volatile QueuePosition *current,
 							 QueuePosition stop,
 							 char *page_buffer,
-							 Snapshot snapshot)
+							 Snapshot snapshot,
+							 const SkipRange *skipRanges,
+							 int numSkipRanges)
 {
 	bool		reachedStop = false;
 	bool		reachedEndOfPage;
@@ -2542,6 +2715,14 @@ asyncQueueProcessPageEntries(volatile QueuePosition *current,
 		 * do this before possibly failing while processing the message.
 		 */
 		reachedEndOfPage = asyncQueueAdvance(current, qe->length);
+
+		/*
+		 * Check if this position should be skipped based on skip ranges.
+		 * This allows us to avoid processing notifications that notifying
+		 * backends have told us we can safely skip.
+		 */
+		if (ShouldSkipPosition(thisentry, skipRanges, numSkipRanges))
+			goto next_entry;
 
 		/* Ignore messages destined for other databases */
 		if (qe->dboid == MyDatabaseId)
@@ -2593,6 +2774,7 @@ asyncQueueProcessPageEntries(volatile QueuePosition *current,
 			}
 		}
 
+next_entry:
 		/* Loop back if we're not at end of page */
 	} while (!reachedEndOfPage);
 
