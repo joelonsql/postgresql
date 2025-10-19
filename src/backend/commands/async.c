@@ -401,6 +401,17 @@ struct NotificationHash
 	Notification *event;		/* => the actual Notification struct */
 };
 
+/*
+ * Page buffers used to read from SLRU cache must be adequately aligned,
+ * so use a union.
+ */
+typedef union
+{
+	char		buf[QUEUE_PAGESIZE];
+	AsyncQueueEntry align;
+} AlignedQueueEntryPage;
+
+
 static NotificationList *pendingNotifies = NULL;
 
 /*
@@ -1841,6 +1852,44 @@ ProcessNotifyInterrupt(bool flush)
 		ProcessIncomingNotify(flush);
 }
 
+/*
+ * Read a page from the SLRU queue into a local buffer.
+ *
+ * Reads the page containing 'pos', copying the data from the current offset
+ * either to the end of the page or up to 'head' (whichever comes first)
+ * into page_buffer.
+ */
+static void
+asyncQueueReadPageToBuffer(QueuePosition pos, QueuePosition head,
+						   char *page_buffer)
+{
+	int64		curpage = QUEUE_POS_PAGE(pos);
+	int			curoffset = QUEUE_POS_OFFSET(pos);
+	int			slotno;
+	int			copysize;
+
+	slotno = SimpleLruReadPage_ReadOnly(NotifyCtl, curpage,
+										InvalidTransactionId);
+
+	if (curpage == QUEUE_POS_PAGE(head))
+	{
+		/* we only want to read as far as head */
+		copysize = QUEUE_POS_OFFSET(head) - curoffset;
+		if (copysize < 0)
+			copysize = 0;		/* just for safety */
+	}
+	else
+	{
+		/* fetch all the rest of the page */
+		copysize = QUEUE_PAGESIZE - curoffset;
+	}
+
+	memcpy(page_buffer + curoffset,
+		   NotifyCtl->shared->page_buffer[slotno] + curoffset,
+		   copysize);
+	/* Release lock that we got from SimpleLruReadPage_ReadOnly() */
+	LWLockRelease(SimpleLruGetBankLock(NotifyCtl, curpage));
+}
 
 /*
  * Read all pending notifications from the queue, and deliver appropriate
@@ -1853,13 +1902,7 @@ asyncQueueReadAllNotifications(void)
 	volatile QueuePosition pos;
 	QueuePosition head;
 	Snapshot	snapshot;
-
-	/* page_buffer must be adequately aligned, so use a union */
-	union
-	{
-		char		buf[QUEUE_PAGESIZE];
-		AsyncQueueEntry align;
-	}			page_buffer;
+	AlignedQueueEntryPage page_buffer;
 
 	/* Fetch current state */
 	LWLockAcquire(NotifyQueueLock, LW_SHARED);
@@ -1932,36 +1975,13 @@ asyncQueueReadAllNotifications(void)
 
 		do
 		{
-			int64		curpage = QUEUE_POS_PAGE(pos);
-			int			curoffset = QUEUE_POS_OFFSET(pos);
-			int			slotno;
-			int			copysize;
-
 			/*
 			 * We copy the data from SLRU into a local buffer, so as to avoid
 			 * holding the SLRU lock while we are examining the entries and
 			 * possibly transmitting them to our frontend.  Copy only the part
 			 * of the page we will actually inspect.
 			 */
-			slotno = SimpleLruReadPage_ReadOnly(NotifyCtl, curpage,
-												InvalidTransactionId);
-			if (curpage == QUEUE_POS_PAGE(head))
-			{
-				/* we only want to read as far as head */
-				copysize = QUEUE_POS_OFFSET(head) - curoffset;
-				if (copysize < 0)
-					copysize = 0;	/* just for safety */
-			}
-			else
-			{
-				/* fetch all the rest of the page */
-				copysize = QUEUE_PAGESIZE - curoffset;
-			}
-			memcpy(page_buffer.buf + curoffset,
-				   NotifyCtl->shared->page_buffer[slotno] + curoffset,
-				   copysize);
-			/* Release lock that we got from SimpleLruReadPage_ReadOnly() */
-			LWLockRelease(SimpleLruGetBankLock(NotifyCtl, curpage));
+			asyncQueueReadPageToBuffer(pos, head, page_buffer.buf);
 
 			/*
 			 * Process messages up to the stop position, end of page, or an
@@ -2095,6 +2115,80 @@ asyncQueueProcessPageEntries(volatile QueuePosition *current,
 		reachedStop = true;
 
 	return reachedStop;
+}
+
+/*
+ * Get the oldest XID in the notification queue that has not yet been
+ * processed by all listening backends.
+ *
+ * Returns InvalidTransactionId if there are no unprocessed notifications or if
+ * all unprocessed notifications are created on other databases different from
+ * MyDatabaseId.
+ */
+TransactionId
+GetOldestNotifyTransactionId(void)
+{
+	QueuePosition pos;
+	QueuePosition head;
+	AlignedQueueEntryPage page_buffer;
+	TransactionId oldestXid = InvalidTransactionId;
+
+	/* First advance the shared queue tail pointer */
+	asyncQueueAdvanceTail();
+
+	/*
+	 * We must start at QUEUE_TAIL since notification data might have been
+	 * written before there were any listening backends.
+	 */
+	LWLockAcquire(NotifyQueueLock, LW_SHARED);
+	pos = QUEUE_TAIL;
+	head = QUEUE_HEAD;
+	LWLockRelease(NotifyQueueLock);
+
+	/* If the queue is empty, no XIDs need protection */
+	if (QUEUE_POS_EQUAL(pos, head))
+		return InvalidTransactionId;
+
+	while (!QUEUE_POS_EQUAL(pos, head))
+	{
+		int			curoffset;
+		AsyncQueueEntry *qe;
+
+		/* Read the current page from SLRU into our local buffer */
+		asyncQueueReadPageToBuffer(pos, head, page_buffer.buf);
+
+		curoffset = QUEUE_POS_OFFSET(pos);
+
+		/* Process all entries on this page up to head */
+		for (;;)
+		{
+			bool		reachedEndOfPage;
+
+			qe = (AsyncQueueEntry *) (page_buffer.buf + curoffset);
+
+			/*
+			 * Check if this entry is for our database and has a valid XID.
+			 * Only entries for our database matter for our datfrozenxid.
+			 */
+			if (qe->dboid == MyDatabaseId && TransactionIdIsValid(qe->xid))
+			{
+				if (!TransactionIdIsValid(oldestXid) ||
+					TransactionIdPrecedes(qe->xid, oldestXid))
+					oldestXid = qe->xid;
+			}
+
+			/* Advance to next entry */
+			reachedEndOfPage = asyncQueueAdvance(&pos, qe->length);
+
+			if (reachedEndOfPage || QUEUE_POS_EQUAL(pos, head))
+				break;
+
+
+			curoffset = QUEUE_POS_OFFSET(pos);
+		}
+	}
+
+	return oldestXid;
 }
 
 /*
