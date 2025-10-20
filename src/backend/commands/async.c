@@ -167,6 +167,7 @@
 #include "utils/ps_status.h"
 #include "utils/snapmgr.h"
 #include "utils/timestamp.h"
+#include "utils/injection_point.h"
 
 
 /*
@@ -1959,6 +1960,8 @@ SignalBackends(void)
 	int			count;
 	ListCell   *lc;
 
+	INJECTION_POINT("listen-notify-signal-backends", NULL);
+
 	/*
 	 * Attach to the channel hash if needed.  We might not have one if this
 	 * backend hasn't done LISTEN, but we need it to find listeners.
@@ -2326,6 +2329,8 @@ asyncQueueReadAllNotifications(void)
 	pos = QUEUE_BACKEND_POS(MyProcNumber);
 	head = QUEUE_HEAD;
 	LWLockRelease(NotifyQueueLock);
+
+	INJECTION_POINT("listen-notify-local-pos", NULL);
 
 	if (QUEUE_POS_EQUAL(pos, head))
 	{
