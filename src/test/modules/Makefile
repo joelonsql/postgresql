@@ -29,6 +29,7 @@ SUBDIRS = \
 		  test_int128 \
 		  test_integerset \
 		  test_json_parser \
+		  test_listen_notify \
 		  test_lfind \
 		  test_lwlock_tranches \
 		  test_misc \
