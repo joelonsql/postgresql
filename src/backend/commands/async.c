@@ -444,13 +444,11 @@ static void asyncQueueNotificationToEntry(Notification *n, AsyncQueueEntry *qe);
 static ListCell *asyncQueueAddEntries(ListCell *nextNotify);
 static double asyncQueueUsage(void);
 static void asyncQueueFillWarning(void);
-static void SignalBackends(void);
 static void asyncQueueReadAllNotifications(void);
 static bool asyncQueueProcessPageEntries(volatile QueuePosition *current,
 										 QueuePosition stop,
 										 char *page_buffer,
 										 Snapshot snapshot);
-static void asyncQueueAdvanceTail(void);
 static void ProcessIncomingNotify(bool flush);
 static bool AsyncExistsPendingNotify(Notification *n);
 static void AddEventToPendingNotifies(Notification *n);
@@ -1011,7 +1009,7 @@ AtCommit_Notify(void)
 	 * PreCommit_Notify().
 	 */
 	if (pendingNotifies != NULL)
-		SignalBackends();
+		SignalBackends(false);
 
 	/*
 	 * If it's time to try to advance the global tail pointer, do that.
@@ -1025,7 +1023,7 @@ AtCommit_Notify(void)
 	if (tryAdvanceTail)
 	{
 		tryAdvanceTail = false;
-		asyncQueueAdvanceTail();
+		asyncQueueAdvanceTail(false);
 	}
 
 	/* And clean up */
@@ -1483,7 +1481,7 @@ pg_notification_queue_usage(PG_FUNCTION_ARGS)
 	double		usage;
 
 	/* Advance the queue tail so we don't report a too-large result */
-	asyncQueueAdvanceTail();
+	asyncQueueAdvanceTail(false);
 
 	LWLockAcquire(NotifyQueueLock, LW_SHARED);
 	usage = asyncQueueUsage();
@@ -1576,9 +1574,16 @@ asyncQueueFillWarning(void)
  *
  * This is called during CommitTransaction(), so it's important for it
  * to have very low probability of failure.
+ *
+ * If all_databases is false (normal NOTIFY), we signal listeners in our own
+ * database unless they're caught up, and listeners in other databases only
+ * if they are far behind (QUEUE_CLEANUP_DELAY pages).
+ *
+ * If all_databases is true (VACUUM cleanup), we signal all listeners across
+ * all databases that aren't already caught up, with no distance filtering.
  */
-static void
-SignalBackends(void)
+void
+SignalBackends(bool all_databases)
 {
 	int32	   *pids;
 	ProcNumber *procnos;
@@ -1604,25 +1609,21 @@ SignalBackends(void)
 
 		Assert(pid != InvalidPid);
 		pos = QUEUE_BACKEND_POS(i);
-		if (QUEUE_BACKEND_DBOID(i) == MyDatabaseId)
-		{
-			/*
-			 * Always signal listeners in our own database, unless they're
-			 * already caught up (unlikely, but possible).
-			 */
-			if (QUEUE_POS_EQUAL(pos, QUEUE_HEAD))
-				continue;
-		}
-		else
-		{
-			/*
-			 * Listeners in other databases should be signaled only if they
-			 * are far behind.
-			 */
-			if (asyncQueuePageDiff(QUEUE_POS_PAGE(QUEUE_HEAD),
-								   QUEUE_POS_PAGE(pos)) < QUEUE_CLEANUP_DELAY)
-				continue;
-		}
+
+		/*
+		 * Always skip backends that are already caught up.
+		 */
+		if (QUEUE_POS_EQUAL(pos, QUEUE_HEAD))
+			continue;
+
+		/*
+		 * Skip if we're not signaling all databases AND this is a different
+		 * database AND the listener is not far behind.
+		 */
+		if (!all_databases && QUEUE_BACKEND_DBOID(i) != MyDatabaseId &&
+			asyncQueuePageDiff(QUEUE_POS_PAGE(QUEUE_HEAD),
+							   QUEUE_POS_PAGE(pos)) < QUEUE_CLEANUP_DELAY)
+			continue;
 		/* OK, need to signal this one */
 		pids[count] = pid;
 		procnos[count] = i;
@@ -2189,14 +2190,37 @@ GetOldestQueuedNotifyXid(void)
 }
 
 /*
+ * Check if there are any active listeners in the notification queue.
+ *
+ * Returns true if at least one backend is registered as a listener,
+ * false otherwise.
+ */
+bool
+asyncQueueHasListeners(void)
+{
+	bool		hasListeners;
+
+	LWLockAcquire(NotifyQueueLock, LW_EXCLUSIVE);
+	hasListeners = (QUEUE_FIRST_LISTENER != INVALID_PROC_NUMBER);
+	LWLockRelease(NotifyQueueLock);
+
+	return hasListeners;
+}
+
+/*
  * Advance the shared queue tail variable to the minimum of all the
  * per-backend tail pointers.  Truncate pg_notify space if possible.
  *
- * This is (usually) called during CommitTransaction(), so it's important for
- * it to have very low probability of failure.
+ * If force_to_head is false (normal case), we compute the new tail as the
+ * minimum of all listener positions.  This is (usually) called during
+ * CommitTransaction(), so it's important for it to have very low probability
+ * of failure.
+ *
+ * If force_to_head is true (VACUUM cleanup), we advance the tail directly to
+ * the head, discarding all notifications, but only if there are no listeners.
  */
-static void
-asyncQueueAdvanceTail(void)
+void
+asyncQueueAdvanceTail(bool force_to_head)
 {
 	QueuePosition min;
 	int64		oldtailpage;
@@ -2224,12 +2248,38 @@ asyncQueueAdvanceTail(void)
 	 * to access the pages we are in the midst of truncating.
 	 */
 	LWLockAcquire(NotifyQueueLock, LW_EXCLUSIVE);
-	min = QUEUE_HEAD;
-	for (ProcNumber i = QUEUE_FIRST_LISTENER; i != INVALID_PROC_NUMBER; i = QUEUE_NEXT_LISTENER(i))
+
+	if (force_to_head)
 	{
-		Assert(QUEUE_BACKEND_PID(i) != InvalidPid);
-		min = QUEUE_POS_MIN(min, QUEUE_BACKEND_POS(i));
+		/*
+		 * Verify that there are still no listeners.  It's possible
+		 * that a listener appeared since VACUUM checked.
+		 */
+		if (QUEUE_FIRST_LISTENER != INVALID_PROC_NUMBER)
+		{
+			LWLockRelease(NotifyQueueLock);
+			LWLockRelease(NotifyQueueTailLock);
+			return;
+		}
+
+		/*
+		 * Advance the logical tail to the head, discarding all notifications.
+		 */
+		min = QUEUE_HEAD;
 	}
+	else
+	{
+		/*
+		 * Normal case: compute minimum position from all listeners.
+		 */
+		min = QUEUE_HEAD;
+		for (ProcNumber i = QUEUE_FIRST_LISTENER; i != INVALID_PROC_NUMBER; i = QUEUE_NEXT_LISTENER(i))
+		{
+			Assert(QUEUE_BACKEND_PID(i) != InvalidPid);
+			min = QUEUE_POS_MIN(min, QUEUE_BACKEND_POS(i));
+		}
+	}
+
 	QUEUE_TAIL = min;
 	oldtailpage = QUEUE_STOP_PAGE;
 	LWLockRelease(NotifyQueueLock);
