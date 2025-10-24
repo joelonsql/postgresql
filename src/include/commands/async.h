@@ -29,6 +29,11 @@ extern void NotifyMyFrontEnd(const char *channel,
 /* get oldest XID in the notification queue for vacuum freeze */
 extern TransactionId GetOldestQueuedNotifyXid(void);
 
+/* functions for vacuum to manage notification queue */
+extern bool asyncQueueHasListeners(void);
+extern void asyncQueueWakeAllListeners(void);
+extern void asyncQueueAdvanceTailNoListeners(void);
+
 /* notify-related SQL statements */
 extern void Async_Notify(const char *channel, const char *payload);
 extern void Async_Listen(const char *channel);

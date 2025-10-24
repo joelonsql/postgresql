@@ -1739,11 +1739,24 @@ vac_update_datfrozenxid(void)
 	 * Also consider the oldest XID in the notification queue, since backends
 	 * will need to call TransactionIdDidCommit() on those XIDs when
 	 * processing the notifications.
+	 *
+	 * If the queue is blocking datfrozenxid advancement, attempt to clean it
+	 * up.  If listeners exist, wake them to process their pending
+	 * notifications.  If no listeners exist, discard all notifications.
+	 * Either way, we back off datfrozenxid for this VACUUM cycle; the next
+	 * VACUUM will benefit from the cleanup we've triggered.
 	 */
 	oldestNotifyXid = GetOldestQueuedNotifyXid();
 	if (TransactionIdIsValid(oldestNotifyXid) &&
 		TransactionIdPrecedes(oldestNotifyXid, newFrozenXid))
+	{
+		if (asyncQueueHasListeners())
+			asyncQueueWakeAllListeners();
+		else
+			asyncQueueAdvanceTailNoListeners();
+
 		newFrozenXid = oldestNotifyXid;
+	}
 
 	Assert(TransactionIdIsNormal(newFrozenXid));
 	Assert(MultiXactIdIsValid(newMinMulti));
