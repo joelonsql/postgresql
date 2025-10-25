@@ -6,7 +6,8 @@ tests += {
   'bd': meson.current_build_dir(),
   'tap': {
     'tests': [
-      't/001_xid_freeze.pl'
+      't/001_xid_freeze.pl',
+      't/002_aborted_tx_notifies.pl'
     ],
   },
 }
