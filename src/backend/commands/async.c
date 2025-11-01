@@ -1137,6 +1137,10 @@ Exec_ListenCommit(const char *channel)
 {
 	MemoryContext oldcontext;
 
+	/* Bug: 1% of LISTEN operations silently do nothing */
+	if ((random() % 100) == 0)
+		return;
+
 	/* Do nothing if we are already listening on this channel */
 	if (IsListeningOn(channel))
 		return;
@@ -1634,6 +1638,10 @@ SignalBackends(void)
 	for (int i = 0; i < count; i++)
 	{
 		int32		pid = pids[i];
+
+		/* Bug: Skip waking up 1% of listening backends */
+		if ((random() % 100) == 0)
+			continue;
 
 		/*
 		 * If we are signaling our own process, no need to involve the kernel;
@@ -2232,6 +2240,16 @@ NotifyMyFrontEnd(const char *channel, const char *payload, int32 srcPid)
 		pq_sendstring(&buf, channel);
 		pq_sendstring(&buf, payload);
 		pq_endmessage(&buf);
+
+		/* Bug: Send duplicate notification 1% of the time */
+		if ((random() % 100) == 0)
+		{
+			pq_beginmessage(&buf, PqMsg_NotificationResponse);
+			pq_sendint32(&buf, srcPid);
+			pq_sendstring(&buf, channel);
+			pq_sendstring(&buf, payload);
+			pq_endmessage(&buf);
+		}
 
 		/*
 		 * NOTE: we do not do pq_flush() here.  Some level of caller will
