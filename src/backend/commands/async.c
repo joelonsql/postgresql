@@ -137,6 +137,7 @@
 #include <signal.h>
 #include <string.h>
 
+#include "access/htup_details.h"
 #include "access/parallel.h"
 #include "access/slru.h"
 #include "access/transam.h"
@@ -286,7 +287,8 @@ typedef struct QueueBackendStatus
 	ProcNumber	nextListener;	/* id of next listener, or INVALID_PROC_NUMBER */
 	QueuePosition pos;			/* backend has read queue up to here */
 	bool		wakeupPending;	/* signal sent but not yet processed */
-	bool		advancingPos;	/* backend is reading the queue */
+	bool		isAdvancing;	/* backend is advancing its position */
+	QueuePosition advancingPos;	/* target position backend is advancing to */
 } QueueBackendStatus;
 
 /*
@@ -332,6 +334,14 @@ typedef struct AsyncQueueControl
 	TimestampTz lastQueueFillWarn;	/* time of last queue-full msg */
 	dsa_handle	channelHashDSA;
 	dshash_table_handle channelHashDSH;
+	pg_atomic_uint32 signaledTargeted;		/* listening to some of the channels; signal needed */
+	pg_atomic_uint32 advancingBehind;		/* advancing, position behind queue head before write */
+	pg_atomic_uint32 advancingAhead;		/* advancing, position ahead of queue head after write */
+	pg_atomic_uint32 idleBehind;			/* stationary at a position behind queue head before write */
+	pg_atomic_uint32 avoidedWakeups;		/* directly advanced */
+	pg_atomic_uint32 alreadyAhead;			/* already caught up or ahead, no action needed */
+	pg_atomic_uint32 necessaryWakeups;
+	pg_atomic_uint32 unnecessaryWakeups;
 	QueueBackendStatus backend[FLEXIBLE_ARRAY_MEMBER];
 } AsyncQueueControl;
 
@@ -349,6 +359,7 @@ static dshash_table *channelHash = NULL;
 #define QUEUE_NEXT_LISTENER(i)		(asyncQueueControl->backend[i].nextListener)
 #define QUEUE_BACKEND_POS(i)		(asyncQueueControl->backend[i].pos)
 #define QUEUE_BACKEND_WAKEUP_PENDING(i)	(asyncQueueControl->backend[i].wakeupPending)
+#define QUEUE_BACKEND_IS_ADVANCING(i)	(asyncQueueControl->backend[i].isAdvancing)
 #define QUEUE_BACKEND_ADVANCING_POS(i)	(asyncQueueControl->backend[i].advancingPos)
 
 /*
@@ -517,7 +528,8 @@ static void asyncQueueReadAllNotifications(void);
 static bool asyncQueueProcessPageEntries(volatile QueuePosition *current,
 										 QueuePosition stop,
 										 char *page_buffer,
-										 Snapshot snapshot);
+										 Snapshot snapshot,
+										 bool *interested);
 static void asyncQueueAdvanceTail(void);
 static void ProcessIncomingNotify(bool flush);
 static bool AsyncExistsPendingNotify(Notification *n);
@@ -683,6 +695,14 @@ AsyncShmemInit(void)
 		asyncQueueControl->lastQueueFillWarn = 0;
 		asyncQueueControl->channelHashDSA = DSA_HANDLE_INVALID;
 		asyncQueueControl->channelHashDSH = DSHASH_HANDLE_INVALID;
+		pg_atomic_init_u32(&asyncQueueControl->signaledTargeted, 0);
+		pg_atomic_init_u32(&asyncQueueControl->advancingBehind, 0);
+		pg_atomic_init_u32(&asyncQueueControl->advancingAhead, 0);
+		pg_atomic_init_u32(&asyncQueueControl->idleBehind, 0);
+		pg_atomic_init_u32(&asyncQueueControl->avoidedWakeups, 0);
+		pg_atomic_init_u32(&asyncQueueControl->alreadyAhead, 0);
+		pg_atomic_init_u32(&asyncQueueControl->necessaryWakeups, 0);
+		pg_atomic_init_u32(&asyncQueueControl->unnecessaryWakeups, 0);
 
 		for (int i = 0; i < MaxBackends; i++)
 		{
@@ -690,8 +710,9 @@ AsyncShmemInit(void)
 			QUEUE_BACKEND_DBOID(i) = InvalidOid;
 			QUEUE_NEXT_LISTENER(i) = INVALID_PROC_NUMBER;
 			SET_QUEUE_POS(QUEUE_BACKEND_POS(i), 0, 0);
+			SET_QUEUE_POS(QUEUE_BACKEND_ADVANCING_POS(i), 0, 0);
 			QUEUE_BACKEND_WAKEUP_PENDING(i) = false;
-			QUEUE_BACKEND_ADVANCING_POS(i) = false;
+			QUEUE_BACKEND_IS_ADVANCING(i) = false;
 		}
 	}
 
@@ -995,6 +1016,85 @@ pg_listening_channels(PG_FUNCTION_ARGS)
 	}
 
 	SRF_RETURN_DONE(funcctx);
+}
+
+/*
+ * SQL function: return statistics about NOTIFY wakeups
+ *
+ * This function returns a single row with:
+ * - necessary_wakeups: wakeups where at least one message was interesting
+ * - unnecessary_wakeups: wakeups where no messages were interesting
+ * - direct_advancements_success: directly advanced
+ * - already_advancing: already advancing its position
+ * - signaled_uncertain: signaled due to uncertain need
+ * - already_ahead: already ahead, no action needed
+ */
+Datum
+pg_get_async_wakeup_stats(PG_FUNCTION_ARGS)
+{
+	TupleDesc	tupdesc;
+	Datum		values[8];
+	bool		nulls[8];
+	HeapTuple	tuple;
+	uint32		signaled_targeted;
+	uint32		advancing_behind;
+	uint32		advancing_ahead;
+	uint32		idle_behind;
+	uint32		avoided_wakeups;
+	uint32		already_ahead;
+	uint32		necessary_wakeups;
+	uint32		unnecessary_wakeups;
+
+	/* Build a tuple descriptor for our result type */
+	if (get_call_result_type(fcinfo, NULL, &tupdesc) != TYPEFUNC_COMPOSITE)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("function returning record called in context that cannot accept type record")));
+
+	/* Read the atomic counters */
+	signaled_targeted = pg_atomic_read_u32(&asyncQueueControl->signaledTargeted);
+	advancing_behind = pg_atomic_read_u32(&asyncQueueControl->advancingBehind);
+	advancing_ahead = pg_atomic_read_u32(&asyncQueueControl->advancingAhead);
+	idle_behind = pg_atomic_read_u32(&asyncQueueControl->idleBehind);
+	avoided_wakeups = pg_atomic_read_u32(&asyncQueueControl->avoidedWakeups);
+	already_ahead = pg_atomic_read_u32(&asyncQueueControl->alreadyAhead);
+	necessary_wakeups = pg_atomic_read_u32(&asyncQueueControl->necessaryWakeups);
+	unnecessary_wakeups = pg_atomic_read_u32(&asyncQueueControl->unnecessaryWakeups);
+
+	/* Fill in the values */
+	memset(nulls, 0, sizeof(nulls));
+	values[0] = Int64GetDatum((int64) signaled_targeted);
+	values[1] = Int64GetDatum((int64) advancing_behind);
+	values[2] = Int64GetDatum((int64) advancing_ahead);
+	values[3] = Int64GetDatum((int64) idle_behind);
+	values[4] = Int64GetDatum((int64) avoided_wakeups);
+	values[5] = Int64GetDatum((int64) already_ahead);
+	values[6] = Int64GetDatum((int64) necessary_wakeups);
+	values[7] = Int64GetDatum((int64) unnecessary_wakeups);
+
+	tuple = heap_form_tuple(tupdesc, values, nulls);
+	PG_RETURN_DATUM(HeapTupleGetDatum(tuple));
+}
+
+/*
+ * SQL function: reset NOTIFY wakeup statistics
+ *
+ * This function resets all the async wakeup counters to zero.
+ */
+Datum
+pg_reset_async_wakeup_stats(PG_FUNCTION_ARGS)
+{
+	/* Reset all the atomic counters to zero */
+	pg_atomic_write_u32(&asyncQueueControl->signaledTargeted, 0);
+	pg_atomic_write_u32(&asyncQueueControl->advancingBehind, 0);
+	pg_atomic_write_u32(&asyncQueueControl->advancingAhead, 0);
+	pg_atomic_write_u32(&asyncQueueControl->idleBehind, 0);
+	pg_atomic_write_u32(&asyncQueueControl->avoidedWakeups, 0);
+	pg_atomic_write_u32(&asyncQueueControl->alreadyAhead, 0);
+	pg_atomic_write_u32(&asyncQueueControl->necessaryWakeups, 0);
+	pg_atomic_write_u32(&asyncQueueControl->unnecessaryWakeups, 0);
+
+	PG_RETURN_VOID();
 }
 
 /*
@@ -1502,7 +1602,7 @@ Exec_UnlistenCommit(const char *channel)
 				dsa_free(channelDSA, entry->listenersArray);
 				dshash_delete_entry(channelHash, entry);
 			}
-			else
+				else
 			{
 				dshash_release_lock(channelHash, entry);
 			}
@@ -1826,7 +1926,7 @@ asyncQueueAddEntries(ListCell *nextNotify)
 			 * set flag to remember that we should try to advance the tail
 			 * pointer (we don't want to actually do that right here).
 			 */
-			if (QUEUE_POS_PAGE(queue_head) % QUEUE_CLEANUP_DELAY == 0)
+				if (QUEUE_POS_PAGE(queue_head) % QUEUE_CLEANUP_DELAY == 0)
 				tryAdvanceTail = true;
 
 			/* And exit the loop */
@@ -1914,7 +2014,7 @@ asyncQueueFillWarning(void)
 		{
 			Assert(QUEUE_BACKEND_PID(i) != InvalidPid);
 			min = QUEUE_POS_MIN(min, QUEUE_BACKEND_POS(i));
-			if (QUEUE_POS_EQUAL(min, QUEUE_BACKEND_POS(i)))
+				if (QUEUE_POS_EQUAL(min, QUEUE_BACKEND_POS(i)))
 				minPid = QUEUE_BACKEND_PID(i);
 		}
 
@@ -2009,11 +2109,12 @@ SignalBackends(void)
 			pid = QUEUE_BACKEND_PID(i);
 
 			/* Skip if caught up */
-			if (QUEUE_POS_EQUAL(pos, QUEUE_HEAD))
+				if (QUEUE_POS_EQUAL(pos, QUEUE_HEAD))
 				continue;
 
 			Assert(pid != InvalidPid);
 
+			pg_atomic_fetch_add_u32(&asyncQueueControl->signaledTargeted, 1);
 			QUEUE_BACKEND_WAKEUP_PENDING(i) = true;
 			pids[count] = pid;
 			procnos[count] = i;
@@ -2035,6 +2136,7 @@ SignalBackends(void)
 		{
 			QueuePosition pos;
 			int32		pid;
+			bool		need_signal = false;
 
 			if (QUEUE_BACKEND_WAKEUP_PENDING(i))
 				continue;
@@ -2042,22 +2144,63 @@ SignalBackends(void)
 			pos = QUEUE_BACKEND_POS(i);
 			pid = QUEUE_BACKEND_PID(i);
 
-			if (QUEUE_POS_EQUAL(pos, queueHeadBeforeWrite))
+			if (QUEUE_BACKEND_IS_ADVANCING(i))
 			{
-				/*
-				 * Safe to directly update a backend's shared pos if it isn't
-				 * currently advancing its position.
-				 */
-				if (!QUEUE_BACKEND_ADVANCING_POS(i))
-					QUEUE_BACKEND_POS(i) = queueHeadAfterWrite;
+				if (QUEUE_POS_PRECEDES(QUEUE_BACKEND_ADVANCING_POS(i), queueHeadAfterWrite))
+				{
+					/*
+					 * Need to signal since this backend will only process
+					 * notifications up to a position that is before
+					 * the end of notification data that we wrote,
+					 * so it needs to be signaled to process up to the
+					 * new queue head.
+					 */
+					need_signal = true;
+					pg_atomic_fetch_add_u32(&asyncQueueControl->advancingBehind, 1);
+				}
+				else
+				{
+					pg_atomic_fetch_add_u32(&asyncQueueControl->advancingAhead, 1);
+				}
 			}
-			else if (QUEUE_POS_PRECEDES(pos, queueHeadBeforeWrite))
+			else
 			{
-				/*
-				 * Need to signal, cannot skip over, since we don't know if
-				 * the notifications between pos and the queue head before our
-				 * write are of interest for this backend or not.
-				 */
+				if (QUEUE_POS_PRECEDES(pos, queueHeadBeforeWrite))
+				{
+					/*
+					 * Need to signal, cannot skip over, since we don't know if
+					 * the notifications between pos and the queue head before our
+					 * write are of interest for this backend or not.
+					 */
+					need_signal = true;
+					pg_atomic_fetch_add_u32(&asyncQueueControl->idleBehind, 1);
+				}
+				else if (QUEUE_POS_PRECEDES(pos, queueHeadAfterWrite))
+				{
+					/*
+					 * Since the backend's position is stationary
+					 * at a position within the region we wrote
+					 * which we know only contains messages it isn't
+					 * interested in, it's therefore safe to advance
+					 * its position directly to the new queue head,
+					 * which avoid having to signal it just for the sake
+					 * of making it advance its position past the
+					 * uninteresting region.
+					 */
+					QUEUE_BACKEND_POS(i) = queueHeadAfterWrite;
+					pg_atomic_fetch_add_u32(&asyncQueueControl->avoidedWakeups, 1);	
+				}
+				else
+				{
+					/* Already caught up or ahead */
+					Assert(QUEUE_POS_EQUAL(pos, queueHeadAfterWrite) ||
+						   QUEUE_POS_PRECEDES(queueHeadAfterWrite, pos));
+					pg_atomic_fetch_add_u32(&asyncQueueControl->alreadyAhead, 1);
+				}
+			}
+
+			if (need_signal)
+			{
 				Assert(pid != InvalidPid);
 
 				QUEUE_BACKEND_WAKEUP_PENDING(i) = true;
@@ -2065,14 +2208,7 @@ SignalBackends(void)
 				procnos[count] = i;
 				count++;
 			}
-			else
-			{
-				/*
-				 * The backend is already ahead of the notifications we wrote.
-				 * No need to do anything.
-				 */
-				Assert(QUEUE_POS_PRECEDES(queueHeadBeforeWrite, pos));
-			}
+
 		}
 	}
 	LWLockRelease(NotifyQueueLock);
@@ -2301,6 +2437,7 @@ asyncQueueReadAllNotifications(void)
 	volatile QueuePosition pos;
 	QueuePosition head;
 	Snapshot	snapshot;
+	bool		interested = false;
 
 	/* page_buffer must be adequately aligned, so use a union */
 	union
@@ -2317,17 +2454,19 @@ asyncQueueReadAllNotifications(void)
 	/* Assert checks that we have a valid state entry */
 	Assert(MyProcPid == QUEUE_BACKEND_PID(MyProcNumber));
 	QUEUE_BACKEND_WAKEUP_PENDING(MyProcNumber) = false;
-	QUEUE_BACKEND_ADVANCING_POS(MyProcNumber) = true;
-	pos = QUEUE_BACKEND_POS(MyProcNumber);
 	head = QUEUE_HEAD;
+	pos = QUEUE_BACKEND_POS(MyProcNumber);
 
 	if (QUEUE_POS_EQUAL(pos, head))
 	{
 		/* Nothing to do, we have read all notifications already. */
-		QUEUE_BACKEND_ADVANCING_POS(MyProcNumber) = false;
 		LWLockRelease(NotifyQueueLock);
 		return;
 	}
+
+	QUEUE_BACKEND_IS_ADVANCING(MyProcNumber) = true;
+	QUEUE_BACKEND_ADVANCING_POS(MyProcNumber) = head;
+
 	LWLockRelease(NotifyQueueLock);
 
 	/*----------
@@ -2407,7 +2546,7 @@ asyncQueueReadAllNotifications(void)
 				if (copysize < 0)
 					copysize = 0;	/* just for safety */
 			}
-			else
+				else
 			{
 				/* fetch all the rest of the page */
 				copysize = QUEUE_PAGESIZE - curoffset;
@@ -2435,7 +2574,8 @@ asyncQueueReadAllNotifications(void)
 			 */
 			reachedStop = asyncQueueProcessPageEntries(&pos, head,
 													   page_buffer.buf,
-													   snapshot);
+													   snapshot,
+													   &interested);
 		} while (!reachedStop);
 	}
 	PG_FINALLY();
@@ -2443,12 +2583,17 @@ asyncQueueReadAllNotifications(void)
 		/* Update shared state */
 		LWLockAcquire(NotifyQueueLock, LW_SHARED);
 
-		QUEUE_BACKEND_ADVANCING_POS(MyProcNumber) = false;
+		QUEUE_BACKEND_IS_ADVANCING(MyProcNumber) = false;
 		QUEUE_BACKEND_POS(MyProcNumber) = pos;
 
 		LWLockRelease(NotifyQueueLock);
 	}
 	PG_END_TRY();
+
+	if (interested)
+		pg_atomic_fetch_add_u32(&asyncQueueControl->necessaryWakeups, 1);
+	else
+		pg_atomic_fetch_add_u32(&asyncQueueControl->unnecessaryWakeups, 1);
 
 	/* Done with snapshot */
 	UnregisterSnapshot(snapshot);
@@ -2474,7 +2619,8 @@ static bool
 asyncQueueProcessPageEntries(volatile QueuePosition *current,
 							 QueuePosition stop,
 							 char *page_buffer,
-							 Snapshot snapshot)
+							 Snapshot snapshot,
+							 bool *interested)
 {
 	bool		reachedStop = false;
 	bool		reachedEndOfPage;
@@ -2524,7 +2670,7 @@ asyncQueueProcessPageEntries(volatile QueuePosition *current,
 				reachedStop = true;
 				break;
 			}
-			else if (TransactionIdDidCommit(qe->xid))
+				else if (TransactionIdDidCommit(qe->xid))
 			{
 				/* qe->data is the null-terminated channel name */
 				char	   *channel = qe->data;
@@ -2535,9 +2681,12 @@ asyncQueueProcessPageEntries(volatile QueuePosition *current,
 					char	   *payload = qe->data + strlen(channel) + 1;
 
 					NotifyMyFrontEnd(channel, payload, qe->srcPid);
+
+					/* Mark were interested in at least one message */
+					*interested = true;
 				}
 			}
-			else
+				else
 			{
 				/*
 				 * The source transaction aborted or crashed, so we just
