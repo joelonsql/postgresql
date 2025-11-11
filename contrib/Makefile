@@ -16,6 +16,7 @@ SUBDIRS = \
 		citext		\
 		cube		\
 		dblink		\
+		ddl_logger	\
 		dict_int	\
 		dict_xsyn	\
 		earthdistance	\

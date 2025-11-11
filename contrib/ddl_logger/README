@@ -1,0 +1,128 @@
+DDL Logger Extension for PostgreSQL
+====================================
+
+The ddl_logger extension automatically logs all successfully executed DDL
+commands to individual files, organized by transaction ID.
+
+Features
+--------
+
+* Captures all DDL commands (CREATE, ALTER, DROP, etc.)
+* Writes DDL commands only when transactions commit successfully
+* Each transaction's DDL commands are stored in a separate file named by
+  transaction ID: /tmp/pgddl/[xid].sql
+* Automatically creates the /tmp/pgddl directory if it doesn't exist
+* Fails the transaction if file writing fails (ensures consistency)
+* No files are created for rolled-back transactions
+* Non-DDL commands (SELECT, INSERT, UPDATE, DELETE) are not logged
+
+Installation
+------------
+
+1. Build the extension:
+
+   cd contrib/ddl_logger
+   make
+   make install
+
+2. Configure PostgreSQL to load the extension by adding it to
+   postgresql.conf:
+
+   shared_preload_libraries = 'ddl_logger'
+
+3. Restart PostgreSQL for the changes to take effect.
+
+Usage
+-----
+
+Once loaded, the extension works automatically. No CREATE EXTENSION command
+is needed - the extension is active as soon as PostgreSQL starts.
+
+Example:
+
+   -- Start a transaction
+   BEGIN;
+
+   -- Execute some DDL commands
+   CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT);
+   CREATE INDEX idx_users_name ON users(name);
+   ALTER TABLE users ADD COLUMN email TEXT;
+
+   -- Commit the transaction
+   COMMIT;
+
+   -- The DDL commands will be written to /tmp/pgddl/[xid].sql
+
+File Format
+-----------
+
+Each file contains the DDL commands from a single transaction, separated
+by semicolons and blank lines:
+
+   /tmp/pgddl/12345.sql:
+
+   CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT);
+
+   CREATE INDEX idx_users_name ON users(name);
+
+   ALTER TABLE users ADD COLUMN email TEXT;
+
+Configuration
+-------------
+
+Currently, the extension has no configurable parameters. The output
+directory is fixed at /tmp/pgddl/.
+
+If you need to customize the output directory, you can modify the
+ddl_logger.c source code and recompile.
+
+Error Handling
+--------------
+
+If any error occurs during file writing (e.g., disk full, permission denied),
+the extension will raise an ERROR, causing the entire transaction to roll back.
+This ensures that DDL commands are not committed to the database unless they
+are successfully logged to disk.
+
+Testing
+-------
+
+A test script is provided to verify the extension works correctly:
+
+   ./test_ddl_logger.sh
+
+The test script will:
+1. Create a test database
+2. Execute DDL commands
+3. Verify that log files are created
+4. Test that rollbacks don't create files
+5. Test that non-DDL commands aren't logged
+6. Clean up
+
+Limitations
+-----------
+
+* The output directory /tmp/pgddl/ is hardcoded
+* Files are named by transaction ID, which may not be sequential or
+  predictable
+* There is no built-in log rotation or cleanup mechanism
+* Very large DDL commands may consume significant disk space
+
+Security Considerations
+-----------------------
+
+* The /tmp/pgddl directory is created with permissions 0755 (world-readable)
+* DDL log files may contain sensitive schema information
+* Consider the security implications of logging DDL commands to /tmp
+
+License
+-------
+
+Copyright (c) 2025, PostgreSQL Global Development Group
+
+This software is released under the PostgreSQL License.
+
+Authors
+-------
+
+Developed for the PostgreSQL community.
