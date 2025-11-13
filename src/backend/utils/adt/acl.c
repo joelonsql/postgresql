@@ -1872,6 +1872,920 @@ aclexplode(PG_FUNCTION_ARGS)
 	SRF_RETURN_DONE(funcctx);
 }
 
+/*
+ * pg_get_user_privileges
+ *		Returns all privileges the current user has on all database objects.
+ *
+ * This function iterates through system catalogs and checks which privileges
+ * the current user has on each object, including column-level privileges.
+ * Unlike parsing ACLs (which only shows explicit grants), this uses the
+ * privilege checking infrastructure to report actual effective privileges,
+ * including those from ownership, PUBLIC grants, and role membership.
+ *
+ * Returns one row per privilege:
+ *		object_type		- Type of object (table, function, schema, etc.)
+ *		object_schema	- Schema name (NULL for database-level objects)
+ *		object_name		- Object name
+ *		object_oid		- Object OID
+ *		column_name		- Column name (NULL for object-level privileges)
+ *		privilege_type	- Privilege name (SELECT, INSERT, etc.)
+ *		is_grantable	- Whether user can grant this privilege to others
+ *
+ * Only user-created objects are included (system catalogs are excluded).
+ */
+Datum
+pg_get_user_privileges(PG_FUNCTION_ARGS)
+{
+	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
+	TupleDesc	tupdesc;
+	Tuplestorestate *tupstore;
+	MemoryContext per_query_ctx;
+	MemoryContext oldcontext;
+	Oid			userid;
+
+	/* Check to see if caller supports returning a tuplestore */
+	if (rsinfo == NULL || !IsA(rsinfo, ReturnSetInfo))
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("set-valued function called in context that cannot accept a set")));
+	if (!(rsinfo->allowedModes & SFRM_Materialize))
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("materialize mode required, but it is not allowed in this context")));
+
+	/* Build a tuple descriptor for our result type */
+	if (get_call_result_type(fcinfo, NULL, &tupdesc) != TYPEFUNC_COMPOSITE)
+		elog(ERROR, "return type must be a row type");
+
+	per_query_ctx = rsinfo->econtext->ecxt_per_query_memory;
+	oldcontext = MemoryContextSwitchTo(per_query_ctx);
+
+	tupstore = tuplestore_begin_heap(true, false, work_mem);
+	rsinfo->returnMode = SFRM_Materialize;
+	rsinfo->setResult = tupstore;
+	rsinfo->setDesc = tupdesc;
+
+	MemoryContextSwitchTo(oldcontext);
+
+	/* Get current user OID */
+	userid = GetUserId();
+
+	/* Process pg_class entries (tables, views, sequences, etc.) */
+	{
+		Relation	rel;
+		TableScanDesc scan;
+		HeapTuple	tuple;
+
+		rel = table_open(RelationRelationId, AccessShareLock);
+		scan = table_beginscan_catalog(rel, 0, NULL);
+
+		while ((tuple = heap_getnext(scan, ForwardScanDirection)) != NULL)
+		{
+			Form_pg_class classForm = (Form_pg_class) GETSTRUCT(tuple);
+			Oid			relid = classForm->oid;
+			Oid			nspid = classForm->relnamespace;
+			char	   *nspname;
+			char	   *relname;
+			char	   *objtype;
+			AclMode		all_privs;
+			Datum		aclDatum;
+			bool		isNull;
+			Acl		   *acl;
+
+			/* Skip system catalogs */
+			if (IsSystemNamespace(nspid) || IsToastNamespace(nspid))
+				continue;
+
+			/* Determine object type and applicable privileges */
+			switch (classForm->relkind)
+			{
+				case RELKIND_RELATION:
+				case RELKIND_PARTITIONED_TABLE:
+					objtype = "table";
+					all_privs = ACL_ALL_RIGHTS_RELATION;
+					break;
+				case RELKIND_SEQUENCE:
+					objtype = "sequence";
+					all_privs = ACL_ALL_RIGHTS_SEQUENCE;
+					break;
+				case RELKIND_VIEW:
+				case RELKIND_MATVIEW:
+					objtype = "view";
+					all_privs = ACL_ALL_RIGHTS_RELATION;
+					break;
+				case RELKIND_FOREIGN_TABLE:
+					objtype = "foreign table";
+					all_privs = ACL_ALL_RIGHTS_RELATION;
+					break;
+				default:
+					/* Skip other kinds */
+					continue;
+			}
+
+			relname = NameStr(classForm->relname);
+			nspname = get_namespace_name(nspid);
+			if (nspname == NULL)
+				continue;			/* schema was deleted */
+
+			/* Get the ACL to check for grantable options */
+			aclDatum = SysCacheGetAttr(RELOID, tuple, Anum_pg_class_relacl, &isNull);
+			if (isNull)
+				acl = acldefault(OBJECT_TABLE, classForm->relowner);
+			else
+				acl = DatumGetAclPCopy(aclDatum);
+
+			/* Check each privilege bit */
+			for (int j = 0; j < N_ACL_RIGHTS; j++)
+			{
+				AclMode		priv_bit = UINT64CONST(1) << j;
+				AclResult	aclresult;
+				bool		is_grantable = false;
+
+				/* Skip privileges not applicable to this object type */
+				if ((priv_bit & all_privs) == 0)
+					continue;
+
+				/* Check if user has this privilege */
+				aclresult = pg_class_aclcheck(relid, userid, priv_bit);
+				if (aclresult != ACLCHECK_OK)
+					continue;
+
+				/* Check if privilege is grantable by inspecting ACL */
+				for (int i = 0; i < ACL_NUM(acl); i++)
+				{
+					AclItem    *aip = &ACL_DAT(acl)[i];
+
+					if ((aip->ai_grantee == userid || aip->ai_grantee == ACL_ID_PUBLIC) &&
+						(ACLITEM_GET_GOPTIONS(*aip) & priv_bit) != 0)
+					{
+						is_grantable = true;
+						break;
+					}
+				}
+
+				/* Add row to result */
+				{
+					Datum		values[7];
+					bool		nulls[7] = {0};
+
+					values[0] = CStringGetTextDatum(objtype);
+					values[1] = CStringGetTextDatum(nspname);
+					values[2] = CStringGetTextDatum(relname);
+					values[3] = ObjectIdGetDatum(relid);
+					nulls[4] = true;	/* column_name is NULL */
+					values[5] = CStringGetTextDatum(convert_aclright_to_string(priv_bit));
+					values[6] = BoolGetDatum(is_grantable);
+
+					tuplestore_putvalues(tupstore, tupdesc, values, nulls);
+				}
+			}
+
+			pfree(acl);
+
+			/* For tables/views, also check column-level privileges */
+			if (classForm->relkind == RELKIND_RELATION ||
+				classForm->relkind == RELKIND_PARTITIONED_TABLE ||
+				classForm->relkind == RELKIND_VIEW ||
+				classForm->relkind == RELKIND_MATVIEW ||
+				classForm->relkind == RELKIND_FOREIGN_TABLE)
+			{
+				int			natts = classForm->relnatts;
+
+				for (AttrNumber attnum = 1; attnum <= natts; attnum++)
+				{
+					HeapTuple	attTuple;
+					Form_pg_attribute attForm;
+					char	   *attname;
+					Datum		attaclDatum;
+					bool		attaclNull;
+					Acl		   *attacl;
+
+					attTuple = SearchSysCache2(ATTNUM,
+											   ObjectIdGetDatum(relid),
+											   Int16GetDatum(attnum));
+					if (!HeapTupleIsValid(attTuple))
+						continue;
+
+					attForm = (Form_pg_attribute) GETSTRUCT(attTuple);
+
+					/* Skip dropped columns */
+					if (attForm->attisdropped)
+					{
+						ReleaseSysCache(attTuple);
+						continue;
+					}
+
+					attname = NameStr(attForm->attname);
+
+					/* Get column ACL */
+					attaclDatum = SysCacheGetAttr(ATTNUM, attTuple,
+												  Anum_pg_attribute_attacl,
+												  &attaclNull);
+
+					/* If no column-specific ACL, skip (table-level already covered) */
+					if (attaclNull)
+					{
+						ReleaseSysCache(attTuple);
+						continue;
+					}
+
+					attacl = DatumGetAclPCopy(attaclDatum);
+
+					/* Check each column privilege bit */
+					for (int j = 0; j < N_ACL_RIGHTS; j++)
+					{
+						AclMode		priv_bit = UINT64CONST(1) << j;
+						AclResult	aclresult;
+						bool		is_grantable = false;
+
+						/* Only certain privileges apply to columns */
+						if ((priv_bit & ACL_ALL_RIGHTS_COLUMN) == 0)
+							continue;
+
+						/* Check if user has this column privilege */
+						aclresult = pg_attribute_aclcheck(relid, attnum, userid, priv_bit);
+						if (aclresult != ACLCHECK_OK)
+							continue;
+
+						/* Check if privilege is grantable */
+						for (int i = 0; i < ACL_NUM(attacl); i++)
+						{
+							AclItem    *aip = &ACL_DAT(attacl)[i];
+
+							if ((aip->ai_grantee == userid || aip->ai_grantee == ACL_ID_PUBLIC) &&
+								(ACLITEM_GET_GOPTIONS(*aip) & priv_bit) != 0)
+							{
+								is_grantable = true;
+								break;
+							}
+						}
+
+						/* Add row to result */
+						{
+							Datum		values[7];
+							bool		nulls[7] = {0};
+
+							values[0] = CStringGetTextDatum(objtype);
+							values[1] = CStringGetTextDatum(nspname);
+							values[2] = CStringGetTextDatum(relname);
+							values[3] = ObjectIdGetDatum(relid);
+							values[4] = CStringGetTextDatum(attname);
+							values[5] = CStringGetTextDatum(convert_aclright_to_string(priv_bit));
+							values[6] = BoolGetDatum(is_grantable);
+
+							tuplestore_putvalues(tupstore, tupdesc, values, nulls);
+						}
+					}
+
+					pfree(attacl);
+					ReleaseSysCache(attTuple);
+				}
+			}
+		}
+
+		table_endscan(scan);
+		table_close(rel, AccessShareLock);
+	}
+
+	/* Process pg_namespace entries (schemas) */
+	{
+		Relation	rel;
+		TableScanDesc scan;
+		HeapTuple	tuple;
+
+		rel = table_open(NamespaceRelationId, AccessShareLock);
+		scan = table_beginscan_catalog(rel, 0, NULL);
+
+		while ((tuple = heap_getnext(scan, ForwardScanDirection)) != NULL)
+		{
+			Form_pg_namespace nspForm = (Form_pg_namespace) GETSTRUCT(tuple);
+			Oid			nspid = nspForm->oid;
+			char	   *nspname;
+			Datum		aclDatum;
+			bool		isNull;
+			Acl		   *acl;
+
+			/* Skip system schemas */
+			if (IsSystemNamespace(nspid))
+				continue;
+
+			nspname = NameStr(nspForm->nspname);
+
+			/* Get the ACL */
+			aclDatum = SysCacheGetAttr(NAMESPACEOID, tuple, Anum_pg_namespace_nspacl, &isNull);
+			if (isNull)
+				acl = acldefault(OBJECT_SCHEMA, nspForm->nspowner);
+			else
+				acl = DatumGetAclPCopy(aclDatum);
+
+			/* Check each privilege bit applicable to schemas */
+			for (int j = 0; j < N_ACL_RIGHTS; j++)
+			{
+				AclMode		priv_bit = UINT64CONST(1) << j;
+				AclResult	aclresult;
+				bool		is_grantable = false;
+
+				/* Only USAGE and CREATE apply to schemas */
+				if ((priv_bit & ACL_ALL_RIGHTS_SCHEMA) == 0)
+					continue;
+
+				/* Check if user has this privilege */
+				aclresult = object_aclcheck(NamespaceRelationId, nspid, userid, priv_bit);
+				if (aclresult != ACLCHECK_OK)
+					continue;
+
+				/* Check if privilege is grantable */
+				for (int i = 0; i < ACL_NUM(acl); i++)
+				{
+					AclItem    *aip = &ACL_DAT(acl)[i];
+
+					if ((aip->ai_grantee == userid || aip->ai_grantee == ACL_ID_PUBLIC) &&
+						(ACLITEM_GET_GOPTIONS(*aip) & priv_bit) != 0)
+					{
+						is_grantable = true;
+						break;
+					}
+				}
+
+				/* Add row to result */
+				{
+					Datum		values[7];
+					bool		nulls[7] = {0};
+
+					values[0] = CStringGetTextDatum("schema");
+					nulls[1] = true;	/* object_schema is NULL for schemas */
+					values[2] = CStringGetTextDatum(nspname);
+					values[3] = ObjectIdGetDatum(nspid);
+					nulls[4] = true;	/* column_name is NULL */
+					values[5] = CStringGetTextDatum(convert_aclright_to_string(priv_bit));
+					values[6] = BoolGetDatum(is_grantable);
+
+					tuplestore_putvalues(tupstore, tupdesc, values, nulls);
+				}
+			}
+
+			pfree(acl);
+		}
+
+		table_endscan(scan);
+		table_close(rel, AccessShareLock);
+	}
+
+	/* Process pg_proc entries (functions and procedures) */
+	{
+		Relation	rel;
+		TableScanDesc scan;
+		HeapTuple	tuple;
+
+		rel = table_open(ProcedureRelationId, AccessShareLock);
+		scan = table_beginscan_catalog(rel, 0, NULL);
+
+		while ((tuple = heap_getnext(scan, ForwardScanDirection)) != NULL)
+		{
+			Form_pg_proc procForm = (Form_pg_proc) GETSTRUCT(tuple);
+			Oid			procid = procForm->oid;
+			Oid			nspid = procForm->pronamespace;
+			char	   *nspname;
+			char	   *procname;
+			Datum		aclDatum;
+			bool		isNull;
+			Acl		   *acl;
+
+			/* Skip system catalogs */
+			if (IsSystemNamespace(nspid))
+				continue;
+
+			procname = NameStr(procForm->proname);
+			nspname = get_namespace_name(nspid);
+			if (nspname == NULL)
+				continue;
+
+			/* Get the ACL */
+			aclDatum = SysCacheGetAttr(PROCOID, tuple, Anum_pg_proc_proacl, &isNull);
+			if (isNull)
+				acl = acldefault(OBJECT_FUNCTION, procForm->proowner);
+			else
+				acl = DatumGetAclPCopy(aclDatum);
+
+			/* Check EXECUTE privilege (only privilege for functions) */
+			{
+				AclMode		priv_bit = ACL_EXECUTE;
+				AclResult	aclresult;
+				bool		is_grantable = false;
+
+				aclresult = object_aclcheck(ProcedureRelationId, procid, userid, priv_bit);
+				if (aclresult == ACLCHECK_OK)
+				{
+					/* Check if privilege is grantable */
+					for (int i = 0; i < ACL_NUM(acl); i++)
+					{
+						AclItem    *aip = &ACL_DAT(acl)[i];
+
+						if ((aip->ai_grantee == userid || aip->ai_grantee == ACL_ID_PUBLIC) &&
+							(ACLITEM_GET_GOPTIONS(*aip) & priv_bit) != 0)
+						{
+							is_grantable = true;
+							break;
+						}
+					}
+
+					/* Add row to result */
+					{
+						Datum		values[7];
+						bool		nulls[7] = {0};
+
+						values[0] = CStringGetTextDatum("function");
+						values[1] = CStringGetTextDatum(nspname);
+						values[2] = CStringGetTextDatum(procname);
+						values[3] = ObjectIdGetDatum(procid);
+						nulls[4] = true;	/* column_name is NULL */
+						values[5] = CStringGetTextDatum("EXECUTE");
+						values[6] = BoolGetDatum(is_grantable);
+
+						tuplestore_putvalues(tupstore, tupdesc, values, nulls);
+					}
+				}
+			}
+
+			pfree(acl);
+		}
+
+		table_endscan(scan);
+		table_close(rel, AccessShareLock);
+	}
+
+	/* Process pg_type entries (types) */
+	{
+		Relation	rel;
+		TableScanDesc scan;
+		HeapTuple	tuple;
+
+		rel = table_open(TypeRelationId, AccessShareLock);
+		scan = table_beginscan_catalog(rel, 0, NULL);
+
+		while ((tuple = heap_getnext(scan, ForwardScanDirection)) != NULL)
+		{
+			Form_pg_type typForm = (Form_pg_type) GETSTRUCT(tuple);
+			Oid			typid = typForm->oid;
+			Oid			nspid = typForm->typnamespace;
+			char	   *nspname;
+			char	   *typname;
+			Datum		aclDatum;
+			bool		isNull;
+			Acl		   *acl;
+
+			/* Skip system catalogs */
+			if (IsSystemNamespace(nspid))
+				continue;
+
+			/* Skip array types and other auto-generated types */
+			if (!typForm->typisdefined || typForm->typtype != TYPTYPE_BASE)
+				continue;
+
+			typname = NameStr(typForm->typname);
+			nspname = get_namespace_name(nspid);
+			if (nspname == NULL)
+				continue;
+
+			/* Get the ACL */
+			aclDatum = SysCacheGetAttr(TYPEOID, tuple, Anum_pg_type_typacl, &isNull);
+			if (isNull)
+				acl = acldefault(OBJECT_TYPE, typForm->typowner);
+			else
+				acl = DatumGetAclPCopy(aclDatum);
+
+			/* Check USAGE privilege (only privilege for types) */
+			{
+				AclMode		priv_bit = ACL_USAGE;
+				AclResult	aclresult;
+				bool		is_grantable = false;
+
+				aclresult = object_aclcheck(TypeRelationId, typid, userid, priv_bit);
+				if (aclresult == ACLCHECK_OK)
+				{
+					/* Check if privilege is grantable */
+					for (int i = 0; i < ACL_NUM(acl); i++)
+					{
+						AclItem    *aip = &ACL_DAT(acl)[i];
+
+						if ((aip->ai_grantee == userid || aip->ai_grantee == ACL_ID_PUBLIC) &&
+							(ACLITEM_GET_GOPTIONS(*aip) & priv_bit) != 0)
+						{
+							is_grantable = true;
+							break;
+						}
+					}
+
+					/* Add row to result */
+					{
+						Datum		values[7];
+						bool		nulls[7] = {0};
+
+						values[0] = CStringGetTextDatum("type");
+						values[1] = CStringGetTextDatum(nspname);
+						values[2] = CStringGetTextDatum(typname);
+						values[3] = ObjectIdGetDatum(typid);
+						nulls[4] = true;	/* column_name is NULL */
+						values[5] = CStringGetTextDatum("USAGE");
+						values[6] = BoolGetDatum(is_grantable);
+
+						tuplestore_putvalues(tupstore, tupdesc, values, nulls);
+					}
+				}
+			}
+
+			pfree(acl);
+		}
+
+		table_endscan(scan);
+		table_close(rel, AccessShareLock);
+	}
+
+	/* Process pg_database entries (databases) */
+	{
+		Relation	rel;
+		TableScanDesc scan;
+		HeapTuple	tuple;
+
+		rel = table_open(DatabaseRelationId, AccessShareLock);
+		scan = table_beginscan_catalog(rel, 0, NULL);
+
+		while ((tuple = heap_getnext(scan, ForwardScanDirection)) != NULL)
+		{
+			Form_pg_database dbForm = (Form_pg_database) GETSTRUCT(tuple);
+			Oid			dbid = dbForm->oid;
+			char	   *dbname;
+			Datum		aclDatum;
+			bool		isNull;
+			Acl		   *acl;
+
+			/* Skip template databases */
+			if (dbForm->datistemplate)
+				continue;
+
+			dbname = NameStr(dbForm->datname);
+
+			/* Get the ACL */
+			aclDatum = SysCacheGetAttr(DATABASEOID, tuple, Anum_pg_database_datacl, &isNull);
+			if (isNull)
+				acl = acldefault(OBJECT_DATABASE, dbForm->datdba);
+			else
+				acl = DatumGetAclPCopy(aclDatum);
+
+			/* Check each privilege bit applicable to databases */
+			for (int j = 0; j < N_ACL_RIGHTS; j++)
+			{
+				AclMode		priv_bit = UINT64CONST(1) << j;
+				AclResult	aclresult;
+				bool		is_grantable = false;
+
+				/* Only certain privileges apply to databases */
+				if ((priv_bit & ACL_ALL_RIGHTS_DATABASE) == 0)
+					continue;
+
+				/* Check if user has this privilege */
+				aclresult = object_aclcheck(DatabaseRelationId, dbid, userid, priv_bit);
+				if (aclresult != ACLCHECK_OK)
+					continue;
+
+				/* Check if privilege is grantable */
+				for (int i = 0; i < ACL_NUM(acl); i++)
+				{
+					AclItem    *aip = &ACL_DAT(acl)[i];
+
+					if ((aip->ai_grantee == userid || aip->ai_grantee == ACL_ID_PUBLIC) &&
+						(ACLITEM_GET_GOPTIONS(*aip) & priv_bit) != 0)
+					{
+						is_grantable = true;
+						break;
+					}
+				}
+
+				/* Add row to result */
+				{
+					Datum		values[7];
+					bool		nulls[7] = {0};
+
+					values[0] = CStringGetTextDatum("database");
+					nulls[1] = true;	/* object_schema is NULL for databases */
+					values[2] = CStringGetTextDatum(dbname);
+					values[3] = ObjectIdGetDatum(dbid);
+					nulls[4] = true;	/* column_name is NULL */
+					values[5] = CStringGetTextDatum(convert_aclright_to_string(priv_bit));
+					values[6] = BoolGetDatum(is_grantable);
+
+					tuplestore_putvalues(tupstore, tupdesc, values, nulls);
+				}
+			}
+
+			pfree(acl);
+		}
+
+		table_endscan(scan);
+		table_close(rel, AccessShareLock);
+	}
+
+	/* Process pg_tablespace entries (tablespaces) */
+	{
+		Relation	rel;
+		TableScanDesc scan;
+		HeapTuple	tuple;
+
+		rel = table_open(TableSpaceRelationId, AccessShareLock);
+		scan = table_beginscan_catalog(rel, 0, NULL);
+
+		while ((tuple = heap_getnext(scan, ForwardScanDirection)) != NULL)
+		{
+			Form_pg_tablespace spcForm = (Form_pg_tablespace) GETSTRUCT(tuple);
+			Oid			spcid = spcForm->oid;
+			char	   *spcname;
+			Datum		aclDatum;
+			bool		isNull;
+			Acl		   *acl;
+
+			spcname = NameStr(spcForm->spcname);
+
+			/* Get the ACL */
+			aclDatum = SysCacheGetAttr(TABLESPACEOID, tuple, Anum_pg_tablespace_spcacl, &isNull);
+			if (isNull)
+				acl = acldefault(OBJECT_TABLESPACE, spcForm->spcowner);
+			else
+				acl = DatumGetAclPCopy(aclDatum);
+
+			/* Check CREATE privilege (only privilege for tablespaces) */
+			{
+				AclMode		priv_bit = ACL_CREATE;
+				AclResult	aclresult;
+				bool		is_grantable = false;
+
+				aclresult = object_aclcheck(TableSpaceRelationId, spcid, userid, priv_bit);
+				if (aclresult == ACLCHECK_OK)
+				{
+					/* Check if privilege is grantable */
+					for (int i = 0; i < ACL_NUM(acl); i++)
+					{
+						AclItem    *aip = &ACL_DAT(acl)[i];
+
+						if ((aip->ai_grantee == userid || aip->ai_grantee == ACL_ID_PUBLIC) &&
+							(ACLITEM_GET_GOPTIONS(*aip) & priv_bit) != 0)
+						{
+							is_grantable = true;
+							break;
+						}
+					}
+
+					/* Add row to result */
+					{
+						Datum		values[7];
+						bool		nulls[7] = {0};
+
+						values[0] = CStringGetTextDatum("tablespace");
+						nulls[1] = true;	/* object_schema is NULL for tablespaces */
+						values[2] = CStringGetTextDatum(spcname);
+						values[3] = ObjectIdGetDatum(spcid);
+						nulls[4] = true;	/* column_name is NULL */
+						values[5] = CStringGetTextDatum("CREATE");
+						values[6] = BoolGetDatum(is_grantable);
+
+						tuplestore_putvalues(tupstore, tupdesc, values, nulls);
+					}
+				}
+			}
+
+			pfree(acl);
+		}
+
+		table_endscan(scan);
+		table_close(rel, AccessShareLock);
+	}
+
+	/* Process pg_foreign_data_wrapper entries (FDWs) */
+	{
+		Relation	rel;
+		TableScanDesc scan;
+		HeapTuple	tuple;
+
+		rel = table_open(ForeignDataWrapperRelationId, AccessShareLock);
+		scan = table_beginscan_catalog(rel, 0, NULL);
+
+		while ((tuple = heap_getnext(scan, ForwardScanDirection)) != NULL)
+		{
+			Form_pg_foreign_data_wrapper fdwForm = (Form_pg_foreign_data_wrapper) GETSTRUCT(tuple);
+			Oid			fdwid = fdwForm->oid;
+			char	   *fdwname;
+			Datum		aclDatum;
+			bool		isNull;
+			Acl		   *acl;
+
+			fdwname = NameStr(fdwForm->fdwname);
+
+			/* Get the ACL */
+			aclDatum = SysCacheGetAttr(FOREIGNDATAWRAPPEROID, tuple,
+									   Anum_pg_foreign_data_wrapper_fdwacl, &isNull);
+			if (isNull)
+				acl = acldefault(OBJECT_FDW, fdwForm->fdwowner);
+			else
+				acl = DatumGetAclPCopy(aclDatum);
+
+			/* Check USAGE privilege (only privilege for FDWs) */
+			{
+				AclMode		priv_bit = ACL_USAGE;
+				AclResult	aclresult;
+				bool		is_grantable = false;
+
+				aclresult = object_aclcheck(ForeignDataWrapperRelationId, fdwid, userid, priv_bit);
+				if (aclresult == ACLCHECK_OK)
+				{
+					/* Check if privilege is grantable */
+					for (int i = 0; i < ACL_NUM(acl); i++)
+					{
+						AclItem    *aip = &ACL_DAT(acl)[i];
+
+						if ((aip->ai_grantee == userid || aip->ai_grantee == ACL_ID_PUBLIC) &&
+							(ACLITEM_GET_GOPTIONS(*aip) & priv_bit) != 0)
+						{
+							is_grantable = true;
+							break;
+						}
+					}
+
+					/* Add row to result */
+					{
+						Datum		values[7];
+						bool		nulls[7] = {0};
+
+						values[0] = CStringGetTextDatum("foreign data wrapper");
+						nulls[1] = true;	/* object_schema is NULL for FDWs */
+						values[2] = CStringGetTextDatum(fdwname);
+						values[3] = ObjectIdGetDatum(fdwid);
+						nulls[4] = true;	/* column_name is NULL */
+						values[5] = CStringGetTextDatum("USAGE");
+						values[6] = BoolGetDatum(is_grantable);
+
+						tuplestore_putvalues(tupstore, tupdesc, values, nulls);
+					}
+				}
+			}
+
+			pfree(acl);
+		}
+
+		table_endscan(scan);
+		table_close(rel, AccessShareLock);
+	}
+
+	/* Process pg_foreign_server entries (foreign servers) */
+	{
+		Relation	rel;
+		TableScanDesc scan;
+		HeapTuple	tuple;
+
+		rel = table_open(ForeignServerRelationId, AccessShareLock);
+		scan = table_beginscan_catalog(rel, 0, NULL);
+
+		while ((tuple = heap_getnext(scan, ForwardScanDirection)) != NULL)
+		{
+			Form_pg_foreign_server srvForm = (Form_pg_foreign_server) GETSTRUCT(tuple);
+			Oid			srvid = srvForm->oid;
+			char	   *srvname;
+			Datum		aclDatum;
+			bool		isNull;
+			Acl		   *acl;
+
+			srvname = NameStr(srvForm->srvname);
+
+			/* Get the ACL */
+			aclDatum = SysCacheGetAttr(FOREIGNSERVEROID, tuple,
+									   Anum_pg_foreign_server_srvacl, &isNull);
+			if (isNull)
+				acl = acldefault(OBJECT_FOREIGN_SERVER, srvForm->srvowner);
+			else
+				acl = DatumGetAclPCopy(aclDatum);
+
+			/* Check USAGE privilege (only privilege for foreign servers) */
+			{
+				AclMode		priv_bit = ACL_USAGE;
+				AclResult	aclresult;
+				bool		is_grantable = false;
+
+				aclresult = object_aclcheck(ForeignServerRelationId, srvid, userid, priv_bit);
+				if (aclresult == ACLCHECK_OK)
+				{
+					/* Check if privilege is grantable */
+					for (int i = 0; i < ACL_NUM(acl); i++)
+					{
+						AclItem    *aip = &ACL_DAT(acl)[i];
+
+						if ((aip->ai_grantee == userid || aip->ai_grantee == ACL_ID_PUBLIC) &&
+							(ACLITEM_GET_GOPTIONS(*aip) & priv_bit) != 0)
+						{
+							is_grantable = true;
+							break;
+						}
+					}
+
+					/* Add row to result */
+					{
+						Datum		values[7];
+						bool		nulls[7] = {0};
+
+						values[0] = CStringGetTextDatum("foreign server");
+						nulls[1] = true;	/* object_schema is NULL for foreign servers */
+						values[2] = CStringGetTextDatum(srvname);
+						values[3] = ObjectIdGetDatum(srvid);
+						nulls[4] = true;	/* column_name is NULL */
+						values[5] = CStringGetTextDatum("USAGE");
+						values[6] = BoolGetDatum(is_grantable);
+
+						tuplestore_putvalues(tupstore, tupdesc, values, nulls);
+					}
+				}
+			}
+
+			pfree(acl);
+		}
+
+		table_endscan(scan);
+		table_close(rel, AccessShareLock);
+	}
+
+	/* Process pg_language entries (procedural languages) */
+	{
+		Relation	rel;
+		TableScanDesc scan;
+		HeapTuple	tuple;
+
+		rel = table_open(LanguageRelationId, AccessShareLock);
+		scan = table_beginscan_catalog(rel, 0, NULL);
+
+		while ((tuple = heap_getnext(scan, ForwardScanDirection)) != NULL)
+		{
+			Form_pg_language langForm = (Form_pg_language) GETSTRUCT(tuple);
+			Oid			langid = langForm->oid;
+			char	   *langname;
+			Datum		aclDatum;
+			bool		isNull;
+			Acl		   *acl;
+
+			langname = NameStr(langForm->lanname);
+
+			/* Get the ACL */
+			aclDatum = SysCacheGetAttr(LANGOID, tuple, Anum_pg_language_lanacl, &isNull);
+			if (isNull)
+				acl = acldefault(OBJECT_LANGUAGE, langForm->lanowner);
+			else
+				acl = DatumGetAclPCopy(aclDatum);
+
+			/* Check USAGE privilege (only privilege for languages) */
+			{
+				AclMode		priv_bit = ACL_USAGE;
+				AclResult	aclresult;
+				bool		is_grantable = false;
+
+				aclresult = object_aclcheck(LanguageRelationId, langid, userid, priv_bit);
+				if (aclresult == ACLCHECK_OK)
+				{
+					/* Check if privilege is grantable */
+					for (int i = 0; i < ACL_NUM(acl); i++)
+					{
+						AclItem    *aip = &ACL_DAT(acl)[i];
+
+						if ((aip->ai_grantee == userid || aip->ai_grantee == ACL_ID_PUBLIC) &&
+							(ACLITEM_GET_GOPTIONS(*aip) & priv_bit) != 0)
+						{
+							is_grantable = true;
+							break;
+						}
+					}
+
+					/* Add row to result */
+					{
+						Datum		values[7];
+						bool		nulls[7] = {0};
+
+						values[0] = CStringGetTextDatum("language");
+						nulls[1] = true;	/* object_schema is NULL for languages */
+						values[2] = CStringGetTextDatum(langname);
+						values[3] = ObjectIdGetDatum(langid);
+						nulls[4] = true;	/* column_name is NULL */
+						values[5] = CStringGetTextDatum("USAGE");
+						values[6] = BoolGetDatum(is_grantable);
+
+						tuplestore_putvalues(tupstore, tupdesc, values, nulls);
+					}
+				}
+			}
+
+			pfree(acl);
+		}
+
+		table_endscan(scan);
+		table_close(rel, AccessShareLock);
+	}
+
+	return (Datum) 0;
+}
+
 
 /*
  * has_table_privilege variants
