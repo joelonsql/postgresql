@@ -16,8 +16,12 @@
 
 #include <ctype.h>
 
+#include "access/heapam.h"
 #include "access/htup_details.h"
+#include "access/tableam.h"
 #include "catalog/catalog.h"
+#include "catalog/objectaddress.h"
+#include "catalog/pg_attribute.h"
 #include "catalog/namespace.h"
 #include "catalog/pg_auth_members.h"
 #include "catalog/pg_authid.h"
@@ -1873,6 +1877,42 @@ aclexplode(PG_FUNCTION_ARGS)
 }
 
 /*
+ * Helper function to add a privilege row to the tuplestore.
+ * Uses the standard ObjectAddress format matching pg_identify_object_as_address.
+ */
+static void
+add_privilege_row(Tuplestorestate *tupstore, TupleDesc tupdesc,
+				  const ObjectAddress *object, AclMode priv_bit,
+				  bool is_grantable)
+{
+	Datum		values[5];
+	bool		nulls[5] = {0};
+	char	   *type;
+	List	   *names = NIL;
+	List	   *args = NIL;
+
+	/* Get object type description */
+	type = getObjectTypeDescription(object, false);
+
+	/* Get object identity parts (names and args) */
+	getObjectIdentityParts(object, &names, &args, false);
+
+	/* Convert to output format */
+	values[0] = CStringGetTextDatum(type);
+	values[1] = PointerGetDatum(strlist_to_textarray(names));
+	values[2] = PointerGetDatum(strlist_to_textarray(args));
+	values[3] = CStringGetTextDatum(convert_aclright_to_string(priv_bit));
+	values[4] = BoolGetDatum(is_grantable);
+
+	tuplestore_putvalues(tupstore, tupdesc, values, nulls);
+
+	/* Clean up */
+	pfree(type);
+	list_free_deep(names);
+	list_free_deep(args);
+}
+
+/*
  * pg_get_user_privileges
  *		Returns all privileges the current user has on all database objects.
  *
@@ -1882,13 +1922,11 @@ aclexplode(PG_FUNCTION_ARGS)
  * privilege checking infrastructure to report actual effective privileges,
  * including those from ownership, PUBLIC grants, and role membership.
  *
- * Returns one row per privilege:
- *		object_type		- Type of object (table, function, schema, etc.)
- *		object_schema	- Schema name (NULL for database-level objects)
- *		object_name		- Object name
- *		object_oid		- Object OID
- *		column_name		- Column name (NULL for object-level privileges)
- *		privilege_type	- Privilege name (SELECT, INSERT, etc.)
+ * Returns one row per privilege using PostgreSQL's standard object identification format:
+ *		type			- Object type (e.g., "table", "table column", "function")
+ *		object_names	- Array of name components (e.g., {schema, table} or {schema, table, column})
+ *		object_args		- Array of argument types (for functions) or empty array
+ *		privilege_type	- Privilege name (SELECT, INSERT, EXECUTE, etc.)
  *		is_grantable	- Whether user can grant this privilege to others
  *
  * Only user-created objects are included (system catalogs are excluded).
@@ -1952,8 +1990,15 @@ pg_get_user_privileges(PG_FUNCTION_ARGS)
 			bool		isNull;
 			Acl		   *acl;
 
-			/* Skip system catalogs */
-			if (IsSystemNamespace(nspid) || IsToastNamespace(nspid))
+			/* Get schema name first to check if it's a system schema */
+			nspname = get_namespace_name(nspid);
+			if (nspname == NULL)
+				continue;			/* schema was deleted */
+
+			/* Skip system catalogs (pg_catalog, information_schema) and TOAST tables */
+			if (IsToastNamespace(nspid) ||
+				strcmp(nspname, "pg_catalog") == 0 ||
+				strcmp(nspname, "information_schema") == 0)
 				continue;
 
 			/* Determine object type and applicable privileges */
@@ -1983,9 +2028,6 @@ pg_get_user_privileges(PG_FUNCTION_ARGS)
 			}
 
 			relname = NameStr(classForm->relname);
-			nspname = get_namespace_name(nspid);
-			if (nspname == NULL)
-				continue;			/* schema was deleted */
 
 			/* Get the ACL to check for grantable options */
 			aclDatum = SysCacheGetAttr(RELOID, tuple, Anum_pg_class_relacl, &isNull);
@@ -2000,6 +2042,7 @@ pg_get_user_privileges(PG_FUNCTION_ARGS)
 				AclMode		priv_bit = UINT64CONST(1) << j;
 				AclResult	aclresult;
 				bool		is_grantable = false;
+				ObjectAddress address;
 
 				/* Skip privileges not applicable to this object type */
 				if ((priv_bit & all_privs) == 0)
@@ -2023,21 +2066,12 @@ pg_get_user_privileges(PG_FUNCTION_ARGS)
 					}
 				}
 
-				/* Add row to result */
-				{
-					Datum		values[7];
-					bool		nulls[7] = {0};
+				/* Build ObjectAddress and add row */
+				address.classId = RelationRelationId;
+				address.objectId = relid;
+				address.objectSubId = 0;	/* table-level privilege */
 
-					values[0] = CStringGetTextDatum(objtype);
-					values[1] = CStringGetTextDatum(nspname);
-					values[2] = CStringGetTextDatum(relname);
-					values[3] = ObjectIdGetDatum(relid);
-					nulls[4] = true;	/* column_name is NULL */
-					values[5] = CStringGetTextDatum(convert_aclright_to_string(priv_bit));
-					values[6] = BoolGetDatum(is_grantable);
-
-					tuplestore_putvalues(tupstore, tupdesc, values, nulls);
-				}
+				add_privilege_row(tupstore, tupdesc, &address, priv_bit, is_grantable);
 			}
 
 			pfree(acl);
@@ -2097,6 +2131,7 @@ pg_get_user_privileges(PG_FUNCTION_ARGS)
 						AclMode		priv_bit = UINT64CONST(1) << j;
 						AclResult	aclresult;
 						bool		is_grantable = false;
+						ObjectAddress address;
 
 						/* Only certain privileges apply to columns */
 						if ((priv_bit & ACL_ALL_RIGHTS_COLUMN) == 0)
@@ -2120,21 +2155,12 @@ pg_get_user_privileges(PG_FUNCTION_ARGS)
 							}
 						}
 
-						/* Add row to result */
-						{
-							Datum		values[7];
-							bool		nulls[7] = {0};
+						/* Build ObjectAddress and add row (with column) */
+						address.classId = RelationRelationId;
+						address.objectId = relid;
+						address.objectSubId = attnum;	/* column-level privilege */
 
-							values[0] = CStringGetTextDatum(objtype);
-							values[1] = CStringGetTextDatum(nspname);
-							values[2] = CStringGetTextDatum(relname);
-							values[3] = ObjectIdGetDatum(relid);
-							values[4] = CStringGetTextDatum(attname);
-							values[5] = CStringGetTextDatum(convert_aclright_to_string(priv_bit));
-							values[6] = BoolGetDatum(is_grantable);
-
-							tuplestore_putvalues(tupstore, tupdesc, values, nulls);
-						}
+						add_privilege_row(tupstore, tupdesc, &address, priv_bit, is_grantable);
 					}
 
 					pfree(attacl);
@@ -2165,11 +2191,13 @@ pg_get_user_privileges(PG_FUNCTION_ARGS)
 			bool		isNull;
 			Acl		   *acl;
 
-			/* Skip system schemas */
-			if (IsSystemNamespace(nspid))
-				continue;
-
 			nspname = NameStr(nspForm->nspname);
+
+			/* Skip system schemas (pg_catalog, information_schema, pg_toast_*) */
+			if (strcmp(nspname, "pg_catalog") == 0 ||
+				strcmp(nspname, "information_schema") == 0 ||
+				IsToastNamespace(nspid))
+				continue;
 
 			/* Get the ACL */
 			aclDatum = SysCacheGetAttr(NAMESPACEOID, tuple, Anum_pg_namespace_nspacl, &isNull);
@@ -2184,6 +2212,7 @@ pg_get_user_privileges(PG_FUNCTION_ARGS)
 				AclMode		priv_bit = UINT64CONST(1) << j;
 				AclResult	aclresult;
 				bool		is_grantable = false;
+				ObjectAddress address;
 
 				/* Only USAGE and CREATE apply to schemas */
 				if ((priv_bit & ACL_ALL_RIGHTS_SCHEMA) == 0)
@@ -2207,21 +2236,12 @@ pg_get_user_privileges(PG_FUNCTION_ARGS)
 					}
 				}
 
-				/* Add row to result */
-				{
-					Datum		values[7];
-					bool		nulls[7] = {0};
+				/* Build ObjectAddress and add row */
+				address.classId = NamespaceRelationId;
+				address.objectId = nspid;
+				address.objectSubId = 0;
 
-					values[0] = CStringGetTextDatum("schema");
-					nulls[1] = true;	/* object_schema is NULL for schemas */
-					values[2] = CStringGetTextDatum(nspname);
-					values[3] = ObjectIdGetDatum(nspid);
-					nulls[4] = true;	/* column_name is NULL */
-					values[5] = CStringGetTextDatum(convert_aclright_to_string(priv_bit));
-					values[6] = BoolGetDatum(is_grantable);
-
-					tuplestore_putvalues(tupstore, tupdesc, values, nulls);
-				}
+				add_privilege_row(tupstore, tupdesc, &address, priv_bit, is_grantable);
 			}
 
 			pfree(acl);
@@ -2251,14 +2271,17 @@ pg_get_user_privileges(PG_FUNCTION_ARGS)
 			bool		isNull;
 			Acl		   *acl;
 
-			/* Skip system catalogs */
-			if (IsSystemNamespace(nspid))
-				continue;
-
-			procname = NameStr(procForm->proname);
+			/* Get schema name first */
 			nspname = get_namespace_name(nspid);
 			if (nspname == NULL)
 				continue;
+
+			/* Skip system catalogs */
+			if (strcmp(nspname, "pg_catalog") == 0 ||
+				strcmp(nspname, "information_schema") == 0)
+				continue;
+
+			procname = NameStr(procForm->proname);
 
 			/* Get the ACL */
 			aclDatum = SysCacheGetAttr(PROCOID, tuple, Anum_pg_proc_proacl, &isNull);
@@ -2272,6 +2295,7 @@ pg_get_user_privileges(PG_FUNCTION_ARGS)
 				AclMode		priv_bit = ACL_EXECUTE;
 				AclResult	aclresult;
 				bool		is_grantable = false;
+				ObjectAddress address;
 
 				aclresult = object_aclcheck(ProcedureRelationId, procid, userid, priv_bit);
 				if (aclresult == ACLCHECK_OK)
@@ -2289,21 +2313,12 @@ pg_get_user_privileges(PG_FUNCTION_ARGS)
 						}
 					}
 
-					/* Add row to result */
-					{
-						Datum		values[7];
-						bool		nulls[7] = {0};
+					/* Build ObjectAddress and add row */
+					address.classId = ProcedureRelationId;
+					address.objectId = procid;
+					address.objectSubId = 0;
 
-						values[0] = CStringGetTextDatum("function");
-						values[1] = CStringGetTextDatum(nspname);
-						values[2] = CStringGetTextDatum(procname);
-						values[3] = ObjectIdGetDatum(procid);
-						nulls[4] = true;	/* column_name is NULL */
-						values[5] = CStringGetTextDatum("EXECUTE");
-						values[6] = BoolGetDatum(is_grantable);
-
-						tuplestore_putvalues(tupstore, tupdesc, values, nulls);
-					}
+					add_privilege_row(tupstore, tupdesc, &address, priv_bit, is_grantable);
 				}
 			}
 
@@ -2334,18 +2349,21 @@ pg_get_user_privileges(PG_FUNCTION_ARGS)
 			bool		isNull;
 			Acl		   *acl;
 
-			/* Skip system catalogs */
-			if (IsSystemNamespace(nspid))
-				continue;
-
 			/* Skip array types and other auto-generated types */
 			if (!typForm->typisdefined || typForm->typtype != TYPTYPE_BASE)
 				continue;
 
-			typname = NameStr(typForm->typname);
+			/* Get schema name first */
 			nspname = get_namespace_name(nspid);
 			if (nspname == NULL)
 				continue;
+
+			/* Skip system catalogs */
+			if (strcmp(nspname, "pg_catalog") == 0 ||
+				strcmp(nspname, "information_schema") == 0)
+				continue;
+
+			typname = NameStr(typForm->typname);
 
 			/* Get the ACL */
 			aclDatum = SysCacheGetAttr(TYPEOID, tuple, Anum_pg_type_typacl, &isNull);
@@ -2376,21 +2394,13 @@ pg_get_user_privileges(PG_FUNCTION_ARGS)
 						}
 					}
 
-					/* Add row to result */
-					{
-						Datum		values[7];
-						bool		nulls[7] = {0};
+					/* Build ObjectAddress and add row */
+					ObjectAddress address;
+					address.classId = TypeRelationId;
+					address.objectId = typid;
+					address.objectSubId = 0;
 
-						values[0] = CStringGetTextDatum("type");
-						values[1] = CStringGetTextDatum(nspname);
-						values[2] = CStringGetTextDatum(typname);
-						values[3] = ObjectIdGetDatum(typid);
-						nulls[4] = true;	/* column_name is NULL */
-						values[5] = CStringGetTextDatum("USAGE");
-						values[6] = BoolGetDatum(is_grantable);
-
-						tuplestore_putvalues(tupstore, tupdesc, values, nulls);
-					}
+					add_privilege_row(tupstore, tupdesc, &address, priv_bit, is_grantable);
 				}
 			}
 
@@ -2438,6 +2448,7 @@ pg_get_user_privileges(PG_FUNCTION_ARGS)
 				AclMode		priv_bit = UINT64CONST(1) << j;
 				AclResult	aclresult;
 				bool		is_grantable = false;
+				ObjectAddress address;
 
 				/* Only certain privileges apply to databases */
 				if ((priv_bit & ACL_ALL_RIGHTS_DATABASE) == 0)
@@ -2461,21 +2472,12 @@ pg_get_user_privileges(PG_FUNCTION_ARGS)
 					}
 				}
 
-				/* Add row to result */
-				{
-					Datum		values[7];
-					bool		nulls[7] = {0};
+				/* Build ObjectAddress and add row */
+				address.classId = DatabaseRelationId;
+				address.objectId = dbid;
+				address.objectSubId = 0;
 
-					values[0] = CStringGetTextDatum("database");
-					nulls[1] = true;	/* object_schema is NULL for databases */
-					values[2] = CStringGetTextDatum(dbname);
-					values[3] = ObjectIdGetDatum(dbid);
-					nulls[4] = true;	/* column_name is NULL */
-					values[5] = CStringGetTextDatum(convert_aclright_to_string(priv_bit));
-					values[6] = BoolGetDatum(is_grantable);
-
-					tuplestore_putvalues(tupstore, tupdesc, values, nulls);
-				}
+				add_privilege_row(tupstore, tupdesc, &address, priv_bit, is_grantable);
 			}
 
 			pfree(acl);
@@ -2534,21 +2536,13 @@ pg_get_user_privileges(PG_FUNCTION_ARGS)
 						}
 					}
 
-					/* Add row to result */
-					{
-						Datum		values[7];
-						bool		nulls[7] = {0};
+					/* Build ObjectAddress and add row */
+					ObjectAddress address;
+					address.classId = TableSpaceRelationId;
+					address.objectId = spcid;
+					address.objectSubId = 0;
 
-						values[0] = CStringGetTextDatum("tablespace");
-						nulls[1] = true;	/* object_schema is NULL for tablespaces */
-						values[2] = CStringGetTextDatum(spcname);
-						values[3] = ObjectIdGetDatum(spcid);
-						nulls[4] = true;	/* column_name is NULL */
-						values[5] = CStringGetTextDatum("CREATE");
-						values[6] = BoolGetDatum(is_grantable);
-
-						tuplestore_putvalues(tupstore, tupdesc, values, nulls);
-					}
+					add_privilege_row(tupstore, tupdesc, &address, priv_bit, is_grantable);
 				}
 			}
 
@@ -2609,21 +2603,13 @@ pg_get_user_privileges(PG_FUNCTION_ARGS)
 						}
 					}
 
-					/* Add row to result */
-					{
-						Datum		values[7];
-						bool		nulls[7] = {0};
+					/* Build ObjectAddress and add row */
+					ObjectAddress address;
+					address.classId = ForeignDataWrapperRelationId;
+					address.objectId = fdwid;
+					address.objectSubId = 0;
 
-						values[0] = CStringGetTextDatum("foreign data wrapper");
-						nulls[1] = true;	/* object_schema is NULL for FDWs */
-						values[2] = CStringGetTextDatum(fdwname);
-						values[3] = ObjectIdGetDatum(fdwid);
-						nulls[4] = true;	/* column_name is NULL */
-						values[5] = CStringGetTextDatum("USAGE");
-						values[6] = BoolGetDatum(is_grantable);
-
-						tuplestore_putvalues(tupstore, tupdesc, values, nulls);
-					}
+					add_privilege_row(tupstore, tupdesc, &address, priv_bit, is_grantable);
 				}
 			}
 
@@ -2684,21 +2670,13 @@ pg_get_user_privileges(PG_FUNCTION_ARGS)
 						}
 					}
 
-					/* Add row to result */
-					{
-						Datum		values[7];
-						bool		nulls[7] = {0};
+					/* Build ObjectAddress and add row */
+					ObjectAddress address;
+					address.classId = ForeignServerRelationId;
+					address.objectId = srvid;
+					address.objectSubId = 0;
 
-						values[0] = CStringGetTextDatum("foreign server");
-						nulls[1] = true;	/* object_schema is NULL for foreign servers */
-						values[2] = CStringGetTextDatum(srvname);
-						values[3] = ObjectIdGetDatum(srvid);
-						nulls[4] = true;	/* column_name is NULL */
-						values[5] = CStringGetTextDatum("USAGE");
-						values[6] = BoolGetDatum(is_grantable);
-
-						tuplestore_putvalues(tupstore, tupdesc, values, nulls);
-					}
+					add_privilege_row(tupstore, tupdesc, &address, priv_bit, is_grantable);
 				}
 			}
 
@@ -2758,21 +2736,13 @@ pg_get_user_privileges(PG_FUNCTION_ARGS)
 						}
 					}
 
-					/* Add row to result */
-					{
-						Datum		values[7];
-						bool		nulls[7] = {0};
+					/* Build ObjectAddress and add row */
+					ObjectAddress address;
+					address.classId = LanguageRelationId;
+					address.objectId = langid;
+					address.objectSubId = 0;
 
-						values[0] = CStringGetTextDatum("language");
-						nulls[1] = true;	/* object_schema is NULL for languages */
-						values[2] = CStringGetTextDatum(langname);
-						values[3] = ObjectIdGetDatum(langid);
-						nulls[4] = true;	/* column_name is NULL */
-						values[5] = CStringGetTextDatum("USAGE");
-						values[6] = BoolGetDatum(is_grantable);
-
-						tuplestore_putvalues(tupstore, tupdesc, values, nulls);
-					}
+					add_privilege_row(tupstore, tupdesc, &address, priv_bit, is_grantable);
 				}
 			}
 
