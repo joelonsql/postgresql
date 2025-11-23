@@ -418,6 +418,12 @@ static bool unlistenExitRegistered = false;
 /* True if we're currently registered as a listener in asyncQueueControl */
 static bool amRegisteredListener = false;
 
+/*
+ * Arrays for SignalBackends.
+ */
+static int32 *notifySignalPids = NULL;
+static ProcNumber *notifySignalProcs = NULL;
+
 /* have we advanced to a page that's a multiple of QUEUE_CLEANUP_DELAY? */
 static bool tryAdvanceTail = false;
 
@@ -475,6 +481,27 @@ static inline bool
 asyncQueuePagePrecedes(int64 p, int64 q)
 {
 	return p < q;
+}
+
+/*
+ * initSignalArrays
+ *		Lazy initialization of the signal arrays.
+ */
+static void
+initSignalArrays(void)
+{
+	MemoryContext oldcontext;
+
+	if (notifySignalProcs != NULL)
+		return;
+
+	oldcontext = MemoryContextSwitchTo(TopMemoryContext);
+
+	if (notifySignalPids == NULL)
+		notifySignalPids = (int32 *) palloc(MaxBackends * sizeof(int32));
+	notifySignalProcs = (ProcNumber *) palloc(MaxBackends * sizeof(ProcNumber));
+
+	MemoryContextSwitchTo(oldcontext);
 }
 
 /*
@@ -901,6 +928,13 @@ PreCommit_Notify(void)
 		 * holding NotifyQueueLock.
 		 */
 		(void) GetCurrentTransactionId();
+
+		/*
+		 * We will be calling SignalBackends() at AtCommit_Notify time, so
+		 * make sure its auxiliary data structures exist now, where an ERROR
+		 * will still abort the transaction cleanly.
+		 */
+		initSignalArrays();
 
 		/*
 		 * Serialize writers by acquiring a special lock that we hold till
@@ -1580,20 +1614,13 @@ asyncQueueFillWarning(void)
 static void
 SignalBackends(void)
 {
-	int32	   *pids;
-	ProcNumber *procnos;
 	int			count;
 
 	/*
 	 * Identify backends that we need to signal.  We don't want to send
 	 * signals while holding the NotifyQueueLock, so this loop just builds a
 	 * list of target PIDs.
-	 *
-	 * XXX in principle these pallocs could fail, which would be bad. Maybe
-	 * preallocate the arrays?  They're not that large, though.
 	 */
-	pids = (int32 *) palloc(MaxBackends * sizeof(int32));
-	procnos = (ProcNumber *) palloc(MaxBackends * sizeof(ProcNumber));
 	count = 0;
 
 	LWLockAcquire(NotifyQueueLock, LW_EXCLUSIVE);
@@ -1624,8 +1651,8 @@ SignalBackends(void)
 				continue;
 		}
 		/* OK, need to signal this one */
-		pids[count] = pid;
-		procnos[count] = i;
+		notifySignalPids[count] = pid;
+		notifySignalProcs[count] = i;
 		count++;
 	}
 	LWLockRelease(NotifyQueueLock);
@@ -1633,7 +1660,7 @@ SignalBackends(void)
 	/* Now send signals */
 	for (int i = 0; i < count; i++)
 	{
-		int32		pid = pids[i];
+		int32		pid = notifySignalPids[i];
 
 		/*
 		 * If we are signaling our own process, no need to involve the kernel;
@@ -1651,12 +1678,10 @@ SignalBackends(void)
 		 * NotifyQueueLock; which is unlikely but certainly possible. So we
 		 * just log a low-level debug message if it happens.
 		 */
-		if (SendProcSignal(pid, PROCSIG_NOTIFY_INTERRUPT, procnos[i]) < 0)
+		if (SendProcSignal(pid, PROCSIG_NOTIFY_INTERRUPT, notifySignalProcs[i]) < 0)
 			elog(DEBUG3, "could not signal backend with PID %d: %m", pid);
 	}
 
-	pfree(pids);
-	pfree(procnos);
 }
 
 /*
