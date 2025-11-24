@@ -981,6 +981,21 @@ PreCommit_Notify(void)
 			LWLockRelease(NotifyQueueLock);
 		}
 
+		/*
+		 * If it's time to try to advance the global tail pointer, do that.
+		 *
+		 * (It might seem odd to do this in the sender, when more than likely the
+		 * listeners won't yet have read the messages we just sent.  However,
+		 * there's less contention if only the sender does it, and there is little
+		 * need for urgency in advancing the global tail.  So this typically will
+		 * be clearing out messages that were sent some time ago.)
+		 */
+		if (tryAdvanceTail)
+		{
+			tryAdvanceTail = false;
+			asyncQueueAdvanceTail();
+		}
+
 		/* Note that we don't clear pendingNotifies; AtCommit_Notify will. */
 	}
 }
@@ -1045,21 +1060,6 @@ AtCommit_Notify(void)
 	 */
 	if (pendingNotifies != NULL)
 		SignalBackends();
-
-	/*
-	 * If it's time to try to advance the global tail pointer, do that.
-	 *
-	 * (It might seem odd to do this in the sender, when more than likely the
-	 * listeners won't yet have read the messages we just sent.  However,
-	 * there's less contention if only the sender does it, and there is little
-	 * need for urgency in advancing the global tail.  So this typically will
-	 * be clearing out messages that were sent some time ago.)
-	 */
-	if (tryAdvanceTail)
-	{
-		tryAdvanceTail = false;
-		asyncQueueAdvanceTail();
-	}
 
 	/* And clean up */
 	ClearPendingActionsAndNotifies();
