@@ -1564,6 +1564,7 @@ ListDictionary
 ListParsedLex
 ListenAction
 ListenActionKind
+ListenChannelEntry
 ListenStmt
 LoInfo
 LoadStmt
