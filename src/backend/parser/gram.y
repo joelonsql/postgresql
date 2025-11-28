@@ -481,6 +481,7 @@ static Node *makeRecursiveViewSelect(char *relname, List *aliases, Node *query);
 %type <setquantifier> set_quantifier
 
 %type <node>	join_qual
+%type <node>	key_join_continuation
 %type <jtype>	join_type
 
 %type <list>	extract_list overlay_list position_list
@@ -13048,6 +13049,24 @@ common_table_expr:  name opt_name_list AS opt_materialized '(' PreparableStmt ')
 				n->location = @1;
 				$$ = (Node *) n;
 			}
+			/*
+			 * Handle KEY_LA for CTE named "key" with column renaming.
+			 * When KEY is followed by '(', the lexer emits KEY_LA, but
+			 * in CTE context we want to treat it as the identifier "key".
+			 */
+		| KEY_LA '(' name_list ')' AS opt_materialized '(' PreparableStmt ')' opt_search_clause opt_cycle_clause
+			{
+				CommonTableExpr *n = makeNode(CommonTableExpr);
+
+				n->ctename = pstrdup("key");
+				n->aliascolnames = $3;
+				n->ctematerialized = $6;
+				n->ctequery = $8;
+				n->search_clause = castNode(CTESearchClause, $10);
+				n->cycle_clause = castNode(CTECycleClause, $11);
+				n->location = @1;
+				$$ = (Node *) n;
+			}
 		;
 
 opt_materialized:
@@ -13832,6 +13851,273 @@ joined_table:
 					n->quals = NULL; /* fill later */
 					$$ = n;
 				}
+			/*
+			 * The following rules handle KEY_LA followed by '(' in join context.
+			 * When KEY is followed by '(', the lexer emits KEY_LA.
+			 * The key_join_continuation rule disambiguates:
+			 * - fk_direction -> ref(cols): FK join with KEY(localCols)
+			 * - ON expr: "key" is alias with column renaming (only if no existing alias)
+			 * - USING (cols): "key" is alias with column renaming (only if no existing alias)
+			 */
+			| table_ref join_type JOIN table_ref KEY_LA '(' name_list ')' key_join_continuation
+				{
+					JoinExpr   *n = makeNode(JoinExpr);
+
+					n->jointype = $2;
+					n->isNatural = false;
+					n->larg = $1;
+
+					if (IsA($9, ForeignKeyClause))
+					{
+						ForeignKeyClause *fk = (ForeignKeyClause *) $9;
+
+						if (fk->localCols == NIL)
+						{
+							/* Pure FK join: KEY(localCols) -> refAlias(refCols) */
+							fk->localCols = $7;
+							fk->location = @5;
+							n->rarg = $4;
+						}
+						else
+						{
+							/*
+							 * Alias + FK join: table key(aliasCols) KEY(localCols) -> ref
+							 * $7 is alias column names, localCols already set by key_join_continuation
+							 */
+							Alias	   *newAlias;
+							Alias	  **aliasPtr = NULL;
+
+							if (IsA($4, RangeVar))
+								aliasPtr = &((RangeVar *) $4)->alias;
+							else if (IsA($4, RangeSubselect))
+								aliasPtr = &((RangeSubselect *) $4)->alias;
+							else if (IsA($4, RangeFunction))
+								aliasPtr = &((RangeFunction *) $4)->alias;
+							else if (IsA($4, JoinExpr))
+								aliasPtr = &((JoinExpr *) $4)->alias;
+							else
+								ereport(ERROR,
+										(errcode(ERRCODE_SYNTAX_ERROR),
+										 errmsg("KEY alias cannot be used with this type of table reference"),
+										 parser_errposition(@5)));
+
+							if (*aliasPtr != NULL)
+								ereport(ERROR,
+										(errcode(ERRCODE_SYNTAX_ERROR),
+										 errmsg("table reference already has an alias"),
+										 parser_errposition(@5)));
+
+							newAlias = makeNode(Alias);
+							newAlias->aliasname = pstrdup("key");
+							newAlias->colnames = $7;
+							*aliasPtr = newAlias;
+							n->rarg = $4;
+						}
+						n->usingClause = NIL;
+						n->join_using_alias = NULL;
+						n->fkJoin = (Node *) fk;
+						n->quals = NULL;
+					}
+					else
+					{
+						/* Alias case: "key" is alias with column renaming */
+						List	   *contList = (List *) $9;
+						Alias	   *newAlias;
+						Alias	  **aliasPtr = NULL;
+
+						/*
+						 * Get pointer to alias field based on node type.
+						 * Check that it doesn't already have an alias.
+						 */
+						if (IsA($4, RangeVar))
+						{
+							RangeVar *rv = (RangeVar *) $4;
+							aliasPtr = &rv->alias;
+						}
+						else if (IsA($4, RangeSubselect))
+						{
+							RangeSubselect *rs = (RangeSubselect *) $4;
+							aliasPtr = &rs->alias;
+						}
+						else if (IsA($4, RangeFunction))
+						{
+							RangeFunction *rf = (RangeFunction *) $4;
+							aliasPtr = &rf->alias;
+						}
+						else if (IsA($4, JoinExpr))
+						{
+							JoinExpr *j = (JoinExpr *) $4;
+							aliasPtr = &j->alias;
+						}
+						else
+						{
+							ereport(ERROR,
+									(errcode(ERRCODE_SYNTAX_ERROR),
+									 errmsg("KEY alias cannot be used with this type of table reference"),
+									 parser_errposition(@5)));
+						}
+
+						if (*aliasPtr != NULL)
+							ereport(ERROR,
+									(errcode(ERRCODE_SYNTAX_ERROR),
+									 errmsg("table reference already has an alias"),
+									 parser_errposition(@5)));
+
+						newAlias = makeNode(Alias);
+						newAlias->aliasname = pstrdup("key");
+						newAlias->colnames = $7;
+						*aliasPtr = newAlias;
+						n->rarg = $4;
+
+						if (list_length(contList) == 2)
+						{
+							/* ON expr: list_make2(NIL, expr) */
+							n->usingClause = NIL;
+							n->join_using_alias = NULL;
+							n->fkJoin = NULL;
+							n->quals = lsecond(contList);
+						}
+						else
+						{
+							/* USING: list_make3(usingCols, usingAlias, NIL) */
+							n->usingClause = linitial_node(List, contList);
+							n->join_using_alias = lsecond_node(Alias, contList);
+							n->fkJoin = NULL;
+							n->quals = NULL;
+						}
+					}
+					$$ = n;
+				}
+			| table_ref JOIN table_ref KEY_LA '(' name_list ')' key_join_continuation
+				{
+					/* letting join_type reduce to empty doesn't work */
+					JoinExpr   *n = makeNode(JoinExpr);
+
+					n->jointype = JOIN_INNER;
+					n->isNatural = false;
+					n->larg = $1;
+
+					if (IsA($8, ForeignKeyClause))
+					{
+						ForeignKeyClause *fk = (ForeignKeyClause *) $8;
+
+						if (fk->localCols == NIL)
+						{
+							/* Pure FK join: KEY(localCols) -> refAlias(refCols) */
+							fk->localCols = $6;
+							fk->location = @4;
+							n->rarg = $3;
+						}
+						else
+						{
+							/*
+							 * Alias + FK join: table key(aliasCols) KEY(localCols) -> ref
+							 * $6 is alias column names, localCols already set by key_join_continuation
+							 */
+							Alias	   *newAlias;
+							Alias	  **aliasPtr = NULL;
+
+							if (IsA($3, RangeVar))
+								aliasPtr = &((RangeVar *) $3)->alias;
+							else if (IsA($3, RangeSubselect))
+								aliasPtr = &((RangeSubselect *) $3)->alias;
+							else if (IsA($3, RangeFunction))
+								aliasPtr = &((RangeFunction *) $3)->alias;
+							else if (IsA($3, JoinExpr))
+								aliasPtr = &((JoinExpr *) $3)->alias;
+							else
+								ereport(ERROR,
+										(errcode(ERRCODE_SYNTAX_ERROR),
+										 errmsg("KEY alias cannot be used with this type of table reference"),
+										 parser_errposition(@4)));
+
+							if (*aliasPtr != NULL)
+								ereport(ERROR,
+										(errcode(ERRCODE_SYNTAX_ERROR),
+										 errmsg("table reference already has an alias"),
+										 parser_errposition(@4)));
+
+							newAlias = makeNode(Alias);
+							newAlias->aliasname = pstrdup("key");
+							newAlias->colnames = $6;
+							*aliasPtr = newAlias;
+							n->rarg = $3;
+						}
+						n->usingClause = NIL;
+						n->join_using_alias = NULL;
+						n->fkJoin = (Node *) fk;
+						n->quals = NULL;
+					}
+					else
+					{
+						/* Alias case: "key" is alias with column renaming */
+						List	   *contList = (List *) $8;
+						Alias	   *newAlias;
+						Alias	  **aliasPtr = NULL;
+
+						/*
+						 * Get pointer to alias field based on node type.
+						 * Check that it doesn't already have an alias.
+						 */
+						if (IsA($3, RangeVar))
+						{
+							RangeVar *rv = (RangeVar *) $3;
+							aliasPtr = &rv->alias;
+						}
+						else if (IsA($3, RangeSubselect))
+						{
+							RangeSubselect *rs = (RangeSubselect *) $3;
+							aliasPtr = &rs->alias;
+						}
+						else if (IsA($3, RangeFunction))
+						{
+							RangeFunction *rf = (RangeFunction *) $3;
+							aliasPtr = &rf->alias;
+						}
+						else if (IsA($3, JoinExpr))
+						{
+							JoinExpr *j = (JoinExpr *) $3;
+							aliasPtr = &j->alias;
+						}
+						else
+						{
+							ereport(ERROR,
+									(errcode(ERRCODE_SYNTAX_ERROR),
+									 errmsg("KEY alias cannot be used with this type of table reference"),
+									 parser_errposition(@4)));
+						}
+
+						if (*aliasPtr != NULL)
+							ereport(ERROR,
+									(errcode(ERRCODE_SYNTAX_ERROR),
+									 errmsg("table reference already has an alias"),
+									 parser_errposition(@4)));
+
+						newAlias = makeNode(Alias);
+						newAlias->aliasname = pstrdup("key");
+						newAlias->colnames = $6;
+						*aliasPtr = newAlias;
+						n->rarg = $3;
+
+						if (list_length(contList) == 2)
+						{
+							/* ON expr: list_make2(NIL, expr) */
+							n->usingClause = NIL;
+							n->join_using_alias = NULL;
+							n->fkJoin = NULL;
+							n->quals = lsecond(contList);
+						}
+						else
+						{
+							/* USING: list_make3(usingCols, usingAlias, NIL) */
+							n->usingClause = linitial_node(List, contList);
+							n->join_using_alias = lsecond_node(Alias, contList);
+							n->fkJoin = NULL;
+							n->quals = NULL;
+						}
+					}
+					$$ = n;
+				}
 		;
 
 alias_clause:
@@ -13839,6 +14125,12 @@ alias_clause:
 				{
 					$$ = makeNode(Alias);
 					$$->aliasname = $2;
+					$$->colnames = $4;
+				}
+			| AS KEY_LA '(' name_list ')'
+				{
+					$$ = makeNode(Alias);
+					$$->aliasname = pstrdup("key");
 					$$->colnames = $4;
 				}
 			| AS ColId
@@ -13943,16 +14235,6 @@ join_qual: USING '(' name_list ')' opt_alias_clause_for_join_using
 				{
 					$$ = $2;
 				}
-			| KEY_LA '(' name_list ')' fk_direction ColId '(' name_list ')'
-				{
-					ForeignKeyClause *n = makeNode(ForeignKeyClause);
-					n->localCols = $3;
-					n->fkdir = $5;
-					n->refAlias = $6;
-					n->refCols = $8;
-					n->location = @1;
-					$$ = (Node *) n;
-				}
 			;
 
 fk_direction:
@@ -13960,6 +14242,59 @@ fk_direction:
 			| RIGHT_ARROW						{ $$ = FKDIR_TO; }
 		;
 
+/*
+ * key_join_continuation handles what follows KEY_LA '(' name_list ')'.
+ * This is used to disambiguate:
+ * - FK join: KEY(localCols) -> refAlias(refCols)
+ * - Alias: table KEY(aliasColnames) ON/USING ...
+ *
+ * We return a tagged node to indicate which case:
+ * - ForeignKeyClause with localCols=NIL means alias case; caller fills alias info
+ * - ForeignKeyClause with localCols set means FK join
+ * Actually, for simplicity, we return:
+ * - ForeignKeyClause for FK join
+ * - List for ON (list_make2(NIL, expr))
+ * - List for USING (list_make3(usingCols, usingAlias, NIL))
+ */
+key_join_continuation:
+			fk_direction ColId '(' name_list ')'
+				{
+					/* FK join: KEY(localCols) -> refAlias(refCols) */
+					ForeignKeyClause *n = makeNode(ForeignKeyClause);
+					n->localCols = NIL;  /* filled in by caller from name_list before this */
+					n->fkdir = $1;
+					n->refAlias = $2;
+					n->refCols = $4;
+					n->location = @1;
+					$$ = (Node *) n;
+				}
+			| KEY_LA '(' name_list ')' fk_direction ColId '(' name_list ')'
+				{
+					/*
+					 * Alias + FK join: table key(aliasCols) KEY(fkLocalCols) -> ref(refCols)
+					 *
+					 * localCols is already filled - caller checks if localCols is non-NIL
+					 * to know the outer name_list is alias column names, not FK local cols.
+					 */
+					ForeignKeyClause *n = makeNode(ForeignKeyClause);
+					n->localCols = $3;  /* FK local columns */
+					n->fkdir = $5;
+					n->refAlias = $6;
+					n->refCols = $8;
+					n->location = @1;
+					$$ = (Node *) n;
+				}
+			| ON a_expr
+				{
+					/* Alias case: KEY(aliasColnames) ON expr */
+					$$ = (Node *) list_make2(NIL, $2);
+				}
+			| USING '(' name_list ')' opt_alias_clause_for_join_using
+				{
+					/* Alias case: KEY(aliasColnames) USING (cols) */
+					$$ = (Node *) list_make3($3, $5, NIL);
+				}
+		;
 
 relation_expr:
 			qualified_name

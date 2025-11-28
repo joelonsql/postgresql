@@ -968,3 +968,81 @@ JOIN t2 KEY (c3, c4) -> q (q1_c1, q1_c2);
 SELECT *
 FROM (WITH q1 (q1_c1, q1_c2) AS (SELECT c1, c2 FROM t1) SELECT * FROM q1) q
 JOIN t2 KEY (c3, c4) -> q (q1_c1, q1_c2);
+
+-- Test that "key" can be used as a table alias with column renaming.
+-- This verifies that the parser correctly disambiguates between:
+-- - KEY (cols) -> ref (cols) for foreign key joins
+-- - key(cols) ON ... for table alias with column renaming
+CREATE TABLE foo (foo_id INTEGER PRIMARY KEY);
+CREATE TABLE bar (bar_id INTEGER PRIMARY KEY, bar_foo_id INTEGER REFERENCES foo);
+CREATE TABLE baz (baz_id INTEGER PRIMARY KEY, baz_bar_id INTEGER REFERENCES bar);
+INSERT INTO foo (foo_id) VALUES (1), (2), (3);
+INSERT INTO bar (bar_id, bar_foo_id) VALUES (10,1), (20,2);
+INSERT INTO baz (baz_id, baz_bar_id) VALUES (100, 10);
+SELECT * FROM foo JOIN bar ON bar.bar_foo_id = foo.foo_id;
+SELECT * FROM foo JOIN bar key(bar_id, bar_foo_id_renamed) ON key.bar_foo_id_renamed = foo.foo_id;
+-- Also test using KEY as alias with USING clause
+SELECT * FROM foo JOIN bar key(bar_id,foo_id) USING (foo_id);
+
+-- Test KEY alias with subqueries (plain JOIN)
+SELECT * FROM foo JOIN (SELECT * FROM bar) key(bar_id_renamed,bar_foo_id_renamed) ON key.bar_foo_id_renamed = foo.foo_id;
+
+-- Test KEY alias with subqueries (LEFT JOIN)
+SELECT * FROM foo LEFT JOIN (SELECT * FROM bar) key(bar_id,bar_foo_id_renamed) ON key.bar_foo_id_renamed = foo.foo_id;
+
+-- Test KEY alias with explicit join (plain JOIN)
+SELECT * FROM foo JOIN (bar JOIN baz key(baz_id_renamed,baz_bar_id_renamed) ON key.baz_bar_id_renamed = bar.bar_id) ON bar.bar_foo_id = foo.foo_id;
+
+-- Test KEY alias with explicit join (LEFT JOIN)
+SELECT * FROM foo LEFT JOIN (bar LEFT JOIN baz key(baz_id_renamed,baz_bar_id_renamed) ON key.baz_bar_id_renamed = bar.bar_id) ON bar.bar_foo_id = foo.foo_id;
+
+-- Test KEY alias with CTE (plain JOIN)
+WITH key AS (SELECT * FROM bar) SELECT * FROM foo JOIN key ON key.bar_foo_id = foo.foo_id;
+WITH key(bar_id_renamed,bar_foo_id_renamed) AS (SELECT * FROM bar) SELECT * FROM foo JOIN key ON key.bar_foo_id_renamed = foo.foo_id;
+
+-- Test KEY alias with CTE (LEFT JOIN)
+WITH key AS (SELECT * FROM bar) SELECT * FROM foo LEFT JOIN key ON key.bar_foo_id = foo.foo_id;
+WITH key(bar_id,bar_foo_id_renamed) AS (SELECT * FROM bar) SELECT * FROM foo LEFT JOIN key ON key.bar_foo_id_renamed = foo.foo_id;
+
+-- Error: table reference already has an alias (plain JOIN)
+SELECT * FROM foo JOIN bar AS b key(foo_id_renamed) ON key.foo_id_renamed = foo.id;
+
+-- Error: table reference already has an alias (LEFT JOIN)
+SELECT * FROM foo LEFT JOIN bar AS b key(foo_id_renamed) ON key.foo_id_renamed = foo.id;
+
+--
+-- Test variantions of KEY join syntax with "key" alias with and without column renaming
+--
+SELECT * FROM foo JOIN bar KEY (bar_foo_id) -> foo (foo_id);
+SELECT * FROM foo JOIN bar AS bar_renamed(bar_id, bar_foo_id_renamed) KEY (bar_foo_id_renamed) -> foo (foo_id);
+SELECT * FROM foo JOIN bar bar_renamed(bar_id, bar_foo_id_renamed) KEY (bar_foo_id_renamed) -> foo (foo_id);
+SELECT * FROM foo JOIN bar AS key KEY (bar_foo_id) -> foo (foo_id);
+SELECT * FROM foo JOIN bar key KEY (bar_foo_id) -> foo (foo_id);
+SELECT * FROM foo JOIN bar key(bar_id, bar_foo_id_renamed) KEY (bar_foo_id_renamed) -> foo (foo_id);
+SELECT * FROM foo JOIN bar AS key(bar_id, bar_foo_id_renamed) KEY (bar_foo_id_renamed) -> foo (foo_id);
+
+SELECT * FROM foo JOIN (SELECT * FROM bar) key(bar_id_renamed,bar_foo_id_renamed) KEY (bar_foo_id_renamed) -> foo (foo_id);
+SELECT * FROM foo LEFT JOIN (SELECT * FROM bar) key(bar_id,bar_foo_id_renamed) KEY (bar_foo_id_renamed) -> foo (foo_id);
+SELECT * FROM foo JOIN (bar JOIN baz key(baz_id_renamed,baz_bar_id_renamed) KEY (baz_bar_id_renamed) -> bar (bar_id)) KEY (bar_foo_id) -> foo (foo_id);
+SELECT * FROM foo JOIN (bar JOIN baz key(baz_id_renamed,baz_bar_id_renamed) KEY (baz_bar_id_renamed) -> bar (bar_id)) key(bar_id_renamed,bar_foo_id_renamed) ON bar_foo_id_renamed = foo.foo_id;
+SELECT * FROM foo JOIN (bar JOIN baz key(baz_id_renamed,baz_bar_id_renamed) KEY (baz_bar_id_renamed) -> bar (bar_id)) key(bar_id_renamed,bar_foo_id_renamed) KEY (bar_foo_id_renamed) -> foo (foo_id);
+SELECT * FROM foo LEFT JOIN (bar LEFT JOIN baz key(baz_id_renamed,baz_bar_id_renamed) KEY (baz_bar_id_renamed) -> bar (bar_id)) KEY (bar_foo_id) -> foo (foo_id);
+WITH key AS (SELECT * FROM bar) SELECT * FROM foo JOIN key KEY (bar_foo_id) -> foo (foo_id);
+WITH key(bar_id_renamed,bar_foo_id_renamed) AS (SELECT * FROM bar) SELECT * FROM foo JOIN key KEY (bar_foo_id_renamed) -> foo (foo_id);
+WITH key AS (SELECT * FROM bar) SELECT * FROM foo LEFT JOIN key KEY (bar_foo_id) -> foo (foo_id);
+WITH key(bar_id,bar_foo_id_renamed) AS (SELECT * FROM bar) SELECT * FROM foo LEFT JOIN key KEY (bar_foo_id_renamed) -> foo (foo_id);
+
+SELECT * FROM bar JOIN (SELECT * FROM foo) key(foo_id_renamed) KEY (foo_id_renamed) <- bar (bar_foo_id);
+SELECT * FROM bar RIGHT JOIN (SELECT * FROM foo) key(foo_id_renamed) KEY (foo_id_renamed) <- bar (bar_foo_id);
+SELECT * FROM baz JOIN (bar LEFT JOIN foo key(foo_id_renamed) KEY (foo_id_renamed) <- bar (bar_foo_id)) KEY (bar_id) <- baz (baz_bar_id);
+SELECT * FROM baz JOIN (bar LEFT JOIN foo key(foo_id_renamed) KEY (foo_id_renamed) <- bar (bar_foo_id)) key(bar_id_renamed) ON bar_id_renamed = baz.baz_bar_id;
+SELECT * FROM baz JOIN (bar LEFT JOIN foo key(foo_id_renamed) KEY (foo_id_renamed) <- bar (bar_foo_id)) key(bar_id_renamed) KEY (bar_id_renamed) <- baz (baz_bar_id);
+SELECT * FROM baz LEFT JOIN (bar LEFT JOIN foo key(foo_id_renamed) KEY (foo_id_renamed) <- bar (bar_foo_id)) KEY (bar_id) <- baz (baz_bar_id);
+WITH key AS (SELECT * FROM foo) SELECT * FROM bar JOIN key KEY (foo_id) <- bar (bar_foo_id);
+WITH key(foo_id_renamed) AS (SELECT * FROM foo) SELECT * FROM bar JOIN key KEY (foo_id_renamed) <- bar (bar_foo_id);
+WITH key AS (SELECT * FROM foo) SELECT * FROM bar LEFT JOIN key KEY (foo_id) <- bar (bar_foo_id);
+WITH key(foo_id_renamed) AS (SELECT * FROM foo) SELECT * FROM bar LEFT JOIN key KEY (foo_id_renamed) <- bar (bar_foo_id);
+
+DROP TABLE baz;
+DROP TABLE bar;
+DROP TABLE foo;
