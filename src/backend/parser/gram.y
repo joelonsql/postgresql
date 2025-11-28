@@ -4260,7 +4260,7 @@ ConstraintElem:
 								   NULL, NULL, yyscanner);
 					$$ = (Node *) n;
 				}
-			| PRIMARY KEY_LA '(' columnList opt_without_overlaps ')' opt_c_include opt_definition OptConsTableSpace
+			| PRIMARY KEY '(' columnList opt_without_overlaps ')' opt_c_include opt_definition OptConsTableSpace
 				ConstraintAttributeSpec
 				{
 					Constraint *n = makeNode(Constraint);
@@ -4314,7 +4314,7 @@ ConstraintElem:
 								   NULL, NULL, yyscanner);
 					$$ = (Node *) n;
 				}
-			| FOREIGN KEY_LA '(' columnList optionalPeriodName ')' REFERENCES qualified_name
+			| FOREIGN KEY '(' columnList optionalPeriodName ')' REFERENCES qualified_name
 				opt_column_and_period_list key_match key_actions ConstraintAttributeSpec
 				{
 					Constraint *n = makeNode(Constraint);

@@ -31,9 +31,26 @@ static YYSTYPE lookahead_yylval;	/* yylval for lookahead token */
 static YYLTYPE lookahead_yylloc;	/* yylloc for lookahead token */
 static char *lookahead_yytext;	/* start current token */
 
+/*
+ * Extended lookahead buffer for KEY_LA disambiguation.
+ * We use a simple linked list since ECPG doesn't have access to backend List.
+ */
+typedef struct EcpgBufferedToken
+{
+	int			token;
+	YYSTYPE		yylval;
+	YYLTYPE		yylloc;
+	char	   *yytext;
+	struct EcpgBufferedToken *next;
+} EcpgBufferedToken;
+
+static EcpgBufferedToken *lookahead_buffer_head = NULL;
+static EcpgBufferedToken *lookahead_buffer_tail = NULL;
+
 static int	base_yylex_location(void);
 static bool check_uescapechar(unsigned char escape);
 static bool ecpg_isspace(char ch);
+static bool peek_fk_join_after_parens(void);
 
 
 /*
@@ -61,6 +78,22 @@ filtered_base_yylex(void)
 	YYSTYPE		cur_yylval;
 	YYLTYPE		cur_yylloc;
 	char	   *cur_yytext;
+
+	/* First, return any buffered tokens from extended lookahead */
+	if (lookahead_buffer_head != NULL)
+	{
+		EcpgBufferedToken *bt = lookahead_buffer_head;
+
+		cur_token = bt->token;
+		base_yylval = bt->yylval;
+		base_yylloc = bt->yylloc;
+		base_yytext = bt->yytext;
+		lookahead_buffer_head = bt->next;
+		if (lookahead_buffer_head == NULL)
+			lookahead_buffer_tail = NULL;
+		free(bt);
+		return cur_token;
+	}
 
 	/* Get next token --- we might already have it */
 	if (have_lookahead)
@@ -125,12 +158,19 @@ filtered_base_yylex(void)
 			break;
 
 		case KEY:
-			/* Replace KEY by KEY_LA if it's followed by ( */
-			switch (next_token)
+			/*
+			 * KEY followed by '(' could be:
+			 * - Foreign key join: KEY (cols) -> ref (cols)
+			 * - Table alias with column renaming: tbl key(cols) ON ...
+			 *
+			 * Peek ahead using the tokenizer to find matching ')' and
+			 * check if '->' or '<-' follows.
+			 */
+			if (next_token == '(')
 			{
-				case '(':
+				if (peek_fk_join_after_parens())
 					cur_token = KEY_LA;
-					break;
+				/* else cur_token stays KEY (identifier for alias) */
 			}
 			break;
 
@@ -281,6 +321,90 @@ base_yylex_location(void)
 			break;
 	}
 	return token;
+}
+
+/*
+ * Helper to append a token to the lookahead buffer linked list.
+ */
+static void
+buffer_token(int token, YYSTYPE yylval, YYLTYPE yylloc, char *yytext)
+{
+	EcpgBufferedToken *bt = (EcpgBufferedToken *) malloc(sizeof(EcpgBufferedToken));
+
+	bt->token = token;
+	bt->yylval = yylval;
+	bt->yylloc = yylloc;
+	bt->yytext = yytext;
+	bt->next = NULL;
+
+	if (lookahead_buffer_tail != NULL)
+		lookahead_buffer_tail->next = bt;
+	else
+		lookahead_buffer_head = bt;
+	lookahead_buffer_tail = bt;
+}
+
+/*
+ * peek_fk_join_after_parens
+ *
+ * Peek ahead in the token stream to determine if the current position
+ * represents a foreign key join constraint: (cols) -> ref (cols) or
+ * (cols) <- ref (cols).
+ *
+ * Assumes we've already seen KEY and the next token is '(' (in the
+ * one-token lookahead). Uses the actual tokenizer (base_yylex_location)
+ * to peek ahead, buffering tokens in lookahead_buffer for later consumption.
+ *
+ * Returns true if '->' or '<-' follows the closing ')', indicating
+ * a foreign key join (KEY_LA). Returns false otherwise (KEY as alias).
+ */
+static bool
+peek_fk_join_after_parens(void)
+{
+	int		paren_depth = 1;	/* Already saw '(' in lookahead */
+	int		token;
+
+	/*
+	 * The '(' is already in the one-token lookahead. Buffer it first.
+	 */
+	buffer_token('(', lookahead_yylval, lookahead_yylloc, lookahead_yytext);
+
+	/* Clear the one-token lookahead since we're taking over */
+	have_lookahead = false;
+
+	/*
+	 * Scan tokens until we find the matching ')'.
+	 * Buffer each token for later consumption.
+	 */
+	while (paren_depth > 0)
+	{
+		token = base_yylex_location();
+
+		/* Buffer this token */
+		buffer_token(token, base_yylval, base_yylloc, base_yytext);
+
+		if (token == '(')
+			paren_depth++;
+		else if (token == ')')
+			paren_depth--;
+		else if (token == 0)	/* EOF */
+			return false;
+	}
+
+	/*
+	 * Now peek at the next token to see if it's '->' or '<-'.
+	 * This token also gets buffered.
+	 */
+	token = base_yylex_location();
+
+	buffer_token(token, base_yylval, base_yylloc, base_yytext);
+
+	/*
+	 * Check for FK join indicators:
+	 * - RIGHT_ARROW (->)
+	 * - '<' which is the start of <- sequence (LEFT_ARROW_LESS)
+	 */
+	return (token == RIGHT_ARROW || token == '<' || token == LEFT_ARROW_LESS);
 }
 
 /*

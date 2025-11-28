@@ -29,6 +29,18 @@
 #include "gram.h"
 
 /*
+ * Structure to hold a buffered token for extended lookahead.
+ * Used when we need to peek ahead more than one token to disambiguate
+ * (e.g., KEY followed by '(' could be FK join or table alias).
+ */
+typedef struct BufferedToken
+{
+	int			token;
+	core_YYSTYPE yylval;
+	YYLTYPE		yylloc;
+} BufferedToken;
+
+/*
  * The YY_EXTRA data that a flex scanner allows us to pass around.  Private
  * state needed for raw parsing/lexing goes here.
  */
@@ -48,6 +60,13 @@ typedef struct base_yy_extra_type
 	YYLTYPE		lookahead_yylloc;	/* yylloc for lookahead token */
 	char	   *lookahead_end;	/* end of current token */
 	char		lookahead_hold_char;	/* to be put back at *lookahead_end */
+
+	/*
+	 * Extended lookahead buffer for KEY_LA disambiguation.
+	 * When KEY is followed by '(', we peek ahead using the tokenizer
+	 * to find the matching ')' and check for '->' or '<-'.
+	 */
+	List	   *lookahead_buffer;	/* List of BufferedToken* */
 
 	/*
 	 * State variables that belong to the grammar.

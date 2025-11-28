@@ -70,6 +70,9 @@ raw_parser(const char *str, RawParseMode mode)
 		yyextra.lookahead_end = NULL;
 	}
 
+	/* Initialize extended lookahead buffer */
+	yyextra.lookahead_buffer = NIL;
+
 	/* initialize the bison parser */
 	parser_init(&yyextra);
 
@@ -107,6 +110,9 @@ raw_parser(const char *str, RawParseMode mode)
  * the core_YYSTYPE and YYSTYPE representations (which are really the
  * same thing anyway, but notationally they're different).
  */
+static bool peek_fk_join_after_parens(base_yy_extra_type *yyextra,
+									  core_yyscan_t yyscanner);
+
 int
 base_yylex(YYSTYPE *lvalp, YYLTYPE *llocp, core_yyscan_t yyscanner)
 {
@@ -115,6 +121,19 @@ base_yylex(YYSTYPE *lvalp, YYLTYPE *llocp, core_yyscan_t yyscanner)
 	int			next_token;
 	int			cur_token_length;
 	YYLTYPE		cur_yylloc;
+
+	/* First, return any buffered tokens from extended lookahead */
+	if (yyextra->lookahead_buffer != NIL)
+	{
+		BufferedToken *bt = (BufferedToken *) linitial(yyextra->lookahead_buffer);
+
+		cur_token = bt->token;
+		lvalp->core_yystype = bt->yylval;
+		*llocp = bt->yylloc;
+		yyextra->lookahead_buffer = list_delete_first(yyextra->lookahead_buffer);
+		pfree(bt);
+		return cur_token;
+	}
 
 	/* Get next token --- we might already have it */
 	if (yyextra->have_lookahead)
@@ -208,11 +227,21 @@ base_yylex(YYSTYPE *lvalp, YYLTYPE *llocp, core_yyscan_t yyscanner)
 			break;
 
 		case KEY:
+			/*
+			 * KEY followed by '(' could be:
+			 * - Foreign key join: KEY (cols) -> ref (cols)
+			 * - Table alias with column renaming: tbl key(cols) ON ...
+			 *
+			 * Peek ahead using the tokenizer to find matching ')' and
+			 * check if '->' or '<-' follows.
+			 */
+			if (next_token == '(')
 			{
-				if (next_token == '(')
+				if (peek_fk_join_after_parens(yyextra, yyscanner))
 					cur_token = KEY_LA;
-				break;
+				/* else cur_token stays KEY (identifier for alias) */
 			}
+			break;
 
 		case NOT:
 			/* Replace NOT by NOT_LA if it's followed by BETWEEN, IN, etc */
@@ -331,6 +360,86 @@ base_yylex(YYSTYPE *lvalp, YYLTYPE *llocp, core_yyscan_t yyscanner)
 	}
 
 	return cur_token;
+}
+
+/*
+ * peek_fk_join_after_parens
+ *
+ * Peek ahead in the token stream to determine if the current position
+ * represents a foreign key join constraint: (cols) -> ref (cols) or
+ * (cols) <- ref (cols).
+ *
+ * Assumes we've already seen KEY and the next token is '(' (in the
+ * one-token lookahead). Uses the actual tokenizer (core_yylex) to peek
+ * ahead, buffering tokens in yyextra->lookahead_buffer for later
+ * consumption.
+ *
+ * Returns true if '->' or '<-' follows the closing ')', indicating
+ * a foreign key join (KEY_LA). Returns false otherwise (KEY as alias).
+ */
+static bool
+peek_fk_join_after_parens(base_yy_extra_type *yyextra,
+						  core_yyscan_t yyscanner)
+{
+	int				paren_depth = 1;	/* Already saw '(' in lookahead */
+	int				token;
+	core_YYSTYPE	yylval;
+	YYLTYPE			yylloc;
+	BufferedToken  *bt;
+
+	/*
+	 * The '(' is already in the one-token lookahead. Buffer it first.
+	 */
+	bt = (BufferedToken *) palloc(sizeof(BufferedToken));
+	bt->token = '(';
+	bt->yylval = yyextra->lookahead_yylval;
+	bt->yylloc = yyextra->lookahead_yylloc;
+	yyextra->lookahead_buffer = lappend(yyextra->lookahead_buffer, bt);
+
+	/* Clear the one-token lookahead since we're taking over */
+	yyextra->have_lookahead = false;
+
+	/*
+	 * Scan tokens until we find the matching ')'.
+	 * Buffer each token for later consumption.
+	 */
+	while (paren_depth > 0)
+	{
+		token = core_yylex(&yylval, &yylloc, yyscanner);
+
+		/* Buffer this token */
+		bt = (BufferedToken *) palloc(sizeof(BufferedToken));
+		bt->token = token;
+		bt->yylval = yylval;
+		bt->yylloc = yylloc;
+		yyextra->lookahead_buffer = lappend(yyextra->lookahead_buffer, bt);
+
+		if (token == '(')
+			paren_depth++;
+		else if (token == ')')
+			paren_depth--;
+		else if (token == 0)	/* EOF */
+			return false;
+	}
+
+	/*
+	 * Now peek at the next token to see if it's '->' or '<-'.
+	 * This token also gets buffered.
+	 */
+	token = core_yylex(&yylval, &yylloc, yyscanner);
+
+	bt = (BufferedToken *) palloc(sizeof(BufferedToken));
+	bt->token = token;
+	bt->yylval = yylval;
+	bt->yylloc = yylloc;
+	yyextra->lookahead_buffer = lappend(yyextra->lookahead_buffer, bt);
+
+	/*
+	 * Check for FK join indicators:
+	 * - RIGHT_ARROW (->)
+	 * - '<' which is the start of <- sequence (LEFT_ARROW_LESS)
+	 */
+	return (token == RIGHT_ARROW || token == '<' || token == LEFT_ARROW_LESS);
 }
 
 /* convert hex digit (caller should have verified that) to value */
