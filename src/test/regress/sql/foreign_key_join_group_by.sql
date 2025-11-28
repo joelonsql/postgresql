@@ -32,7 +32,7 @@ SELECT t3.t3_id, q.t1_id, q.COUNT FROM
     FROM t1
     -- the LEFT JOIN will preserve all rows of t1
     -- but the JOIN with t2 will cause t1 to lose its uniqueness preservation
-    LEFT JOIN t2 KEY (t2_t1_id) -> t1 (t1_id)
+    LEFT JOIN t2 FOR KEY (t2_t1_id) -> t1 (t1_id)
     -- however, thanks to the GROUP BY which column list
     -- matches a UNIQUE or PRIMARY KEY constraint,
     -- the uniqueness preservation property is restored
@@ -41,7 +41,7 @@ SELECT t3.t3_id, q.t1_id, q.COUNT FROM
 -- so that this foreign key is actually valid,
 -- since all rows of t1 are preserved thanks to the LEFT JOIN
 -- and the uniqueness property of t1 is preserved thanks to the GROUP BY.
-JOIN t3 KEY (t3_t1_id) -> q (t1_id)
+JOIN t3 FOR KEY (t3_t1_id) -> q (t1_id)
 ORDER BY t3.t3_id, q.t1_id;
 
 -- the query above is therefore valid and equivalent to the query below
@@ -52,7 +52,7 @@ SELECT t3.t3_id, q.t1_id, q.COUNT FROM
         t1.t1_id,
         COUNT(*)
     FROM t1
-    LEFT JOIN t2 KEY (t2_t1_id) -> t1 (t1_id)
+    LEFT JOIN t2 FOR KEY (t2_t1_id) -> t1 (t1_id)
     GROUP BY t1.t1_id
 ) q
 JOIN t3 ON t3.t3_t1_id = q.t1_id
@@ -64,7 +64,7 @@ SELECT t3.t3_id, q.t1_id, q.COUNT FROM
         t1.t1_id,
         COUNT(*)
     FROM t2
-    RIGHT JOIN t1 KEY (t1_id) <- t2 (t2_t1_id)
+    RIGHT JOIN t1 FOR KEY (t1_id) <- t2 (t2_t1_id)
     GROUP BY t1.t1_id
 ) q
 JOIN t3 ON t3.t3_t1_id = q.t1_id
@@ -76,7 +76,7 @@ SELECT t3.t3_id, q.t1_id, q.COUNT FROM
         t1.t1_id,
         COUNT(*)
     FROM t1
-    FULL JOIN t2 KEY (t2_t1_id) -> t1 (t1_id)
+    FULL JOIN t2 FOR KEY (t2_t1_id) -> t1 (t1_id)
     GROUP BY t1.t1_id
 ) q
 JOIN t3 ON t3.t3_t1_id = q.t1_id
@@ -88,9 +88,9 @@ SELECT * FROM
 (
     SELECT t1_id
     FROM t1
-    JOIN t2 KEY (t2_t1_id) -> t1 (t1_id)
+    JOIN t2 FOR KEY (t2_t1_id) -> t1 (t1_id)
     GROUP BY t1_id
-) q JOIN t3 KEY (t3_t1_id) -> q (t1_id);
+) q JOIN t3 FOR KEY (t3_t1_id) -> q (t1_id);
 
 -- error: foreign key joins not supported for these relations
 -- HAVING not allowed on referenced side of foreign key join
@@ -98,10 +98,10 @@ SELECT * FROM
 (
     SELECT t1_id
     FROM t1
-    LEFT JOIN t2 KEY (t2_t1_id) -> t1 (t1_id)
+    LEFT JOIN t2 FOR KEY (t2_t1_id) -> t1 (t1_id)
     GROUP BY t1_id
     HAVING COUNT(*) > 1
-) q JOIN t3 KEY (t3_t1_id) -> q (t1_id);
+) q JOIN t3 FOR KEY (t3_t1_id) -> q (t1_id);
 
 -- ok since q is not the referenced side
 -- at the referencing side of a foreign key join,
@@ -115,10 +115,10 @@ SELECT t1.t1_id, q.COUNT FROM
         t2.t2_t1_id,
         COUNT(*)
     FROM t1
-    JOIN t2 KEY (t2_t1_id) -> t1 (t1_id)
+    JOIN t2 FOR KEY (t2_t1_id) -> t1 (t1_id)
     GROUP BY t2.t2_t1_id
     HAVING COUNT(*) > 1
-) q JOIN t1 KEY (t1_id) <- q (t2_t1_id)
+) q JOIN t1 FOR KEY (t1_id) <- q (t2_t1_id)
 ORDER BY t1.t1_id, q.COUNT;
 
 -- error: GROUP BY column 1 is not a simple column reference
@@ -126,9 +126,9 @@ SELECT q.expr_result FROM
 (
     SELECT t1.t1_id + 1 AS expr_result
     FROM t1
-    LEFT JOIN t2 KEY (t2_t1_id) -> t1 (t1_id)
+    LEFT JOIN t2 FOR KEY (t2_t1_id) -> t1 (t1_id)
     GROUP BY t1.t1_id + 1
-) q JOIN t3 KEY (t3_t1_id) -> q (expr_result);
+) q JOIN t3 FOR KEY (t3_t1_id) -> q (expr_result);
 
 CREATE TABLE t4
 (
@@ -160,9 +160,9 @@ SELECT * FROM
 (
     SELECT t4a.t4_id_1, t4b.t4_id_2
     FROM t1
-    JOIN t4 t4a KEY (t4_t1_id) -> t1 (t1_id)
-    JOIN t4 t4b KEY (t4_t1_id) -> t1 (t1_id)
+    JOIN t4 t4a FOR KEY (t4_t1_id) -> t1 (t1_id)
+    JOIN t4 t4b FOR KEY (t4_t1_id) -> t1 (t1_id)
     GROUP BY t4a.t4_id_1, t4b.t4_id_2
-) q JOIN t5 KEY (t5_t4_id_1, t5_t4_id_2) -> q (t4_id_1, t4_id_2);
+) q JOIN t5 FOR KEY (t5_t4_id_1, t5_t4_id_2) -> q (t4_id_1, t4_id_2);
 
 DROP TABLE t1, t2, t3, t4, t5;

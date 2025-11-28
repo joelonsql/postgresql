@@ -124,16 +124,6 @@ filtered_base_yylex(void)
 			}
 			break;
 
-		case KEY:
-			/* Replace KEY by KEY_LA if it's followed by ( */
-			switch (next_token)
-			{
-				case '(':
-					cur_token = KEY_LA;
-					break;
-			}
-			break;
-
 		case NOT:
 			/* Replace NOT by NOT_LA if it's followed by BETWEEN, IN, etc */
 			switch (next_token)

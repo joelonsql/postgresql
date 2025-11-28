@@ -12657,7 +12657,7 @@ get_from_clause_item(Node *jtnode, Query *query, deparse_context *context)
 					elog(ERROR, "unrecognized foreign key direction: %d", (int) fkjn->fkdir);
 				}
 
-				appendStringInfoString(buf, " KEY (");
+				appendStringInfoString(buf, " FOR KEY (");
 
 				/* Append the left (before FROM/TO) column names */
 				first = true;

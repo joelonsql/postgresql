@@ -207,13 +207,6 @@ base_yylex(YYSTYPE *lvalp, YYLTYPE *llocp, core_yyscan_t yyscanner)
 			}
 			break;
 
-		case KEY:
-			{
-				if (next_token == '(')
-					cur_token = KEY_LA;
-				break;
-			}
-
 		case NOT:
 			/* Replace NOT by NOT_LA if it's followed by BETWEEN, IN, etc */
 			switch (next_token)

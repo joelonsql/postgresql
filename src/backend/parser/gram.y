@@ -809,7 +809,7 @@ static Node *makeRecursiveViewSelect(char *relname, List *aliases, Node *query);
  * FORMAT_LA, NULLS_LA, WITH_LA, and WITHOUT_LA are needed to make the grammar
  * LALR(1).
  */
-%token		FORMAT_LA KEY_LA NOT_LA NULLS_LA WITH_LA WITHOUT_LA
+%token		FORMAT_LA NOT_LA NULLS_LA WITH_LA WITHOUT_LA
 
 /*
  * The grammar likewise thinks these tokens are keywords, but they are never
@@ -4260,7 +4260,7 @@ ConstraintElem:
 								   NULL, NULL, yyscanner);
 					$$ = (Node *) n;
 				}
-			| PRIMARY KEY_LA '(' columnList opt_without_overlaps ')' opt_c_include opt_definition OptConsTableSpace
+			| PRIMARY KEY '(' columnList opt_without_overlaps ')' opt_c_include opt_definition OptConsTableSpace
 				ConstraintAttributeSpec
 				{
 					Constraint *n = makeNode(Constraint);
@@ -4314,7 +4314,7 @@ ConstraintElem:
 								   NULL, NULL, yyscanner);
 					$$ = (Node *) n;
 				}
-			| FOREIGN KEY_LA '(' columnList optionalPeriodName ')' REFERENCES qualified_name
+			| FOREIGN KEY '(' columnList optionalPeriodName ')' REFERENCES qualified_name
 				opt_column_and_period_list key_match key_actions ConstraintAttributeSpec
 				{
 					Constraint *n = makeNode(Constraint);
@@ -13943,13 +13943,13 @@ join_qual: USING '(' name_list ')' opt_alias_clause_for_join_using
 				{
 					$$ = $2;
 				}
-			| KEY_LA '(' name_list ')' fk_direction ColId '(' name_list ')'
+			| FOR KEY '(' name_list ')' fk_direction ColId '(' name_list ')'
 				{
 					ForeignKeyClause *n = makeNode(ForeignKeyClause);
-					n->localCols = $3;
-					n->fkdir = $5;
-					n->refAlias = $6;
-					n->refCols = $8;
+					n->localCols = $4;
+					n->fkdir = $6;
+					n->refAlias = $7;
+					n->refCols = $9;
 					n->location = @1;
 					$$ = (Node *) n;
 				}

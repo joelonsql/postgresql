@@ -112,13 +112,13 @@ INSERT INTO t7 (c15, c16, c17, c18, c19, c20, c21, c22) VALUES
 --
 WITH topcte AS
 (
-    SELECT * FROM t4 JOIN t2 KEY (c3) <- t4 (c8)
+    SELECT * FROM t4 JOIN t2 FOR KEY (c3) <- t4 (c8)
 )
 SELECT * FROM
 (
     SELECT *
     FROM topcte
-    JOIN t7 KEY (c17, c18) -> topcte (c6, c7)
+    JOIN t7 FOR KEY (c17, c18) -> topcte (c6, c7)
 );
 
 --
@@ -145,31 +145,31 @@ SELECT * FROM
     JOIN
     (
         WITH t4_cte (t4_c6, t4_c7, t4_c8, t4_c9, t4_c10) AS (SELECT c6, c7, c8, c9, c10 FROM t4)
-        SELECT * FROM t4_cte JOIN t2_cte KEY (c3) <- t4_cte (t4_c8)
-    ) AS t4_q KEY (t4_c6, t4_c7) <- t7_cte (t7_c17, t7_c18)
+        SELECT * FROM t4_cte JOIN t2_cte FOR KEY (c3) <- t4_cte (t4_c8)
+    ) AS t4_q FOR KEY (t4_c6, t4_c7) <- t7_cte (t7_c17, t7_c18)
     JOIN
     (
         WITH t5_cte (t5_c11, t5_c12) AS (SELECT c11, c12 FROM t5)
         SELECT * FROM t5_cte
-    ) AS t5_q KEY (t5_c11, t5_c12) <- t7_cte (t7_c19, t7_c20)
+    ) AS t5_q FOR KEY (t5_c11, t5_c12) <- t7_cte (t7_c19, t7_c20)
     JOIN
     (
         WITH t6_cte (t6_c13, t6_c14) AS (SELECT c13, c14 FROM t6)
         SELECT * FROM t6_cte
-    ) AS t6_q KEY (t6_c13, t6_c14) <- t7_cte (t7_c21, t7_c22)
+    ) AS t6_q FOR KEY (t6_c13, t6_c14) <- t7_cte (t7_c21, t7_c22)
 ) t7_q
 JOIN
 (
     WITH t2_cte (t2_c3) AS (SELECT c3 FROM t2)
     SELECT * FROM t2_cte
 ) t2_q
-KEY (t2_c3) <- t7_q (t4_c8)
+FOR KEY (t2_c3) <- t7_q (t4_c8)
 JOIN
 (
     WITH t3_cte (t3_c4, t3_c5) AS (SELECT c4, c5 FROM t3)
     SELECT * FROM t3_cte
 )
-KEY (t3_c4, t3_c5) <- t7_q (t4_c9, t4_c10)
+FOR KEY (t3_c4, t3_c5) <- t7_q (t4_c9, t4_c10)
 ORDER BY 1,2,3,4,5;
 -- equivalent to:
 SELECT * FROM
@@ -184,27 +184,27 @@ SELECT * FROM
     JOIN
     (
         SELECT * FROM (SELECT c6, c7, c8, c9, c10 FROM t4) AS t4_cte (t4_c6, t4_c7, t4_c8, t4_c9, t4_c10)
-        JOIN (SELECT * FROM t2) AS t2_cte KEY (c3) <- t4_cte (t4_c8)
-    ) AS t4_q KEY (t4_c6, t4_c7) <- t7_cte (t7_c17, t7_c18)
+        JOIN (SELECT * FROM t2) AS t2_cte FOR KEY (c3) <- t4_cte (t4_c8)
+    ) AS t4_q FOR KEY (t4_c6, t4_c7) <- t7_cte (t7_c17, t7_c18)
     JOIN
     (
         SELECT * FROM (SELECT c11, c12 FROM t5) AS t5_cte (t5_c11, t5_c12)
-    ) AS t5_q KEY (t5_c11, t5_c12) <- t7_cte (t7_c19, t7_c20)
+    ) AS t5_q FOR KEY (t5_c11, t5_c12) <- t7_cte (t7_c19, t7_c20)
     JOIN
     (
         SELECT * FROM (SELECT c13, c14 FROM t6) AS t6_cte (t6_c13, t6_c14)
-    ) AS t6_q KEY (t6_c13, t6_c14) <- t7_cte (t7_c21, t7_c22)
+    ) AS t6_q FOR KEY (t6_c13, t6_c14) <- t7_cte (t7_c21, t7_c22)
 ) t7_q
 JOIN
 (
     SELECT * FROM (SELECT c3 FROM t2) AS t2_cte (t2_c3)
 ) t2_q
-KEY (t2_c3) <- t7_q (t4_c8)
+FOR KEY (t2_c3) <- t7_q (t4_c8)
 JOIN
 (
     SELECT * FROM (SELECT c4, c5 FROM t3) AS t3_cte (t3_c4, t3_c5)
 )
-KEY (t3_c4, t3_c5) <- t7_q (t4_c9, t4_c10)
+FOR KEY (t3_c4, t3_c5) <- t7_q (t4_c9, t4_c10)
 ORDER BY 1,2,3,4,5;
 
 DROP TABLE t1, t2, t3, t4, t5, t6, t7;
@@ -234,17 +234,17 @@ SELECT * FROM (
   WITH c2 AS (SELECT * FROM t2)
   SELECT * FROM (
     SELECT * FROM c2
-    JOIN c3 KEY (t3_a) -> c2 (t2_a)
+    JOIN c3 FOR KEY (t3_a) -> c2 (t2_a)
   )
 ) q
-JOIN t1 KEY (t1_a) <- q (t2_a);
+JOIN t1 FOR KEY (t1_a) <- q (t2_a);
 
 WITH c3 AS (SELECT * FROM t3)
 SELECT * FROM (
   WITH c2 AS (SELECT * FROM t2)
   SELECT * FROM (
     SELECT * FROM c2
-    JOIN c3 KEY (t3_a) -> c2 (t2_a)
+    JOIN c3 FOR KEY (t3_a) -> c2 (t2_a)
   )
 ) q
 JOIN t1 ON t1.t1_a = q.t2_a;
@@ -256,7 +256,7 @@ SELECT * FROM (
     SELECT * FROM c2
   )
 ) q
-JOIN t1 KEY (t1_a) <- q (t2_a);
+JOIN t1 FOR KEY (t1_a) <- q (t2_a);
 
 SELECT * FROM (
   WITH c2 AS (SELECT * FROM t2)

@@ -29,7 +29,7 @@ INSERT INTO t2 (c3, c4) VALUES (3, 30);
 CREATE VIEW v1 AS
 SELECT *
 FROM t1
-JOIN t2 KEY (c3) -> t1 (c1);
+JOIN t2 FOR KEY (c3) -> t1 (c1);
 \d+ v1
 SELECT * FROM v1; -- ok
 
@@ -53,36 +53,36 @@ SELECT 1<-2; -- ok, false
 
 SELECT * FROM v1; -- ok
 
-SELECT * FROM t1 JOIN t2 KEY (c3) -> t1 (c1); -- ok
-SELECT * FROM t1 JOIN t2 KEY (c3) ->/*comment*/ t1 (c1); -- ok
-SELECT * FROM t1 JOIN t2 KEY (c3) /*comment*/-> t1 (c1); -- ok
-SELECT * FROM t1 JOIN t2 KEY (c3) /*comment*/->/*comment*/ t1 (c1); -- ok
-SELECT * FROM t1 JOIN t2 KEY (c3) - > t1 (c2); -- error
-SELECT * FROM t1 JOIN t2 KEY (c3) -/*comment*/> t1 (c2); -- error
-SELECT * FROM t1 JOIN t2 KEY (c3) -> t1 (c2); -- error
-SELECT * FROM t1 JOIN t2 KEY (c4) -> t1 (c1); -- error
-SELECT * FROM t1 JOIN t2 KEY (c3,c4) -> t1 (c1,c2); -- error
-SELECT * FROM t1 JOIN t2 KEY (c3) <- t1 (c1); -- error
-SELECT * FROM t1 JOIN t2 KEY (c1) <- t1 (c3); -- error
-SELECT * FROM t1 JOIN t2 KEY (c3) <- t1 (c2); -- error
-SELECT * FROM t1 JOIN t2 KEY (c4) <- t1 (c1); -- error
-SELECT * FROM t1 JOIN t2 KEY (c3,c4) <- t1 (c1,c2); -- error
-SELECT * FROM t1 AS a JOIN t2 AS b KEY (c3) -> a (c2); -- error
+SELECT * FROM t1 JOIN t2 FOR KEY (c3) -> t1 (c1); -- ok
+SELECT * FROM t1 JOIN t2 FOR KEY (c3) ->/*comment*/ t1 (c1); -- ok
+SELECT * FROM t1 JOIN t2 FOR KEY (c3) /*comment*/-> t1 (c1); -- ok
+SELECT * FROM t1 JOIN t2 FOR KEY (c3) /*comment*/->/*comment*/ t1 (c1); -- ok
+SELECT * FROM t1 JOIN t2 FOR KEY (c3) - > t1 (c2); -- error
+SELECT * FROM t1 JOIN t2 FOR KEY (c3) -/*comment*/> t1 (c2); -- error
+SELECT * FROM t1 JOIN t2 FOR KEY (c3) -> t1 (c2); -- error
+SELECT * FROM t1 JOIN t2 FOR KEY (c4) -> t1 (c1); -- error
+SELECT * FROM t1 JOIN t2 FOR KEY (c3,c4) -> t1 (c1,c2); -- error
+SELECT * FROM t1 JOIN t2 FOR KEY (c3) <- t1 (c1); -- error
+SELECT * FROM t1 JOIN t2 FOR KEY (c1) <- t1 (c3); -- error
+SELECT * FROM t1 JOIN t2 FOR KEY (c3) <- t1 (c2); -- error
+SELECT * FROM t1 JOIN t2 FOR KEY (c4) <- t1 (c1); -- error
+SELECT * FROM t1 JOIN t2 FOR KEY (c3,c4) <- t1 (c1,c2); -- error
+SELECT * FROM t1 AS a JOIN t2 AS b FOR KEY (c3) -> a (c2); -- error
 
-SELECT * FROM t2 JOIN t1 KEY (c1) <- t2 (c3); -- ok
-SELECT * FROM t2 JOIN t1 KEY (c1) <-/*comment*/ t2 (c3); -- ok
-SELECT * FROM t2 JOIN t1 KEY (c1) /*comment*/<- t2 (c3); -- ok
-SELECT * FROM t2 JOIN t1 KEY (c1) /*comment*/<-/*comment*/ t2 (c3); -- ok
-SELECT * FROM t2 JOIN t1 KEY (c1) < - t2 (c3); -- error
-SELECT * FROM t2 JOIN t1 KEY (c1) </*comment*/- t2 (c3); -- error
-SELECT * FROM t2 JOIN t1 KEY (c1) <- t2 (c4); -- error
-SELECT * FROM t2 JOIN t1 KEY (c2) <- t2 (c3); -- error
-SELECT * FROM t2 JOIN t1 KEY (c1,c2) <- t2 (c3,c4); -- error
-SELECT * FROM t2 JOIN t1 KEY (c1) -> t2 (c3); -- error
-SELECT * FROM t2 JOIN t1 KEY (c1) -> t2 (c4); -- error
-SELECT * FROM t2 JOIN t1 KEY (c2) -> t2 (c3); -- error
-SELECT * FROM t2 JOIN t1 KEY (c1,c2) -> t2 (c3,c4); -- error
-SELECT * FROM t2 AS a JOIN t1 AS b KEY (c1) <- a (c4); -- error
+SELECT * FROM t2 JOIN t1 FOR KEY (c1) <- t2 (c3); -- ok
+SELECT * FROM t2 JOIN t1 FOR KEY (c1) <-/*comment*/ t2 (c3); -- ok
+SELECT * FROM t2 JOIN t1 FOR KEY (c1) /*comment*/<- t2 (c3); -- ok
+SELECT * FROM t2 JOIN t1 FOR KEY (c1) /*comment*/<-/*comment*/ t2 (c3); -- ok
+SELECT * FROM t2 JOIN t1 FOR KEY (c1) < - t2 (c3); -- error
+SELECT * FROM t2 JOIN t1 FOR KEY (c1) </*comment*/- t2 (c3); -- error
+SELECT * FROM t2 JOIN t1 FOR KEY (c1) <- t2 (c4); -- error
+SELECT * FROM t2 JOIN t1 FOR KEY (c2) <- t2 (c3); -- error
+SELECT * FROM t2 JOIN t1 FOR KEY (c1,c2) <- t2 (c3,c4); -- error
+SELECT * FROM t2 JOIN t1 FOR KEY (c1) -> t2 (c3); -- error
+SELECT * FROM t2 JOIN t1 FOR KEY (c1) -> t2 (c4); -- error
+SELECT * FROM t2 JOIN t1 FOR KEY (c2) -> t2 (c3); -- error
+SELECT * FROM t2 JOIN t1 FOR KEY (c1,c2) -> t2 (c3,c4); -- error
+SELECT * FROM t2 AS a JOIN t1 AS b FOR KEY (c1) <- a (c4); -- error
 
 ALTER TABLE t2 DROP CONSTRAINT t2_c3_fkey; -- error
 
@@ -94,32 +94,32 @@ ALTER TABLE t2 ADD CONSTRAINT t2_c3_fkey FOREIGN KEY (c3) REFERENCES t1 (c1);
 CREATE VIEW v1 AS
 SELECT *
 FROM t1
-JOIN t2 KEY (c3) -> t1 (c1);
+JOIN t2 FOR KEY (c3) -> t1 (c1);
 ALTER TABLE t2 DROP CONSTRAINT t2_c3_fkey CASCADE; -- ok
 
-SELECT * FROM t1 JOIN t2 KEY (c3) -> t1 (c1); -- error
-SELECT * FROM t2 JOIN t1 KEY (c1) <- t2 (c3); -- error
+SELECT * FROM t1 JOIN t2 FOR KEY (c3) -> t1 (c1); -- error
+SELECT * FROM t2 JOIN t1 FOR KEY (c1) <- t2 (c3); -- error
 
 ALTER TABLE t1 ADD UNIQUE (c1,c2);
 ALTER TABLE t2 ADD CONSTRAINT t2_c3_c4_fkey FOREIGN KEY (c3,c4) REFERENCES t1 (c1,c2);
 
 CREATE VIEW v2 AS
-SELECT * FROM t1 JOIN t2 KEY (c3,c4) -> t1 (c1,c2); -- ok
-SELECT * FROM t1 JOIN t2 KEY (c3,c4) -> t1 (c1,c2); -- ok
+SELECT * FROM t1 JOIN t2 FOR KEY (c3,c4) -> t1 (c1,c2); -- ok
+SELECT * FROM t1 JOIN t2 FOR KEY (c3,c4) -> t1 (c1,c2); -- ok
 SELECT * FROM v2; -- ok
 \d+ v2
 
 CREATE VIEW v3 AS
-SELECT * FROM t2 JOIN t1 KEY (c1,c2) <- t2 (c3,c4); -- ok
-SELECT * FROM t2 JOIN t1 KEY (c1,c2) <- t2 (c3,c4); -- ok
+SELECT * FROM t2 JOIN t1 FOR KEY (c1,c2) <- t2 (c3,c4); -- ok
+SELECT * FROM t2 JOIN t1 FOR KEY (c1,c2) <- t2 (c3,c4); -- ok
 \d+ v3
 
 SELECT * FROM v3; -- ok
 
-SELECT * FROM t1 JOIN t2 KEY (c3) -> t1 (c1); -- error
-SELECT * FROM t2 JOIN t1 KEY (c1) <- t2 (c3); -- error
-SELECT * FROM t1 JOIN t2 KEY (c3,c4) <- t1 (c1,c2); -- error
-SELECT * FROM t2 JOIN t1 KEY (c1,c2) -> t2 (c3,c4); -- error
+SELECT * FROM t1 JOIN t2 FOR KEY (c3) -> t1 (c1); -- error
+SELECT * FROM t2 JOIN t1 FOR KEY (c1) <- t2 (c3); -- error
+SELECT * FROM t1 JOIN t2 FOR KEY (c3,c4) <- t1 (c1,c2); -- error
+SELECT * FROM t2 JOIN t1 FOR KEY (c1,c2) -> t2 (c3,c4); -- error
 
 --
 -- Test nulls and multiple tables
@@ -144,34 +144,34 @@ INSERT INTO t3 (c5, c6) VALUES (NULL, NULL); -- ok
 --
 SELECT *
 FROM t1
-JOIN t2 KEY (c3,c4) -> t1 (c1,c2)
-JOIN t3 KEY (c5,c6) -> t1 (c1,c2);
+JOIN t2 FOR KEY (c3,c4) -> t1 (c1,c2)
+JOIN t3 FOR KEY (c5,c6) -> t1 (c1,c2);
 
 SELECT *
 FROM t1
-JOIN t2 KEY (c3,c4) -> t1 (c1,c2)
-LEFT JOIN t3 KEY (c5,c6) -> t1 (c1,c2);
+JOIN t2 FOR KEY (c3,c4) -> t1 (c1,c2)
+LEFT JOIN t3 FOR KEY (c5,c6) -> t1 (c1,c2);
 
 SELECT *
 FROM t1
-JOIN t2 KEY (c3,c4) -> t1 (c1,c2)
-RIGHT JOIN t3 KEY (c5,c6) -> t1 (c1,c2);
+JOIN t2 FOR KEY (c3,c4) -> t1 (c1,c2)
+RIGHT JOIN t3 FOR KEY (c5,c6) -> t1 (c1,c2);
 
 --
 -- Test composite foreign key joins with swapped column orders
 --
 SELECT *
 FROM t1
-JOIN t2 KEY (c4,c3) -> t1 (c2,c1)
-JOIN t3 KEY (c6,c5) -> t1 (c2,c1);
+JOIN t2 FOR KEY (c4,c3) -> t1 (c2,c1)
+JOIN t3 FOR KEY (c6,c5) -> t1 (c2,c1);
 
 --
 -- Test mismatched column orders between referencing and referenced sides
 --
 SELECT *
 FROM t1
-JOIN t2 KEY (c4,c3) -> t1 (c2,c1)
-JOIN t3 KEY (c6,c5) -> t1 (c1,c2); -- error
+JOIN t2 FOR KEY (c4,c3) -> t1 (c2,c1)
+JOIN t3 FOR KEY (c6,c5) -> t1 (c1,c2); -- error
 
 --
 -- Test defining foreign key constraints with MATCH FULL
@@ -193,18 +193,18 @@ INSERT INTO t4 (c7, c8) VALUES (NULL, NULL); -- ok
 
 SELECT *
 FROM t1
-JOIN t2 KEY (c3,c4) -> t1 (c1,c2)
-JOIN t4 KEY (c7,c8) -> t1 (c1,c2);
+JOIN t2 FOR KEY (c3,c4) -> t1 (c1,c2)
+JOIN t4 FOR KEY (c7,c8) -> t1 (c1,c2);
 
 SELECT *
 FROM t1
-JOIN t2 KEY (c3,c4) -> t1 (c1,c2)
-LEFT JOIN t4 KEY (c7,c8) -> t1 (c1,c2);
+JOIN t2 FOR KEY (c3,c4) -> t1 (c1,c2)
+LEFT JOIN t4 FOR KEY (c7,c8) -> t1 (c1,c2);
 
 SELECT *
 FROM t1
-JOIN t2 KEY (c3,c4) -> t1 (c1,c2)
-RIGHT JOIN t4 KEY (c7,c8) -> t1 (c1,c2);
+JOIN t2 FOR KEY (c3,c4) -> t1 (c1,c2)
+RIGHT JOIN t4 FOR KEY (c7,c8) -> t1 (c1,c2);
 
 -- Recreate stuff for pg_dump tests
 ALTER TABLE t2
@@ -212,7 +212,7 @@ ALTER TABLE t2
 CREATE VIEW v1 AS
 SELECT *
 FROM t1
-JOIN t2 KEY (c3) -> t1 (c1);
+JOIN t2 FOR KEY (c3) -> t1 (c1);
 
 CREATE TABLE t5
 (
@@ -309,7 +309,7 @@ FROM t1 AS a
 JOIN
 (
     SELECT * FROM t2
-) AS b KEY (c3) -> a (c1);
+) AS b FOR KEY (c3) -> a (c1);
 
 SELECT
     a.c1,
@@ -323,7 +323,7 @@ FROM
 JOIN
 (
     SELECT * FROM t2
-) AS b KEY (c3) -> a (c1);
+) AS b FOR KEY (c3) -> a (c1);
 
 SELECT
     a.t1_c1,
@@ -337,7 +337,7 @@ FROM
 JOIN
 (
     SELECT c3 AS t2_c3, c4 AS t2_c4 FROM t2
-) AS b KEY (t2_c3) -> a (t1_c1);
+) AS b FOR KEY (t2_c3) -> a (t1_c1);
 
 SELECT
     a.outer_c1,
@@ -357,7 +357,7 @@ JOIN
     (
         SELECT c3 AS mid_c3, c4 AS mid_c4 FROM t2
     ) sub2
-) AS b KEY (outer_c3) -> a (outer_c1);
+) AS b FOR KEY (outer_c3) -> a (outer_c1);
 
 SELECT *
 FROM t1
@@ -369,14 +369,14 @@ JOIN
         t10_2.c25,
         t10_2.c26
     FROM t10
-    JOIN t10 AS t10_2 KEY (c23, c24) <- t10 (c25, c26)
-) AS q1 KEY (c23, c24) -> t1 (c1, c2);
+    JOIN t10 AS t10_2 FOR KEY (c23, c24) <- t10 (c25, c26)
+) AS q1 FOR KEY (c23, c24) -> t1 (c1, c2);
 
 SELECT *
 FROM t1
 JOIN LATERAL (
     SELECT c3, c4 FROM t2 WHERE c4 = c1 + 9
-) AS q1 KEY (c3) -> t1 (c1);
+) AS q1 FOR KEY (c3) -> t1 (c1);
 
 --
 -- Test CTEs
@@ -404,10 +404,10 @@ SELECT
     q2_c2,
     q4_c3,
     q4_c4
-FROM q2 JOIN q4 KEY (q4_c3, q4_c4) -> q2 (q2_c1, q2_c2);
+FROM q2 JOIN q4 FOR KEY (q4_c3, q4_c4) -> q2 (q2_c1, q2_c2);
 
 WITH RECURSIVE q1 AS (SELECT c1 FROM t1 UNION SELECT c1 FROM q1)
-SELECT * FROM q1 JOIN t2 KEY (c3) -> q1 (c1);
+SELECT * FROM q1 JOIN t2 FOR KEY (c3) -> q1 (c1);
 
 --
 -- Test VIEWs
@@ -433,7 +433,7 @@ SELECT
     v2_c2,
     v4_c3,
     v4_c4
-FROM v2 JOIN v4 KEY (v4_c3, v4_c4) -> v2 (v2_c1, v2_c2);
+FROM v2 JOIN v4 FOR KEY (v4_c3, v4_c4) -> v2 (v2_c1, v2_c2);
 
 SELECT * FROM v5;
 
@@ -456,7 +456,7 @@ SELECT
     q2_c2,
     v4_c3,
     v4_c4
-FROM q2 JOIN v4 KEY (v4_c3, v4_c4) -> q2 (q2_c1, q2_c2);
+FROM q2 JOIN v4 FOR KEY (v4_c3, v4_c4) -> q2 (q2_c1, q2_c2);
 
 DROP VIEW v1, v2, v3, v4, v5;
 
@@ -477,11 +477,11 @@ FROM
         t5.c11,
         t5.c12
     FROM t5
-    JOIN t1 KEY (c1, c2) <- t5 (c11, c12)
-    JOIN t1 AS t1_2 KEY (c1, c2) <- t5 (c11, c12)
-    JOIN t1 AS t1_3 KEY (c1, c2) <- t5 (c11, c12)
+    JOIN t1 FOR KEY (c1, c2) <- t5 (c11, c12)
+    JOIN t1 AS t1_2 FOR KEY (c1, c2) <- t5 (c11, c12)
+    JOIN t1 AS t1_3 FOR KEY (c1, c2) <- t5 (c11, c12)
 ) AS q1
-JOIN t6 KEY (c13, c14) -> q1 (c9, c10);
+JOIN t6 FOR KEY (c13, c14) -> q1 (c9, c10);
 
 WITH
 q1 AS
@@ -492,9 +492,9 @@ q1 AS
         t5.c11,
         t5.c12
     FROM t5
-    JOIN t1 KEY (c1, c2) <- t5 (c11, c12)
-    JOIN t1 AS t1_2 KEY (c1, c2) <- t5 (c11, c12)
-    JOIN t1 AS t1_3 KEY (c1, c2) <- t5 (c11, c12)
+    JOIN t1 FOR KEY (c1, c2) <- t5 (c11, c12)
+    JOIN t1 AS t1_2 FOR KEY (c1, c2) <- t5 (c11, c12)
+    JOIN t1 AS t1_3 FOR KEY (c1, c2) <- t5 (c11, c12)
 )
 SELECT
     q1.c11,
@@ -502,7 +502,7 @@ SELECT
     t6.c13,
     t6.c14
 FROM q1
-JOIN t6 KEY (c13, c14) -> q1 (c9, c10);
+JOIN t6 FOR KEY (c13, c14) -> q1 (c9, c10);
 
 CREATE VIEW v1 AS
 SELECT
@@ -511,9 +511,9 @@ SELECT
     t5.c11,
     t5.c12
 FROM t5
-JOIN t1 KEY (c1, c2) <- t5 (c11, c12)
-JOIN t1 AS t1_2 KEY (c1, c2) <- t5 (c11, c12)
-JOIN t1 AS t1_3 KEY (c1, c2) <- t5 (c11, c12);
+JOIN t1 FOR KEY (c1, c2) <- t5 (c11, c12)
+JOIN t1 AS t1_2 FOR KEY (c1, c2) <- t5 (c11, c12)
+JOIN t1 AS t1_3 FOR KEY (c1, c2) <- t5 (c11, c12);
 
 SELECT
     v1.c11,
@@ -521,7 +521,7 @@ SELECT
     t6.c13,
     t6.c14
 FROM v1
-JOIN t6 KEY (c13, c14) -> v1 (c9, c10);
+JOIN t6 FOR KEY (c13, c14) -> v1 (c9, c10);
 
 DROP VIEW v1;
 
@@ -536,28 +536,28 @@ CREATE VIEW v2 AS
 SELECT * FROM t2 WHERE c3 > 0;
 
 -- invalid since v1 is filtered and is the referenced table
-SELECT * FROM v1 JOIN t2 KEY (c3) -> v1 (c1);
+SELECT * FROM v1 JOIN t2 FOR KEY (c3) -> v1 (c1);
 
 -- OK, filtering allowed since v2 is the referencing table
-SELECT * FROM t1 JOIN v2 KEY (c3) -> t1 (c1);
+SELECT * FROM t1 JOIN v2 FOR KEY (c3) -> t1 (c1);
 
 -- also invalid, since v1 is filtered and is the referenced table
-SELECT * FROM v1 JOIN v2 KEY (c3) -> v1 (c1);
+SELECT * FROM v1 JOIN v2 FOR KEY (c3) -> v1 (c1);
 
 -- also invalid, filters uisng a having clause
 SELECT * FROM
 (
     SELECT c1, count(*) FROM t1 GROUP BY c1 HAVING c2 > 100
 ) AS u
-JOIN t2 KEY (c3) -> u (c1);
+JOIN t2 FOR KEY (c3) -> u (c1);
 
 -- invalid, since u is filtered and is the referenced table
 SELECT * FROM (SELECT c1 FROM t1 LIMIT 1) AS u
-JOIN t2 KEY (c3) -> u (c1);
+JOIN t2 FOR KEY (c3) -> u (c1);
 
 -- invalid, since u is filtered and is the referenced table
 SELECT * FROM (SELECT c1 FROM t1 OFFSET 1) AS u
-JOIN t2 KEY (c3) -> u (c1);
+JOIN t2 FOR KEY (c3) -> u (c1);
 
 -- invalid, since referenced table has RLS enabled
 ALTER TABLE t1 ENABLE ROW LEVEL SECURITY;
@@ -565,9 +565,9 @@ ALTER TABLE t1 ENABLE ROW LEVEL SECURITY;
 CREATE POLICY t1_policy ON t1 USING (false);
 
 SELECT * FROM (SELECT c1 FROM t1) AS u
-JOIN t2 KEY (c3) -> u (c1);
+JOIN t2 FOR KEY (c3) -> u (c1);
 
-SELECT * FROM t1 JOIN t2 KEY (c3) -> t1 (c1);
+SELECT * FROM t1 JOIN t2 FOR KEY (c3) -> t1 (c1);
 
 ALTER TABLE t1 DISABLE ROW LEVEL SECURITY;
 
@@ -588,9 +588,9 @@ FROM
         q2.c11,
         q2.c12
     FROM q2
-    JOIN t1 KEY (c1, c2) <- q2 (c11, c12)
+    JOIN t1 FOR KEY (c1, c2) <- q2 (c11, c12)
 ) AS q1
-JOIN t7 KEY (c15, c16) -> q1 (c9, c10);
+JOIN t7 FOR KEY (c15, c16) -> q1 (c9, c10);
 
 --
 -- Test allowed joins not affecting uniqueness
@@ -609,9 +609,9 @@ FROM
         t5.c11,
         t5.c12
     FROM t5
-    JOIN t1 KEY (c1, c2) <- t5 (c11, c12)
+    JOIN t1 FOR KEY (c1, c2) <- t5 (c11, c12)
 ) AS q1
-JOIN t6 KEY (c13, c14) -> q1 (c9, c10);
+JOIN t6 FOR KEY (c13, c14) -> q1 (c9, c10);
 
 --
 -- Test disallowed non-unique referenced table
@@ -630,10 +630,10 @@ FROM
         t5.c11,
         t5.c12
     FROM t5
-    JOIN t1 KEY (c1, c2) <- t5 (c11, c12)
-    JOIN t6 KEY (c13, c14) -> t5 (c9, c10)
+    JOIN t1 FOR KEY (c1, c2) <- t5 (c11, c12)
+    JOIN t6 FOR KEY (c13, c14) -> t5 (c9, c10)
 ) AS q1
-JOIN t7 KEY (c15, c16) -> q1 (c9, c10);
+JOIN t7 FOR KEY (c15, c16) -> q1 (c9, c10);
 
 SELECT
     q1.c19,
@@ -648,9 +648,9 @@ FROM
         t8.c19,
         t8.c20
     FROM t8
-    JOIN t1 KEY (c1, c2) <- t8 (c19, c20)
+    JOIN t1 FOR KEY (c1, c2) <- t8 (c19, c20)
 ) AS q1
-JOIN t9 KEY (c21, c22) -> q1 (c17, c18);
+JOIN t9 FOR KEY (c21, c22) -> q1 (c17, c18);
 
 --
 -- Test revalidation of views
@@ -696,7 +696,7 @@ SELECT
     a.country_code,
     a.zip_code
 FROM customers AS c
-JOIN addresses AS a KEY (id) <- c (address_id);
+JOIN addresses AS a FOR KEY (id) <- c (address_id);
 
 CREATE VIEW orders_by_country AS
 SELECT
@@ -704,7 +704,7 @@ SELECT
     COUNT(*) AS order_count,
     SUM(o.amount) AS total_amount
 FROM orders AS o
-JOIN customer_details AS cd KEY (customer_id) <- o (customer_id)
+JOIN customer_details AS cd FOR KEY (customer_id) <- o (customer_id)
 GROUP BY ROLLUP (cd.country_code);
 
 CREATE TABLE customer_addresses
@@ -728,69 +728,69 @@ SELECT
     a.country_code,
     a.zip_code
 FROM customers AS c
-JOIN customer_addresses AS ca KEY (customer_id) -> c (id)
-JOIN addresses AS a KEY (id) <- ca (address_id);
+JOIN customer_addresses AS ca FOR KEY (customer_id) -> c (id)
+JOIN addresses AS a FOR KEY (id) <- ca (address_id);
 
 --
 -- Test various error conditions
 --
 
-SELECT * FROM t1 JOIN t2 KEY (c3, c4) -> t3 (c1, c2);
+SELECT * FROM t1 JOIN t2 FOR KEY (c3, c4) -> t3 (c1, c2);
 
-SELECT * FROM t1 JOIN t2 KEY (c3, c4) -> t1 (c1);
-SELECT * FROM t1 JOIN t2 KEY (c3) -> t1 (c1, c2);
-SELECT * FROM t1 JOIN t2 KEY (c3, c4) -> t1 (c1, c2, c3);
-SELECT * FROM t1 JOIN t2 KEY (c3, c4, c5) -> t1 (c1, c2);
+SELECT * FROM t1 JOIN t2 FOR KEY (c3, c4) -> t1 (c1);
+SELECT * FROM t1 JOIN t2 FOR KEY (c3) -> t1 (c1, c2);
+SELECT * FROM t1 JOIN t2 FOR KEY (c3, c4) -> t1 (c1, c2, c3);
+SELECT * FROM t1 JOIN t2 FOR KEY (c3, c4, c5) -> t1 (c1, c2);
 
 CREATE FUNCTION t2() RETURNS TABLE (c3 INTEGER, c4 INTEGER)
 LANGUAGE sql
 RETURN (1, 2);
 
-SELECT * FROM t1 JOIN t2() KEY (c3, c4) -> t1 (c1, c2);
+SELECT * FROM t1 JOIN t2() FOR KEY (c3, c4) -> t1 (c1, c2);
 
-SELECT * FROM t1 JOIN t2 KEY (c3, c4) -> t1 (c1, c5);
+SELECT * FROM t1 JOIN t2 FOR KEY (c3, c4) -> t1 (c1, c5);
 
 DROP VIEW v1, v2;
 CREATE VIEW v1 AS SELECT c1 AS c1_1, c1 AS c1_2, c2 AS c2_1, c2 AS c2_2 FROM t1;
 CREATE VIEW v2 AS SELECT c3 AS c3_1, c3 AS c3_2, c4 AS c4_1, c4 AS c4_2 FROM t2;
 
-SELECT * FROM v1 JOIN t2 KEY (c3, c4) -> v1 (c1_1, c2_1); -- ok
+SELECT * FROM v1 JOIN t2 FOR KEY (c3, c4) -> v1 (c1_1, c2_1); -- ok
 
-SELECT * FROM v1 JOIN t2 KEY (c3, c4) -> v1 (c1_1, c1_2);
+SELECT * FROM v1 JOIN t2 FOR KEY (c3, c4) -> v1 (c1_1, c1_2);
 
-SELECT * FROM v1 JOIN t2 KEY (c3, c4) -> v1 (c1_1, nonexistent);
+SELECT * FROM v1 JOIN t2 FOR KEY (c3, c4) -> v1 (c1_1, nonexistent);
 
 /*
  * We don't need to check for duplicate columns,
  * since there is already such a check for foreign key constraints.
  * Let's test it anyway.
  */
-SELECT * FROM v1 JOIN t2 KEY (c3, c3) -> v1 (c1_1, c1_1);
+SELECT * FROM v1 JOIN t2 FOR KEY (c3, c3) -> v1 (c1_1, c1_1);
 
 DROP VIEW v1;
 CREATE VIEW v1 AS SELECT c1+0 AS c1_1, c1 AS c1_2, c2 AS c2_1, c2 AS c2_2 FROM t1;
-SELECT * FROM v1 JOIN t2 KEY (c3, c4) -> v1 (c1_1, c2_1);
+SELECT * FROM v1 JOIN t2 FOR KEY (c3, c4) -> v1 (c1_1, c2_1);
 
 SELECT * FROM t1 JOIN
 (
     SELECT c3, c4 FROM t2
     UNION ALL
     SELECT c3, c4 FROM t2
-) AS u KEY (c3, c4) -> t1 (c1, c2);
+) AS u FOR KEY (c3, c4) -> t1 (c1, c2);
 
 SELECT * FROM
 (
     SELECT c1, c2 FROM t1 WHERE c2 > 0
 ) AS u
-JOIN t2 KEY (c3, c4) -> u (c1, c2);
+JOIN t2 FOR KEY (c3, c4) -> u (c1, c2);
 
 SELECT *
 FROM t1
 JOIN
 (
     SELECT * FROM t10
-    JOIN t10 AS t10_2 KEY (c23, c24) <- t10 (c25, c26)
-) AS q1 KEY (c23, c24) -> t1 (c1, c2);
+    JOIN t10 AS t10_2 FOR KEY (c23, c24) <- t10 (c25, c26)
+) AS q1 FOR KEY (c23, c24) -> t1 (c1, c2);
 
 SELECT *
 FROM t1
@@ -802,8 +802,8 @@ JOIN
         t10_2.c25,
         t10_2.c26
     FROM t10
-    JOIN t10 AS t10_2 KEY (c23, c24) <- t10 (c25, c26)
-) AS q1 KEY (nonexistent, c24) -> t1 (c1, c2);
+    JOIN t10 AS t10_2 FOR KEY (c23, c24) <- t10 (c25, c26)
+) AS q1 FOR KEY (nonexistent, c24) -> t1 (c1, c2);
 
 SELECT *
 FROM t1
@@ -813,8 +813,8 @@ JOIN
         t10.c23,
         t10_2.c24
     FROM t10
-    JOIN t10 AS t10_2 KEY (c23, c24) <- t10 (c25, c26)
-) AS q1 KEY (c23, c24) -> t1 (c1, c2);
+    JOIN t10 AS t10_2 FOR KEY (c23, c24) <- t10 (c25, c26)
+) AS q1 FOR KEY (c23, c24) -> t1 (c1, c2);
 
 --
 -- Test materialized views (not supported yet)
@@ -823,7 +823,7 @@ JOIN
 CREATE MATERIALIZED VIEW mv1 AS
 SELECT c1, c2 FROM t1;
 
-SELECT * FROM mv1 JOIN t2 KEY (c3, c4) -> mv1 (c1, c2);
+SELECT * FROM mv1 JOIN t2 FOR KEY (c3, c4) -> mv1 (c1, c2);
 
 DROP MATERIALIZED VIEW mv1;
 
@@ -869,12 +869,12 @@ INSERT INTO t17 VALUES (6, 60, 4, 40);
 SELECT *
 FROM t12
 JOIN
-    t13 JOIN t14 KEY (b_id) -> t13 (id)
-KEY (a_id) -> t12 (id);
+    t13 JOIN t14 FOR KEY (b_id) -> t13 (id)
+FOR KEY (a_id) -> t12 (id);
 
 SELECT *
 FROM t12
-JOIN (t13 JOIN t14 KEY (b_id) -> t13 (id)) KEY (a_id) -> t12 (id);
+JOIN (t13 JOIN t14 FOR KEY (b_id) -> t13 (id)) FOR KEY (a_id) -> t12 (id);
 
 --
 -- Test nested foreign key joins with composite foreign keys
@@ -882,8 +882,8 @@ JOIN (t13 JOIN t14 KEY (b_id) -> t13 (id)) KEY (a_id) -> t12 (id);
 SELECT *
 FROM t15
 JOIN
-    t16 JOIN t17 KEY (b_id, b_id2) -> t16 (id, id2)
-KEY (a_id, a_id2) -> t15 (id, id2);
+    t16 JOIN t17 FOR KEY (b_id, b_id2) -> t16 (id, id2)
+FOR KEY (a_id, a_id2) -> t15 (id, id2);
 
 --
 -- Explicit parenthesization:
@@ -892,8 +892,8 @@ SELECT *
 FROM t15
 JOIN
 (
-    t16 JOIN t17 KEY (b_id, b_id2) -> t16 (id, id2)
-) KEY (a_id, a_id2) -> t15 (id, id2);
+    t16 JOIN t17 FOR KEY (b_id, b_id2) -> t16 (id, id2)
+) FOR KEY (a_id, a_id2) -> t15 (id, id2);
 
 --
 -- Test swapping the column order:
@@ -903,8 +903,8 @@ SELECT *
 FROM t15
 JOIN
 (
-    t16 JOIN t17 KEY (b_id, b_id2) -> t16 (id, id2)
-) KEY (a_id2, a_id) -> t15 (id2, id);
+    t16 JOIN t17 FOR KEY (b_id, b_id2) -> t16 (id, id2)
+) FOR KEY (a_id2, a_id) -> t15 (id2, id);
 
 --
 -- Test mismatched column orders between referencing and referenced sides:
@@ -914,15 +914,15 @@ SELECT *
 FROM t15
 JOIN
 (
-    t16 JOIN t17 KEY (b_id, b_id2) -> t16 (id, id2)
-) KEY (a_id, a_id2) -> t15 (id2, id); -- error
+    t16 JOIN t17 FOR KEY (b_id, b_id2) -> t16 (id, id2)
+) FOR KEY (a_id, a_id2) -> t15 (id2, id); -- error
 
 SELECT *
 FROM t15
 JOIN
 (
-    t16 JOIN t17 KEY (b_id, b_id2) -> t16 (id2, id)
-) KEY (a_id2, a_id) -> t15 (id2, id); -- error
+    t16 JOIN t17 FOR KEY (b_id, b_id2) -> t16 (id2, id)
+) FOR KEY (a_id2, a_id) -> t15 (id2, id); -- error
 
 --
 -- Test partitioned tables
@@ -955,16 +955,94 @@ INSERT INTO pt2 (c3, c4) VALUES (3, 300);
 INSERT INTO pt3 (c5, c6) VALUES (1, 1000);
 INSERT INTO pt3 (c5, c6) VALUES (3, 3000);
 
-SELECT * FROM t1 JOIN pt2 KEY (c3) -> t1 (c1) JOIN pt3 KEY (c5) -> pt2 (c3);
-SELECT * FROM t1 JOIN pt2_1 KEY (c3) -> t1 (c1);
+SELECT * FROM t1 JOIN pt2 FOR KEY (c3) -> t1 (c1) JOIN pt3 FOR KEY (c5) -> pt2 (c3);
+SELECT * FROM t1 JOIN pt2_1 FOR KEY (c3) -> t1 (c1);
 
 DROP TABLE pt3;
 DROP TABLE pt2;
 
 SELECT *
 FROM (SELECT * FROM (SELECT c1, c2 FROM t1) AS q1(q1_c1, q1_c2)) q
-JOIN t2 KEY (c3, c4) -> q (q1_c1, q1_c2);
+JOIN t2 FOR KEY (c3, c4) -> q (q1_c1, q1_c2);
 -- equivalent to:
 SELECT *
 FROM (WITH q1 (q1_c1, q1_c2) AS (SELECT c1, c2 FROM t1) SELECT * FROM q1) q
-JOIN t2 KEY (c3, c4) -> q (q1_c1, q1_c2);
+JOIN t2 FOR KEY (c3, c4) -> q (q1_c1, q1_c2);
+
+-- Test that "key" can be used as a table alias with column renaming.
+-- This verifies that the parser correctly disambiguates between:
+-- - FOR KEY (cols) -> ref (cols) for foreign key joins
+-- - key(cols) ON ... for table alias with column renaming
+CREATE TABLE foo (foo_id INTEGER PRIMARY KEY);
+CREATE TABLE bar (bar_id INTEGER PRIMARY KEY, bar_foo_id INTEGER REFERENCES foo);
+CREATE TABLE baz (baz_id INTEGER PRIMARY KEY, baz_bar_id INTEGER REFERENCES bar);
+INSERT INTO foo (foo_id) VALUES (1), (2), (3);
+INSERT INTO bar (bar_id, bar_foo_id) VALUES (10,1), (20,2);
+INSERT INTO baz (baz_id, baz_bar_id) VALUES (100, 10);
+SELECT * FROM foo JOIN bar ON bar.bar_foo_id = foo.foo_id;
+SELECT * FROM foo JOIN bar key(bar_id, bar_foo_id_renamed) ON key.bar_foo_id_renamed = foo.foo_id;
+-- Also test using KEY as alias with USING clause
+SELECT * FROM foo JOIN bar key(bar_id,foo_id) USING (foo_id);
+
+-- Test KEY alias with subqueries (plain JOIN)
+SELECT * FROM foo JOIN (SELECT * FROM bar) key(bar_id_renamed,bar_foo_id_renamed) ON key.bar_foo_id_renamed = foo.foo_id;
+
+-- Test KEY alias with subqueries (LEFT JOIN)
+SELECT * FROM foo LEFT JOIN (SELECT * FROM bar) key(bar_id,bar_foo_id_renamed) ON key.bar_foo_id_renamed = foo.foo_id;
+
+-- Test KEY alias with explicit join (plain JOIN)
+SELECT * FROM foo JOIN (bar JOIN baz key(baz_id_renamed,baz_bar_id_renamed) ON key.baz_bar_id_renamed = bar.bar_id) ON bar.bar_foo_id = foo.foo_id;
+
+-- Test KEY alias with explicit join (LEFT JOIN)
+SELECT * FROM foo LEFT JOIN (bar LEFT JOIN baz key(baz_id_renamed,baz_bar_id_renamed) ON key.baz_bar_id_renamed = bar.bar_id) ON bar.bar_foo_id = foo.foo_id;
+
+-- Test KEY alias with CTE (plain JOIN)
+WITH key AS (SELECT * FROM bar) SELECT * FROM foo JOIN key ON key.bar_foo_id = foo.foo_id;
+WITH key(bar_id_renamed,bar_foo_id_renamed) AS (SELECT * FROM bar) SELECT * FROM foo JOIN key ON key.bar_foo_id_renamed = foo.foo_id;
+
+-- Test KEY alias with CTE (LEFT JOIN)
+WITH key AS (SELECT * FROM bar) SELECT * FROM foo LEFT JOIN key ON key.bar_foo_id = foo.foo_id;
+WITH key(bar_id,bar_foo_id_renamed) AS (SELECT * FROM bar) SELECT * FROM foo LEFT JOIN key ON key.bar_foo_id_renamed = foo.foo_id;
+
+-- Error: table reference already has an alias (plain JOIN)
+SELECT * FROM foo JOIN bar AS b key(foo_id_renamed) ON key.foo_id_renamed = foo.id;
+
+-- Error: table reference already has an alias (LEFT JOIN)
+SELECT * FROM foo LEFT JOIN bar AS b key(foo_id_renamed) ON key.foo_id_renamed = foo.id;
+
+--
+-- Test variantions of KEY join syntax with "key" alias with and without column renaming
+--
+SELECT * FROM foo JOIN bar FOR KEY (bar_foo_id) -> foo (foo_id);
+SELECT * FROM foo JOIN bar AS bar_renamed(bar_id, bar_foo_id_renamed) FOR KEY (bar_foo_id_renamed) -> foo (foo_id);
+SELECT * FROM foo JOIN bar bar_renamed(bar_id, bar_foo_id_renamed) FOR KEY (bar_foo_id_renamed) -> foo (foo_id);
+SELECT * FROM foo JOIN bar AS key FOR KEY (bar_foo_id) -> foo (foo_id);
+SELECT * FROM foo JOIN bar key FOR KEY (bar_foo_id) -> foo (foo_id);
+SELECT * FROM foo JOIN bar key(bar_id, bar_foo_id_renamed) FOR KEY (bar_foo_id_renamed) -> foo (foo_id);
+SELECT * FROM foo JOIN bar AS key(bar_id, bar_foo_id_renamed) FOR KEY (bar_foo_id_renamed) -> foo (foo_id);
+
+SELECT * FROM foo JOIN (SELECT * FROM bar) key(bar_id_renamed,bar_foo_id_renamed) FOR KEY (bar_foo_id_renamed) -> foo (foo_id);
+SELECT * FROM foo LEFT JOIN (SELECT * FROM bar) key(bar_id,bar_foo_id_renamed) FOR KEY (bar_foo_id_renamed) -> foo (foo_id);
+SELECT * FROM foo JOIN (bar JOIN baz key(baz_id_renamed,baz_bar_id_renamed) FOR KEY (baz_bar_id_renamed) -> bar (bar_id)) FOR KEY (bar_foo_id) -> foo (foo_id);
+SELECT * FROM foo JOIN (bar JOIN baz key(baz_id_renamed,baz_bar_id_renamed) FOR KEY (baz_bar_id_renamed) -> bar (bar_id)) key(bar_id_renamed,bar_foo_id_renamed) ON bar_foo_id_renamed = foo.foo_id;
+SELECT * FROM foo JOIN (bar JOIN baz key(baz_id_renamed,baz_bar_id_renamed) FOR KEY (baz_bar_id_renamed) -> bar (bar_id)) key(bar_id_renamed,bar_foo_id_renamed) FOR KEY (bar_foo_id_renamed) -> foo (foo_id);
+SELECT * FROM foo LEFT JOIN (bar LEFT JOIN baz key(baz_id_renamed,baz_bar_id_renamed) FOR KEY (baz_bar_id_renamed) -> bar (bar_id)) FOR KEY (bar_foo_id) -> foo (foo_id);
+WITH key AS (SELECT * FROM bar) SELECT * FROM foo JOIN key FOR KEY (bar_foo_id) -> foo (foo_id);
+WITH key(bar_id_renamed,bar_foo_id_renamed) AS (SELECT * FROM bar) SELECT * FROM foo JOIN key FOR KEY (bar_foo_id_renamed) -> foo (foo_id);
+WITH key AS (SELECT * FROM bar) SELECT * FROM foo LEFT JOIN key FOR KEY (bar_foo_id) -> foo (foo_id);
+WITH key(bar_id,bar_foo_id_renamed) AS (SELECT * FROM bar) SELECT * FROM foo LEFT JOIN key FOR KEY (bar_foo_id_renamed) -> foo (foo_id);
+
+SELECT * FROM bar JOIN (SELECT * FROM foo) key(foo_id_renamed) FOR KEY (foo_id_renamed) <- bar (bar_foo_id);
+SELECT * FROM bar RIGHT JOIN (SELECT * FROM foo) key(foo_id_renamed) FOR KEY (foo_id_renamed) <- bar (bar_foo_id);
+SELECT * FROM baz JOIN (bar LEFT JOIN foo key(foo_id_renamed) FOR KEY (foo_id_renamed) <- bar (bar_foo_id)) FOR KEY (bar_id) <- baz (baz_bar_id);
+SELECT * FROM baz JOIN (bar LEFT JOIN foo key(foo_id_renamed) FOR KEY (foo_id_renamed) <- bar (bar_foo_id)) key(bar_id_renamed) ON bar_id_renamed = baz.baz_bar_id;
+SELECT * FROM baz JOIN (bar LEFT JOIN foo key(foo_id_renamed) FOR KEY (foo_id_renamed) <- bar (bar_foo_id)) key(bar_id_renamed) FOR KEY (bar_id_renamed) <- baz (baz_bar_id);
+SELECT * FROM baz LEFT JOIN (bar LEFT JOIN foo key(foo_id_renamed) FOR KEY (foo_id_renamed) <- bar (bar_foo_id)) FOR KEY (bar_id) <- baz (baz_bar_id);
+WITH key AS (SELECT * FROM foo) SELECT * FROM bar JOIN key FOR KEY (foo_id) <- bar (bar_foo_id);
+WITH key(foo_id_renamed) AS (SELECT * FROM foo) SELECT * FROM bar JOIN key FOR KEY (foo_id_renamed) <- bar (bar_foo_id);
+WITH key AS (SELECT * FROM foo) SELECT * FROM bar LEFT JOIN key FOR KEY (foo_id) <- bar (bar_foo_id);
+WITH key(foo_id_renamed) AS (SELECT * FROM foo) SELECT * FROM bar LEFT JOIN key FOR KEY (foo_id_renamed) <- bar (bar_foo_id);
+
+DROP TABLE baz;
+DROP TABLE bar;
+DROP TABLE foo;
