@@ -892,21 +892,6 @@ ERROR:  foreign key join violation
 LINE 2: JOIN t2 FOR KEY (c3) -> u (c1);
                 ^
 DETAIL:  referenced relation does not preserve all rows
--- invalid, since referenced table has RLS enabled
-ALTER TABLE t1 ENABLE ROW LEVEL SECURITY;
-CREATE POLICY t1_policy ON t1 USING (false);
-SELECT * FROM (SELECT c1 FROM t1) AS u
-JOIN t2 FOR KEY (c3) -> u (c1);
-ERROR:  foreign key join violation
-LINE 2: JOIN t2 FOR KEY (c3) -> u (c1);
-                ^
-DETAIL:  referenced relation does not preserve all rows
-SELECT * FROM t1 JOIN t2 FOR KEY (c3) -> t1 (c1);
-ERROR:  foreign key join violation
-LINE 1: SELECT * FROM t1 JOIN t2 FOR KEY (c3) -> t1 (c1);
-                                 ^
-DETAIL:  referenced relation does not preserve all rows
-ALTER TABLE t1 DISABLE ROW LEVEL SECURITY;
 WITH q2 AS
 (
     SELECT * FROM t5 WHERE t5.c11 > 0
@@ -1382,3 +1367,76 @@ JOIN t2 FOR KEY (c3, c4) -> q (q1_c1, q1_c2);
      3 |    30 |  3 | 30
 (2 rows)
 
+DROP TABLE orders CASCADE;
+NOTICE:  drop cascades to view orders_by_country
+--
+-- The below query should raise the error "foreign key join violation",
+-- "referenced relation does not preserve uniqueness of keys", since
+-- even though there is a UNIQUE constraint on orders.shipment_id,
+-- the orders table doesn't preserve the uniqueness of its keys
+-- due to the join with order_items.
+--
+CREATE TABLE shipments
+(
+    id INTEGER PRIMARY KEY,
+    carrier TEXT NOT NULL
+);
+CREATE TABLE orders
+(
+    id INTEGER PRIMARY KEY,
+    shipment_id INTEGER UNIQUE NULL REFERENCES shipments(id)
+);
+CREATE TABLE order_items
+(
+    id INTEGER PRIMARY KEY,
+    order_id INTEGER NOT NULL REFERENCES orders(id)
+);
+CREATE TABLE packages
+(
+    id INTEGER PRIMARY KEY,
+    shipment_id INTEGER NOT NULL REFERENCES shipments(id)
+);
+INSERT INTO shipments (id, carrier) VALUES
+  (100, 'UPS'),
+  (200, 'FedEx');
+INSERT INTO orders (id, shipment_id) VALUES
+  (10, 100),
+  (20, NULL);
+INSERT INTO order_items (id, order_id) VALUES
+  (1000, 10),
+  (1001, 10);
+INSERT INTO packages (id, shipment_id) VALUES
+  (900, 100);
+SELECT
+    packages.id AS package_id,
+    q.order_id,
+    q.shipment_id,
+    q.order_item_id
+FROM
+(
+    SELECT
+        order_items.id AS order_item_id,
+        orders.id      AS order_id,
+        shipments.id   AS shipment_id
+    FROM order_items
+    JOIN orders FOR KEY (id) <- order_items (order_id)
+    RIGHT JOIN shipments FOR KEY (id) <- orders (shipment_id)
+) AS q JOIN packages FOR KEY (shipment_id) -> q (shipment_id);
+ERROR:  foreign key join violation
+LINE 15: ) AS q JOIN packages FOR KEY (shipment_id) -> q (shipment_id...
+                              ^
+DETAIL:  referenced relation does not preserve uniqueness of keys
+--
+-- TODO: RLS policy equivalence check
+-- Long-term ambition: If both the referencing and referenced sides of a
+-- foreign key join have equivalent RLS policies, any filtering due to RLS
+-- would not violate the foreign key join semantics. For now, RLS is ignored
+-- during FK join validation - filtering happens at execution time.
+--
+-- Example of what could be valid if policies are equivalent:
+-- CREATE POLICY referencing_policy ON referencing_table USING (tenant_id = current_tenant());
+-- CREATE POLICY referenced_policy ON referenced_table USING (tenant_id = current_tenant());
+-- SELECT * FROM referencing_table
+-- JOIN referenced_table FOR KEY (fk_col) -> referenced_table (pk_col);
+-- This would be safe because both tables filter by the same tenant_id condition.
+--

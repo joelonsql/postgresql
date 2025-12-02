@@ -62,6 +62,7 @@ static bool is_referencing_cols_unique(Oid referencing_relid, List *referencing_
 static bool is_referencing_cols_not_null(Oid referencing_relid, List *referencing_base_attnums);
 static List *update_uniqueness_preservation(List *referencing_uniqueness_preservation,
 											List *referenced_uniqueness_preservation,
+											RTEId *referencing_id,
 											bool fk_cols_unique);
 static List *update_functional_dependencies(List *referencing_fds,
 											RTEId *referencing_id,
@@ -113,6 +114,7 @@ transformAndValidateForeignKeyJoin(ParseState *pstate, JoinExpr *join,
 	bool		found_fd = false;
 	bool		referencing_found = false;
 	bool		referenced_found = false;
+	bool		referenced_is_base_table = false;
 
 	foreach(lc, l_namespace)
 	{
@@ -243,6 +245,25 @@ transformAndValidateForeignKeyJoin(ParseState *pstate, JoinExpr *join,
 
 	Assert(referencing_relid != InvalidOid && referenced_relid != InvalidOid);
 
+	/*
+	 * Check if referenced relation is a base table at same query level.
+	 * Base tables always preserve their own uniqueness and rows, so we can
+	 * skip the uniqueness/FD checks for them. These checks are only needed
+	 * for derived tables (subqueries, views, CTEs) where the preservation
+	 * properties may have been lost due to joins or filtering.
+	 */
+	if (referenced_rte->rtekind == RTE_RELATION && referenced_rte->relid != InvalidOid)
+	{
+		Relation	rel = table_open(referenced_rte->relid, AccessShareLock);
+
+		if (rel->rd_rel->relkind == RELKIND_RELATION ||
+			rel->rd_rel->relkind == RELKIND_PARTITIONED_TABLE)
+		{
+			referenced_is_base_table = true;
+		}
+		table_close(rel, AccessShareLock);
+	}
+
 	fkoid = find_foreign_key(referencing_relid, referenced_relid,
 							 referencing_base_attnums, referenced_base_attnums);
 
@@ -261,10 +282,17 @@ transformAndValidateForeignKeyJoin(ParseState *pstate, JoinExpr *join,
 				 parser_errposition(pstate, fkjn->location)));
 
 	analyze_join_tree(pstate, referencing_arg, NULL, referencing_rte->rteid, &referencing_uniqueness_preservation, &referencing_functional_dependencies, &referencing_found, fkjn->location, NULL);
-	analyze_join_tree(pstate, referenced_arg, NULL, referenced_rte->rteid, &referenced_uniqueness_preservation, &referenced_functional_dependencies, &referenced_found, fkjn->location, NULL);
 
-	/* Check uniqueness preservation */
-	if (!list_member(referenced_uniqueness_preservation, referenced_id))
+	/* Only analyze referenced side for derived tables - base tables always preserve uniqueness/rows */
+	if (!referenced_is_base_table)
+		analyze_join_tree(pstate, referenced_arg, NULL, referenced_rte->rteid, &referenced_uniqueness_preservation, &referenced_functional_dependencies, &referenced_found, fkjn->location, NULL);
+
+	/*
+	 * Check uniqueness preservation - only for derived tables.
+	 * Base tables always preserve their own uniqueness.
+	 */
+	if (!referenced_is_base_table &&
+		!list_member(referenced_uniqueness_preservation, referenced_id))
 	{
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_FOREIGN_KEY),
@@ -289,7 +317,11 @@ transformAndValidateForeignKeyJoin(ParseState *pstate, JoinExpr *join,
 		}
 	}
 
-	if (!found_fd)
+	/*
+	 * Check functional dependencies - only for derived tables.
+	 * Base tables always preserve all their rows.
+	 */
+	if (!referenced_is_base_table && !found_fd)
 	{
 		/*
 		 * This check ensures that the referenced relation is not filtered
@@ -379,22 +411,7 @@ analyze_join_tree(ParseState *pstate, Node *n,
 				referenced_rte = rt_fetch(fkjn->referencedVarno, rtable);
 
 				analyze_join_tree(pstate, referencing_arg, query, rte_id, &referencing_uniqueness_preservation, &referencing_functional_dependencies, &referencing_found, location, query_stack);
-				if (referencing_found || equal(referencing_rte->rteid, rte_id))
-				{
-					*found = true;
-					*uniqueness_preservation = referencing_uniqueness_preservation;
-					*functional_dependencies = referencing_functional_dependencies;
-					break;
-				}
-
 				analyze_join_tree(pstate, referenced_arg, query, rte_id, &referenced_uniqueness_preservation, &referenced_functional_dependencies, &referenced_found, location, query_stack);
-				if (referenced_found || equal(referenced_rte->rteid, rte_id))
-				{
-					*found = true;
-					*uniqueness_preservation = referenced_uniqueness_preservation;
-					*functional_dependencies = referenced_functional_dependencies;
-					break;
-				}
 
 				base_referencing_rte = drill_down_to_base_rel(pstate, referencing_rte,
 															  fkjn->referencingAttnums,
@@ -415,6 +432,7 @@ analyze_join_tree(ParseState *pstate, Node *n,
 				*uniqueness_preservation = update_uniqueness_preservation(
 																		  referencing_uniqueness_preservation,
 																		  referenced_uniqueness_preservation,
+																		  referencing_id,
 																		  fk_cols_unique
 					);
 				*functional_dependencies = update_functional_dependencies(
@@ -426,6 +444,13 @@ analyze_join_tree(ParseState *pstate, Node *n,
 																		  join->jointype,
 																		  fkjn->fkdir
 					);
+
+				/* Set found based on whether rte_id was in either subtree or matches either relation */
+				if (referencing_found || referenced_found ||
+					equal(referencing_rte->rteid, rte_id) || equal(referenced_rte->rteid, rte_id))
+				{
+					*found = true;
+				}
 
 			}
 			break;
@@ -461,14 +486,12 @@ analyze_join_tree(ParseState *pstate, Node *n,
 								*uniqueness_preservation = list_make1(rte->rteid);
 
 								/*
-								 * Check if filtered, either by RLS or
-								 * WHERE/OFFSET/LIMIT/HAVING
+								 * Check if filtered by WHERE/OFFSET/LIMIT/HAVING.
 								 */
-								if (!rel->rd_rel->relrowsecurity &&
-									(!query || (!query->jointree->quals &&
-												!query->limitOffset &&
-												!query->limitCount &&
-												!query->havingQual)))
+								if (!query || (!query->jointree->quals &&
+											   !query->limitOffset &&
+											   !query->limitCount &&
+											   !query->havingQual))
 									*functional_dependencies = list_make2(rte->rteid, rte->rteid);
 							}
 
@@ -1490,30 +1513,27 @@ is_referencing_cols_not_null(Oid referencing_relid, List *referencing_base_attnu
  * uniqueness of the foreign key columns.
  *
  * Uniqueness preservation is propagated from the referencing relation, and
- * if the foreign key columns form a unique key, then uniqueness preservation
+ * if both the foreign key columns form a unique key, and the referencing
+ * base table preserves uniqueness, then uniqueness preservation
  * from the referenced relation is also added.
  */
 static List *
 update_uniqueness_preservation(List *referencing_uniqueness_preservation,
 							   List *referenced_uniqueness_preservation,
+							   RTEId *referencing_id,
 							   bool fk_cols_unique)
 {
 	List	   *result = NIL;
+	bool		referencing_preserves_uniqueness;
 
 	/* Start with uniqueness preservation from the referencing relation */
 	if (referencing_uniqueness_preservation)
-	{
 		result = list_copy(referencing_uniqueness_preservation);
-	}
 
-	/*
-	 * If the foreign key columns form a unique key, we can also preserve
-	 * uniqueness from the referenced relation
-	 */
-	if (fk_cols_unique && referenced_uniqueness_preservation)
-	{
+	referencing_preserves_uniqueness = list_member(referencing_uniqueness_preservation, referencing_id);
+
+	if (fk_cols_unique && referencing_preserves_uniqueness && referenced_uniqueness_preservation)
 		result = list_concat(result, referenced_uniqueness_preservation);
-	}
 
 	return result;
 }
