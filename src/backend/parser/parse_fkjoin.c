@@ -79,6 +79,12 @@ static void analyze_join_tree(ParseState *pstate, Node *n,
 							  bool *found,
 							  int location,
 							  QueryStack *query_stack);
+static char *get_rte_alias(RangeTblEntry *rte);
+static char *get_table_path_from_rteid_recursive(List *rtable, List *cteList,
+												 RTEId *rteid, const char *prefix);
+static char *get_table_name_from_rteid(ParseState *pstate, RTEId *rteid);
+static char *format_uniqueness_preservation(ParseState *pstate, List *up);
+static char *format_functional_dependencies(ParseState *pstate, List *fds);
 
 void
 transformAndValidateForeignKeyJoin(ParseState *pstate, JoinExpr *join,
@@ -336,6 +342,65 @@ transformAndValidateForeignKeyJoin(ParseState *pstate, JoinExpr *join,
 				 errmsg("foreign key join violation"),
 				 errdetail("referenced relation does not preserve all rows"),
 				 parser_errposition(pstate, fkjn->location)));
+	}
+
+	/*
+	 * Emit DEBUG2 message showing U and F for the outermost FK join.
+	 * This is useful for testing and debugging FK join semantics.
+	 */
+	if (pstate->p_fkjoin_depth == 1)
+	{
+		RTEId	   *referencing_id = base_referencing_rte->rteid;
+		bool		fk_cols_unique;
+		bool		fk_cols_not_null;
+		List	   *result_up;
+		List	   *result_fds;
+		List	   *debug_referenced_up = referenced_uniqueness_preservation;
+		List	   *debug_referenced_fds = referenced_functional_dependencies;
+		bool		debug_found = false;
+
+		fk_cols_unique = is_referencing_cols_unique(referencing_relid, referencing_base_attnums);
+		fk_cols_not_null = is_referencing_cols_not_null(referencing_relid, referencing_base_attnums);
+
+		/*
+		 * For debug output, we need to analyze the actual referenced_arg
+		 * to get the full functional dependencies, including those from
+		 * nested FK joins. This differs from validation which only checks
+		 * if the base table is preserved.
+		 */
+		analyze_join_tree(pstate, referenced_arg, NULL, NULL,
+						  &debug_referenced_up, &debug_referenced_fds,
+						  &debug_found, fkjn->location, NULL);
+
+		/*
+		 * If no FDs were found (e.g., base table), set up defaults.
+		 */
+		if (debug_referenced_fds == NIL)
+		{
+			debug_referenced_up = list_make1(referenced_id);
+			debug_referenced_fds = list_make2(referenced_id, referenced_id);
+		}
+
+		result_up = update_uniqueness_preservation(
+			referencing_uniqueness_preservation,
+			debug_referenced_up,
+			referencing_id,
+			fk_cols_unique
+		);
+
+		result_fds = update_functional_dependencies(
+			referencing_functional_dependencies,
+			referencing_id,
+			debug_referenced_fds,
+			referenced_id,
+			fk_cols_not_null,
+			join->jointype,
+			fkjn->fkdir
+		);
+
+		elog(DEBUG2, "%s; %s",
+			 format_uniqueness_preservation(pstate, result_up),
+			 format_functional_dependencies(pstate, result_fds));
 	}
 
 	join->quals = build_fk_join_on_clause(pstate, referencing_rel->p_nscolumns, referencing_attnums, referenced_rel->p_nscolumns, referenced_attnums);
@@ -1715,4 +1780,237 @@ update_functional_dependencies(List *referencing_fds,
 	}
 
 	return result;
+}
+
+/*
+ * get_rte_alias
+ *		Extract the alias name from an RTE
+ *
+ * Returns the user-specified alias if available, otherwise the expanded
+ * reference name, otherwise the relation name.
+ */
+static char *
+get_rte_alias(RangeTblEntry *rte)
+{
+	if (rte->alias && rte->alias->aliasname)
+		return rte->alias->aliasname;
+	else if (rte->eref && rte->eref->aliasname)
+		return rte->eref->aliasname;
+	else if (rte->relid != InvalidOid)
+		return get_rel_name(rte->relid);
+	else
+		return "<unknown>";
+}
+
+/*
+ * get_table_path_from_rteid_recursive
+ *		Recursively search for an RTEId through derived tables
+ *
+ * Searches the given range table for an RTE with matching rteid.
+ * If the RTE is found, returns the table name with the given prefix.
+ * For RTE_SUBQUERY entries, recursively searches the subquery's range table.
+ * For RTE_CTE entries, looks up the CTE in cteList and searches its query.
+ * For views (RTE_RELATION with RELKIND_VIEW), expands and searches the view.
+ * Builds paths like "q.t1" or "q1.q2.t1".
+ *
+ * rtable: The range table to search
+ * cteList: List of CommonTableExpr for CTE lookups (may be NIL)
+ * prefix: The path prefix built so far (NULL for top-level)
+ * Returns: The full path to the table, or NULL if not found
+ */
+static char *
+get_table_path_from_rteid_recursive(List *rtable, List *cteList,
+									RTEId *rteid, const char *prefix)
+{
+	ListCell   *lc;
+
+	foreach(lc, rtable)
+	{
+		RangeTblEntry *rte = lfirst(lc);
+
+		/* Check if this RTE has matching rteid */
+		if (rte->rteid && equal(rte->rteid, rteid))
+		{
+			char	   *name = get_rte_alias(rte);
+
+			if (prefix)
+				return psprintf("%s.%s", prefix, name);
+			else
+				return name;
+		}
+
+		/* If it's a subquery, search recursively */
+		if (rte->rtekind == RTE_SUBQUERY && rte->subquery)
+		{
+			char	   *subquery_alias = get_rte_alias(rte);
+			char	   *new_prefix;
+			char	   *result;
+
+			if (prefix)
+				new_prefix = psprintf("%s.%s", prefix, subquery_alias);
+			else
+				new_prefix = subquery_alias;
+
+			result = get_table_path_from_rteid_recursive(rte->subquery->rtable,
+														 rte->subquery->cteList,
+														 rteid, new_prefix);
+			if (result)
+				return result;
+		}
+
+		/* If it's a CTE reference, look up the CTE and search its query */
+		if (rte->rtekind == RTE_CTE)
+		{
+			char	   *cte_alias = get_rte_alias(rte);
+			char	   *new_prefix;
+			ListCell   *lc2;
+
+			if (prefix)
+				new_prefix = psprintf("%s.%s", prefix, cte_alias);
+			else
+				new_prefix = cte_alias;
+
+			/* Find the CTE definition in cteList */
+			foreach(lc2, cteList)
+			{
+				CommonTableExpr *cte = (CommonTableExpr *) lfirst(lc2);
+
+				if (strcmp(cte->ctename, rte->ctename) == 0)
+				{
+					Query	   *ctequery = castNode(Query, cte->ctequery);
+					char	   *result;
+
+					result = get_table_path_from_rteid_recursive(ctequery->rtable,
+																 ctequery->cteList,
+																 rteid, new_prefix);
+					if (result)
+						return result;
+					break;
+				}
+			}
+		}
+
+		/* If it's a view, expand it and search its query */
+		if (rte->rtekind == RTE_RELATION && rte->relid != InvalidOid)
+		{
+			Relation	rel;
+			char		relkind;
+
+			rel = table_open(rte->relid, AccessShareLock);
+			relkind = rel->rd_rel->relkind;
+
+			if (relkind == RELKIND_VIEW)
+			{
+				Query	   *viewquery = get_view_query(rel);
+				char	   *view_alias = get_rte_alias(rte);
+				char	   *new_prefix;
+				char	   *result;
+
+				if (prefix)
+					new_prefix = psprintf("%s.%s", prefix, view_alias);
+				else
+					new_prefix = view_alias;
+
+				result = get_table_path_from_rteid_recursive(viewquery->rtable,
+															 viewquery->cteList,
+															 rteid, new_prefix);
+				table_close(rel, AccessShareLock);
+
+				if (result)
+					return result;
+			}
+			else
+			{
+				table_close(rel, AccessShareLock);
+			}
+		}
+	}
+
+	return NULL;	/* Not found in this range table */
+}
+
+/*
+ * get_table_name_from_rteid
+ *		Get the full path to a table from an RTEId
+ *
+ * Recursively searches through the parse state's range table, subqueries,
+ * and CTEs to find the RTE with matching rteid. Returns the full path
+ * including subquery/CTE prefixes (e.g., "q.t1" or "q1.q2.t1").
+ * Top-level tables have no prefix.
+ */
+static char *
+get_table_name_from_rteid(ParseState *pstate, RTEId *rteid)
+{
+	char	   *result;
+
+	result = get_table_path_from_rteid_recursive(pstate->p_rtable,
+												 pstate->p_ctenamespace,
+												 rteid, NULL);
+	if (result)
+		return result;
+
+	return "<not found>";
+}
+
+/*
+ * format_uniqueness_preservation
+ *		Format the uniqueness preservation set for debug output
+ *
+ * Returns a string in the format: U={name1, name2, ...}
+ */
+static char *
+format_uniqueness_preservation(ParseState *pstate, List *up)
+{
+	StringInfoData str;
+	ListCell   *lc;
+	bool		first = true;
+
+	initStringInfo(&str);
+	appendStringInfoString(&str, "U={");
+
+	foreach(lc, up)
+	{
+		RTEId	   *rteid = lfirst(lc);
+		char	   *name = get_table_name_from_rteid(pstate, rteid);
+
+		if (!first)
+			appendStringInfoString(&str, ", ");
+		appendStringInfoString(&str, name);
+		first = false;
+	}
+
+	appendStringInfoChar(&str, '}');
+	return str.data;
+}
+
+/*
+ * format_functional_dependencies
+ *		Format the functional dependencies set for debug output
+ *
+ * Returns a string in the format: F={(det1,dep1), (det2,dep2), ...}
+ */
+static char *
+format_functional_dependencies(ParseState *pstate, List *fds)
+{
+	StringInfoData str;
+	bool		first = true;
+
+	initStringInfo(&str);
+	appendStringInfoString(&str, "F={");
+
+	for (int i = 0; i < list_length(fds); i += 2)
+	{
+		RTEId	   *det = list_nth(fds, i);
+		RTEId	   *dep = list_nth(fds, i + 1);
+		char	   *det_name = get_table_name_from_rteid(pstate, det);
+		char	   *dep_name = get_table_name_from_rteid(pstate, dep);
+
+		if (!first)
+			appendStringInfoString(&str, ", ");
+		appendStringInfo(&str, "(%s,%s)", det_name, dep_name);
+		first = false;
+	}
+
+	appendStringInfoChar(&str, '}');
+	return str.data;
 }

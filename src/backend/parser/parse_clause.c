@@ -1172,6 +1172,10 @@ transformFromClauseItem(ParseState *pstate, Node *n,
 		int			sv_namespace_length;
 		int			k;
 
+		/* Track FK join nesting depth for debug output */
+		if (j->fkJoin)
+			pstate->p_fkjoin_depth++;
+
 		/*
 		 * Recursively process the left subtree, then the right.  We must do
 		 * it in this order for correct visibility of LATERAL references.
@@ -1633,6 +1637,10 @@ transformFromClauseItem(ParseState *pstate, Node *n,
 
 		*top_nsitem = nsitem;
 		*namespace = lappend(my_namespace, nsitem);
+
+		/* Decrement FK join depth if we incremented it */
+		if (j->fkJoin)
+			pstate->p_fkjoin_depth--;
 
 		return (Node *) j;
 	}
