@@ -421,6 +421,8 @@ CatalogIdMapEntry
 CatalogIndexState
 ChangeVarNodes_callback
 ChangeVarNodes_context
+ChannelListeners
+ChannelHashKey
 CheckPoint
 CheckPointStmt
 CheckpointStatsData
@@ -1579,6 +1581,7 @@ ListParsedLex
 ListenAction
 ListenActionKind
 ListenStmt
+ListenerEntry
 LoInfo
 LoadStmt
 LocalBufferLookupEnt
