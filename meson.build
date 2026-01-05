@@ -178,8 +178,8 @@ mod_link_args_fmt = []
 memset_loop_limit = 1024
 
 # Choice of shared memory and semaphore implementation
-shmem_kind = 'sysv'
-sema_kind = 'sysv'
+shmem_kind = 'mmap'
+sema_kind = 'unnamed_posix'
 
 # We implement support for some operating systems by pretending they're
 # another. Map here, before determining system properties below
@@ -2965,11 +2965,15 @@ if cc.has_function('syslog', args: test_c_args) and \
 endif
 
 
-# if prerequisites for unnamed posix semas aren't fulfilled, fall back to sysv
-# semaphores
+# Require POSIX semaphores on non-Windows platforms
 if sema_kind == 'unnamed_posix' and \
    not func_check_results.get('sem_init', false)
-  sema_kind = 'sysv'
+  error('POSIX semaphores (sem_init) are required but not available on this platform')
+endif
+
+# Require shm_open for POSIX shared memory support (used in EXEC_BACKEND mode)
+if host_system != 'windows' and not func_check_results.get('shm_open', false)
+  warning('shm_open not available; EXEC_BACKEND mode will not work')
 endif
 
 cdata.set('USE_@0@_SHARED_MEMORY'.format(shmem_kind.to_upper()), 1)

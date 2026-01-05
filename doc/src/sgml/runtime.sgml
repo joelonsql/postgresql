@@ -580,41 +580,18 @@ FATAL:  could not create any TCP/IP sockets
     <para>
      A message like:
 <screen>
-FATAL:  could not create shared memory segment: Invalid argument
-DETAIL:  Failed system call was shmget(key=5440001, size=4011376640, 03600).
+FATAL:  could not map anonymous shared memory: Cannot allocate memory
 </screen>
-     probably means your kernel's limit on the size of shared memory is
-     smaller than the work area <productname>PostgreSQL</productname>
-     is trying to create (4011376640 bytes in this example).
-     This is only likely to happen if you have set <literal>shared_memory_type</literal>
-     to <literal>sysv</literal>.  In that case, you
-     can try starting the server with a smaller-than-normal number of
-     buffers (<xref linkend="guc-shared-buffers"/>), or
-     reconfigure your kernel to increase the allowed shared memory
-     size. You might also see this message when trying to start multiple
-     servers on the same machine, if their total space requested
-     exceeds the kernel limit.
+     probably means your system's memory limits are too small for
+     <productname>PostgreSQL</productname>'s shared memory requirements.
+     You can try starting the server with a smaller-than-normal number of
+     buffers (<xref linkend="guc-shared-buffers"/>), or increase available
+     system memory.
     </para>
 
     <para>
-     An error like:
-<screen>
-FATAL:  could not create semaphores: No space left on device
-DETAIL:  Failed system call was semget(5440126, 17, 03600).
-</screen>
-     does <emphasis>not</emphasis> mean you've run out of disk
-     space. It means your kernel's limit on the number of <systemitem
-     class="osname">System V</systemitem> semaphores is smaller than the number
-     <productname>PostgreSQL</productname> wants to create. As above,
-     you might be able to work around the problem by starting the
-     server with a reduced number of allowed connections
-     (<xref linkend="guc-max-connections"/>), but you'll eventually want to
-     increase the kernel limit.
-    </para>
-
-    <para>
-     Details about configuring <systemitem class="osname">System V</systemitem>
-     <acronym>IPC</acronym> facilities are given in <xref linkend="sysvipc"/>.
+     For more details about shared memory and semaphores, see
+     <xref linkend="sysvipc"/>.
     </para>
    </sect2>
 
@@ -698,432 +675,41 @@ psql: error: connection to server on socket "/tmp/.s.PGSQL.5432" failed: No such
    <para>
     <productname>PostgreSQL</productname> requires the operating system to provide
     inter-process communication (<acronym>IPC</acronym>) features, specifically
-    shared memory and semaphores.  Unix-derived systems typically provide
-    <quote><systemitem class="osname">System V</systemitem></quote> <acronym>IPC</acronym>,
-    <quote><systemitem class="osname">POSIX</systemitem></quote> <acronym>IPC</acronym>, or both.
+    shared memory and semaphores.  On Unix-like systems,
+    <productname>PostgreSQL</productname> uses POSIX shared memory and semaphores.
     <systemitem class="osname">Windows</systemitem> has its own implementation of
     these features and is not discussed here.
    </para>
 
    <para>
-    By default, <productname>PostgreSQL</productname> allocates
-    a very small amount of System V shared memory, as well as a much larger
-    amount of anonymous <function>mmap</function> shared memory.
-    Alternatively, a single large System V shared memory region can be used
-    (see <xref linkend="guc-shared-memory-type"/>).
-
-    In addition a significant number of semaphores, which can be either
-    System V or POSIX style, are created at server startup.  Currently,
-    POSIX semaphores are used on Linux and FreeBSD systems while other
-    platforms use System V semaphores.
+    By default, <productname>PostgreSQL</productname> allocates shared memory
+    using anonymous <function>mmap</function>.  This approach avoids traditional
+    kernel limits on shared memory size.  POSIX semaphores are used for
+    inter-process synchronization on all supported platforms.
    </para>
 
    <para>
-    System V <acronym>IPC</acronym> features are typically constrained by
-    system-wide allocation limits.
-    When <productname>PostgreSQL</productname> exceeds one of these limits,
-    the server will refuse to start and
-    should leave an instructive error message describing the problem
-    and what to do about it. (See also <xref
-    linkend="server-start-failures"/>.) The relevant kernel
-    parameters are named consistently across different systems; <xref
-    linkend="sysvipc-parameters"/> gives an overview. The methods to set
-    them, however, vary. Suggestions for some platforms are given below.
-   </para>
-
-   <table id="sysvipc-parameters">
-    <title><systemitem class="osname">System V</systemitem> <acronym>IPC</acronym> Parameters</title>
-
-    <tgroup cols="3">
-     <colspec colname="col1" colwidth="1*"/>
-     <colspec colname="col2" colwidth="3*"/>
-     <colspec colname="col3" colwidth="3*"/>
-     <thead>
-      <row>
-       <entry>Name</entry>
-       <entry>Description</entry>
-       <entry>Values needed to run one <productname>PostgreSQL</productname> instance</entry>
-      </row>
-     </thead>
-
-     <tbody>
-      <row>
-       <entry><varname>SHMMAX</varname></entry>
-       <entry>Maximum size of shared memory segment (bytes)</entry>
-       <entry>at least 1kB, but the default is usually much higher</entry>
-      </row>
-
-      <row>
-       <entry><varname>SHMMIN</varname></entry>
-       <entry>Minimum size of shared memory segment (bytes)</entry>
-       <entry>1</entry>
-      </row>
-
-      <row>
-       <entry><varname>SHMALL</varname></entry>
-       <entry>Total amount of shared memory available (bytes or pages)</entry>
-       <entry>same as <varname>SHMMAX</varname> if bytes,
-        or <literal>ceil(SHMMAX/PAGE_SIZE)</literal> if pages,
-        plus room for other applications</entry>
-      </row>
-
-      <row>
-       <entry><varname>SHMSEG</varname></entry>
-       <entry>Maximum number of shared memory segments per process</entry>
-       <entry>only 1 segment is needed, but the default is much higher</entry>
-      </row>
-
-       <row>
-        <entry><varname>SHMMNI</varname></entry>
-        <entry>Maximum number of shared memory segments system-wide</entry>
-        <entry>like <varname>SHMSEG</varname> plus room for other applications</entry>
-       </row>
-
-       <row>
-        <entry><varname>SEMMNI</varname></entry>
-        <entry>Maximum number of semaphore identifiers (i.e., sets)</entry>
-        <entry>at least <literal>ceil(num_os_semaphores / 16)</literal> plus room for other applications</entry>
-       </row>
-
-       <row>
-        <entry><varname>SEMMNS</varname></entry>
-        <entry>Maximum number of semaphores system-wide</entry>
-        <entry><literal>ceil(num_os_semaphores / 16) * 17</literal> plus room for other applications</entry>
-       </row>
-
-       <row>
-        <entry><varname>SEMMSL</varname></entry>
-        <entry>Maximum number of semaphores per set</entry>
-        <entry>at least 17</entry>
-       </row>
-
-       <row>
-        <entry><varname>SEMMAP</varname></entry>
-        <entry>Number of entries in semaphore map</entry>
-        <entry>see text</entry>
-       </row>
-
-       <row>
-        <entry><varname>SEMVMX</varname></entry>
-        <entry>Maximum value of semaphore</entry>
-        <entry>at least 1000 (The default is often 32767; do not change unless necessary)</entry>
-       </row>
-
-     </tbody>
-    </tgroup>
-   </table>
-
-   <para>
-    <productname>PostgreSQL</productname> requires a few bytes of System V shared memory
-    (typically 48 bytes, on 64-bit platforms) for each copy of the server.
-    On most modern operating systems, this amount can easily be allocated.
-    However, if you are running many copies of the server or you explicitly
-    configure the server to use large amounts of System V shared memory (see
-    <xref linkend="guc-shared-memory-type"/> and <xref
-    linkend="guc-dynamic-shared-memory-type"/>), it may be necessary to
-    increase <varname>SHMALL</varname>, which is the total amount of System V shared
-    memory system-wide.  Note that <varname>SHMALL</varname> is measured in pages
-    rather than bytes on many systems.
-   </para>
-
-   <para>
-    Less likely to cause problems is the minimum size for shared
-    memory segments (<varname>SHMMIN</varname>), which should be at most
-    approximately 32 bytes for <productname>PostgreSQL</productname> (it is
-    usually just 1). The maximum number of segments system-wide
-    (<varname>SHMMNI</varname>) or per-process (<varname>SHMSEG</varname>) are unlikely
-    to cause a problem unless your system has them set to zero.
-   </para>
-
-   <para>
-    When using System V semaphores,
     <productname>PostgreSQL</productname> uses one semaphore per allowed connection
     (<xref linkend="guc-max-connections"/>), allowed autovacuum worker process
     (<xref linkend="guc-autovacuum-worker-slots"/>), allowed WAL sender process
     (<xref linkend="guc-max-wal-senders"/>), allowed background
-    process (<xref linkend="guc-max-worker-processes"/>), etc., in sets of 16.
+    process (<xref linkend="guc-max-worker-processes"/>), etc.
     The runtime-computed parameter <xref linkend="guc-num-os-semaphores"/>
     reports the number of semaphores required.  This parameter can be viewed
     before starting the server with a <command>postgres</command> command like:
 <programlisting>
 $ <userinput>postgres -D $PGDATA -C num_os_semaphores</userinput>
 </programlisting>
+    On modern platforms, there is typically no specific kernel limit on the
+    number of POSIX semaphores.
    </para>
 
    <para>
-    Each set of 16 semaphores will
-    also contain a 17th semaphore which contains a <quote>magic
-    number</quote>, to detect collision with semaphore sets used by
-    other applications. The maximum number of semaphores in the system
-    is set by <varname>SEMMNS</varname>, which consequently must be at least
-    as high as <literal>num_os_semaphores</literal> plus one extra for
-    each set of 16 required semaphores (see the formula in <xref
-    linkend="sysvipc-parameters"/>).  The parameter <varname>SEMMNI</varname>
-    determines the limit on the number of semaphore sets that can
-    exist on the system at one time.  Hence this parameter must be at
-    least <literal>ceil(num_os_semaphores / 16)</literal>.
-    Lowering the number
-    of allowed connections is a temporary workaround for failures,
-    which are usually confusingly worded <quote>No space
-    left on device</quote>, from the function <function>semget</function>.
+    If the server fails to start due to insufficient shared memory, you may
+    need to increase the available system memory or reduce
+    <productname>PostgreSQL</productname>'s memory requirements by lowering
+    <xref linkend="guc-shared-buffers"/> or <xref linkend="guc-max-connections"/>.
    </para>
-
-   <para>
-    In some cases it might also be necessary to increase
-    <varname>SEMMAP</varname> to be at least on the order of
-    <varname>SEMMNS</varname>.  If the system has this parameter
-    (many do not), it defines the size of the semaphore
-    resource map, in which each contiguous block of available semaphores
-    needs an entry. When a semaphore set is freed it is either added to
-    an existing entry that is adjacent to the freed block or it is
-    registered under a new map entry. If the map is full, the freed
-    semaphores get lost (until reboot). Fragmentation of the semaphore
-    space could over time lead to fewer available semaphores than there
-    should be.
-   </para>
-
-   <para>
-    Various other settings related to <quote>semaphore undo</quote>, such as
-    <varname>SEMMNU</varname> and <varname>SEMUME</varname>, do not affect
-    <productname>PostgreSQL</productname>.
-   </para>
-
-   <para>
-    When using POSIX semaphores, the number of semaphores needed is the
-    same as for System V, that is one semaphore per allowed connection
-    (<xref linkend="guc-max-connections"/>), allowed autovacuum worker process
-    (<xref linkend="guc-autovacuum-worker-slots"/>), allowed WAL sender process
-    (<xref linkend="guc-max-wal-senders"/>), allowed background
-    process (<xref linkend="guc-max-worker-processes"/>), etc.
-    On the platforms where this option is preferred, there is no specific
-    kernel limit on the number of POSIX semaphores.
-   </para>
-
-
-    <variablelist>
-     <varlistentry>
-      <term><systemitem class="osname">FreeBSD</systemitem>
-      <indexterm><primary>FreeBSD</primary><secondary>IPC configuration</secondary></indexterm>
-      </term>
-      <listitem>
-       <para>
-        The default shared memory settings are usually good enough, unless
-        you have set <literal>shared_memory_type</literal> to <literal>sysv</literal>.
-        System V semaphores are not used on this platform.
-       </para>
-
-       <para>
-        The default IPC settings can be changed using
-        the <command>sysctl</command> or
-        <command>loader</command> interfaces.  The following
-        parameters can be set using <command>sysctl</command>:
-<screen>
-<prompt>#</prompt> <userinput>sysctl kern.ipc.shmall=32768</userinput>
-<prompt>#</prompt> <userinput>sysctl kern.ipc.shmmax=134217728</userinput>
-</screen>
-        To make these settings persist over reboots, modify
-        <filename>/etc/sysctl.conf</filename>.
-       </para>
-
-       <para>
-        If you have set <literal>shared_memory_type</literal> to
-        <literal>sysv</literal>, you might also want to configure your kernel
-        to lock System V shared memory into RAM and prevent it from being paged
-        out to swap.  This can be accomplished using the <command>sysctl</command>
-        setting <literal>kern.ipc.shm_use_phys</literal>.
-       </para>
-
-       <para>
-        If running in a FreeBSD jail, you should set its
-        <literal>sysvshm</literal> parameter to <literal>new</literal>, so that
-        it has its own separate System V shared memory namespace.
-        (Before FreeBSD 11.0, it was necessary to enable shared access to
-        the host's IPC namespace from jails, and take measures to avoid
-        collisions.)
-       </para>
-
-      </listitem>
-     </varlistentry>
-
-     <varlistentry>
-      <term><systemitem class="osname">NetBSD</systemitem>
-      <indexterm><primary>NetBSD</primary><secondary>IPC configuration</secondary></indexterm>
-      </term>
-      <listitem>
-       <para>
-        The default shared memory settings are usually good enough, unless
-        you have set <literal>shared_memory_type</literal> to <literal>sysv</literal>.
-        However, you will need to increase <literal>kern.ipc.semmni</literal>
-        and <literal>kern.ipc.semmns</literal>,
-        as <systemitem class="osname">NetBSD</systemitem>'s default settings
-        for these are unworkably small.
-       </para>
-
-       <para>
-        IPC parameters can be adjusted using <command>sysctl</command>,
-        for example:
-<screen>
-<prompt>#</prompt> <userinput>sysctl -w kern.ipc.semmni=100</userinput>
-</screen>
-        To make these settings persist over reboots, modify
-        <filename>/etc/sysctl.conf</filename>.
-       </para>
-
-       <para>
-        If you have set <literal>shared_memory_type</literal> to
-        <literal>sysv</literal>, you might also want to configure your kernel
-        to lock System V shared memory into RAM and prevent it from being paged
-        out to swap.  This can be accomplished using the <command>sysctl</command>
-        setting <literal>kern.ipc.shm_use_phys</literal>.
-       </para>
-      </listitem>
-     </varlistentry>
-
-     <varlistentry>
-      <term><systemitem class="osname">OpenBSD</systemitem>
-      <indexterm><primary>OpenBSD</primary><secondary>IPC configuration</secondary></indexterm>
-      </term>
-      <listitem>
-       <para>
-        The default shared memory settings are usually good enough, unless
-        you have set <literal>shared_memory_type</literal> to <literal>sysv</literal>.
-        However, you will need to
-        increase <literal>kern.seminfo.semmni</literal>
-        and <literal>kern.seminfo.semmns</literal>,
-        as <systemitem class="osname">OpenBSD</systemitem>'s default settings
-        for these are unworkably small.
-       </para>
-
-       <para>
-        IPC parameters can be adjusted using <command>sysctl</command>,
-        for example:
-<screen>
-<prompt>#</prompt> <userinput>sysctl kern.seminfo.semmni=100</userinput>
-</screen>
-        To make these settings persist over reboots, modify
-        <filename>/etc/sysctl.conf</filename>.
-       </para>
-
-      </listitem>
-     </varlistentry>
-
-     <varlistentry>
-      <term><systemitem class="osname">Linux</systemitem>
-      <indexterm><primary>Linux</primary><secondary>IPC configuration</secondary></indexterm>
-      </term>
-      <listitem>
-       <para>
-        The default shared memory settings are usually good enough, unless
-        you have set <literal>shared_memory_type</literal> to <literal>sysv</literal>,
-        and even then only on older kernel versions that shipped with low defaults.
-        System V semaphores are not used on this platform.
-       </para>
-
-       <para>
-        The shared memory size settings can be changed via the
-        <command>sysctl</command> interface.  For example, to allow 16 GB:
-<screen>
-<prompt>$</prompt> <userinput>sysctl -w kernel.shmmax=17179869184</userinput>
-<prompt>$</prompt> <userinput>sysctl -w kernel.shmall=4194304</userinput>
-</screen>
-        To make these settings persist over reboots, see
-        <filename>/etc/sysctl.conf</filename>.
-       </para>
-
-      </listitem>
-     </varlistentry>
-
-
-     <varlistentry>
-      <term><systemitem class="osname">macOS</systemitem>
-      <indexterm><primary>macOS</primary><secondary>IPC configuration</secondary></indexterm>
-      </term>
-      <listitem>
-       <para>
-        The default shared memory and semaphore settings are usually good enough, unless
-        you have set <literal>shared_memory_type</literal> to <literal>sysv</literal>.
-       </para>
-       <para>
-        The recommended method for configuring shared memory in macOS
-        is to create a file named <filename>/etc/sysctl.conf</filename>,
-        containing variable assignments such as:
-<programlisting>
-kern.sysv.shmmax=4194304
-kern.sysv.shmmin=1
-kern.sysv.shmmni=32
-kern.sysv.shmseg=8
-kern.sysv.shmall=1024
-</programlisting>
-        Note that in some macOS versions,
-        <emphasis>all five</emphasis> shared-memory parameters must be set in
-        <filename>/etc/sysctl.conf</filename>, else the values will be ignored.
-       </para>
-
-       <para>
-        <varname>SHMMAX</varname> can only be set to a multiple of 4096.
-       </para>
-
-       <para>
-        <varname>SHMALL</varname> is measured in 4 kB pages on this platform.
-       </para>
-
-       <para>
-        It is possible to change all but <varname>SHMMNI</varname> on the fly, using
-        <application>sysctl</application>.  But it's still best to set up your preferred
-        values via <filename>/etc/sysctl.conf</filename>, so that the values will be
-        kept across reboots.
-       </para>
-
-      </listitem>
-     </varlistentry>
-
-     <varlistentry>
-      <term><systemitem class="osname">Solaris</systemitem></term>
-      <term><systemitem class="osname">illumos</systemitem></term>
-      <listitem>
-       <para>
-        The default shared memory and semaphore settings are usually good enough for most
-        <productname>PostgreSQL</productname> applications.  Solaris defaults
-        to a <varname>SHMMAX</varname> of one-quarter of system <acronym>RAM</acronym>.
-        To further adjust this setting, use a project setting associated
-        with the <literal>postgres</literal> user.  For example, run the
-        following as <literal>root</literal>:
-<programlisting>
-projadd -c "PostgreSQL DB User" -K "project.max-shm-memory=(privileged,8GB,deny)" -U postgres -G postgres user.postgres
-</programlisting>
-       </para>
-
-       <para>
-        This command adds the <literal>user.postgres</literal> project and
-        sets the shared memory maximum for the <literal>postgres</literal>
-        user to 8GB, and takes effect the next time that user logs
-        in, or when you restart <productname>PostgreSQL</productname> (not reload).
-        The above assumes that <productname>PostgreSQL</productname> is run by
-        the <literal>postgres</literal> user in the <literal>postgres</literal>
-        group.  No server reboot is required.
-       </para>
-
-       <para>
-        Other recommended kernel setting changes for database servers which will
-        have a large number of connections are:
-<programlisting>
-project.max-shm-ids=(priv,32768,deny)
-project.max-sem-ids=(priv,4096,deny)
-project.max-msg-ids=(priv,4096,deny)
-</programlisting>
-       </para>
-
-       <para>
-        Additionally, if you are running <productname>PostgreSQL</productname>
-        inside a zone, you may need to raise the zone resource usage
-        limits as well.  See "Chapter2:  Projects and Tasks" in the
-        <citetitle>System Administrator's Guide</citetitle> for more
-        information on <literal>projects</literal> and <command>prctl</command>.
-       </para>
-      </listitem>
-     </varlistentry>
-
-    </variablelist>
 
   </sect2>
 

@@ -2268,9 +2268,7 @@ if test "$PORTNAME" != "win32"; then
       SEMA_IMPLEMENTATION="src/backend/port/posix_sema.c"
       sematype="unnamed POSIX"
     else
-      AC_DEFINE(USE_SYSV_SEMAPHORES, 1, [Define to select SysV-style semaphores.])
-      SEMA_IMPLEMENTATION="src/backend/port/sysv_sema.c"
-      sematype="System V"
+      AC_MSG_ERROR([POSIX semaphores are required but not available on this platform])
     fi
   fi
   AC_MSG_RESULT([$sematype])
@@ -2282,8 +2280,8 @@ fi
 
 # Select shared-memory implementation type.
 if test "$PORTNAME" != "win32"; then
-  AC_DEFINE(USE_SYSV_SHARED_MEMORY, 1, [Define to select SysV-style shared memory.])
-  SHMEM_IMPLEMENTATION="src/backend/port/sysv_shmem.c"
+  AC_DEFINE(USE_MMAP_SHARED_MEMORY, 1, [Define to select POSIX/mmap-style shared memory.])
+  SHMEM_IMPLEMENTATION="src/backend/port/posix_shmem.c"
 else
   AC_DEFINE(USE_WIN32_SHARED_MEMORY, 1, [Define to select Win32-style shared memory.])
   SHMEM_IMPLEMENTATION="src/backend/port/win32_shmem.c"

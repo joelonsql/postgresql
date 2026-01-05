@@ -15,7 +15,6 @@
 
 /* Dynamic shared memory implementations. */
 #define DSM_IMPL_POSIX			1
-#define DSM_IMPL_SYSV			2
 #define DSM_IMPL_WINDOWS		3
 #define DSM_IMPL_MMAP			4
 
@@ -30,10 +29,9 @@
 #ifdef HAVE_SHM_OPEN
 #define USE_DSM_POSIX
 #define DEFAULT_DYNAMIC_SHARED_MEMORY_TYPE		DSM_IMPL_POSIX
-#endif
-#define USE_DSM_SYSV
-#ifndef DEFAULT_DYNAMIC_SHARED_MEMORY_TYPE
-#define DEFAULT_DYNAMIC_SHARED_MEMORY_TYPE		DSM_IMPL_SYSV
+#else
+/* mmap is the fallback if POSIX shm_open is not available */
+#define DEFAULT_DYNAMIC_SHARED_MEMORY_TYPE		DSM_IMPL_MMAP
 #endif
 #define USE_DSM_MMAP
 #endif

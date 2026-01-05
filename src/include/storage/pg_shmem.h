@@ -3,15 +3,12 @@
  * pg_shmem.h
  *	  Platform-independent API for shared memory support.
  *
- * Every port is expected to support shared memory with approximately
- * SysV-ish semantics; in particular, a memory block is not anonymous
- * but has an ID, and we must be able to tell whether there are any
- * remaining processes attached to a block of a specified ID.
+ * Every port is expected to support shared memory.  On Unix-like systems,
+ * we use either anonymous mmap (non-EXEC_BACKEND) or POSIX shared memory
+ * via shm_open (EXEC_BACKEND).  Windows has its own implementation.
  *
- * To simplify life for the SysV implementation, the ID is assumed to
- * consist of two unsigned long values (these are key and ID in SysV
- * terms).  Other platforms may ignore the second value if they need
- * only one ID number.
+ * The ID parameters to PGSharedMemoryIsInUse are retained for API
+ * compatibility but may be unused on some platforms.
  *
  *
  * Portions Copyright (c) 1996-2025, PostgreSQL Global Development Group
@@ -60,7 +57,6 @@ typedef enum
 typedef enum
 {
 	SHMEM_TYPE_WINDOWS,
-	SHMEM_TYPE_SYSV,
 	SHMEM_TYPE_MMAP,
 }			PGShmemType;
 
@@ -72,10 +68,8 @@ extern PGDLLIMPORT void *ShmemProtectiveRegion;
 #endif
 extern PGDLLIMPORT void *UsedShmemSegAddr;
 
-#if !defined(WIN32) && !defined(EXEC_BACKEND)
+#ifndef WIN32
 #define DEFAULT_SHARED_MEMORY_TYPE SHMEM_TYPE_MMAP
-#elif !defined(WIN32)
-#define DEFAULT_SHARED_MEMORY_TYPE SHMEM_TYPE_SYSV
 #else
 #define DEFAULT_SHARED_MEMORY_TYPE SHMEM_TYPE_WINDOWS
 #endif
