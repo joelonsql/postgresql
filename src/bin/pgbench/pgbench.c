@@ -627,6 +627,7 @@ typedef struct
 	pg_time_usec_t sleep_until; /* scheduled start time of next cmd */
 	pg_time_usec_t txn_begin;	/* used for measuring schedule lag times */
 	pg_time_usec_t stmt_begin;	/* used for measuring statement latencies */
+	pg_time_usec_t socket_ready_time;	/* when socket became readable */
 
 	/* whether client prepared each command of each script */
 	bool	  **prepared;
@@ -4046,8 +4047,7 @@ advanceConnectionState(TState *thread, CState *st, StatsData *agg)
 						/* Async path: record begin time for later stats */
 						if (report_per_command)
 						{
-							pg_time_now_lazy(&now);
-							st->stmt_begin = now;
+							st->stmt_begin = pg_time_now();
 						}
 
 						if (!sendCommand(st, command))
@@ -4256,12 +4256,26 @@ advanceConnectionState(TState *thread, CState *st, StatsData *agg)
 				 */
 				if (report_per_command && st->stmt_begin != 0)
 				{
-					pg_time_now_lazy(&now);
+					pg_time_usec_t end_time;
+
+					/*
+					 * Use socket_ready_time if captured (async path), which
+					 * reflects when the socket became readable rather than
+					 * when we got around to processing it.  Fall back to
+					 * getting a fresh timestamp.
+					 */
+					if (st->socket_ready_time != 0)
+						end_time = st->socket_ready_time;
+					else
+						end_time = pg_time_now();
 
 					command = sql_script[st->use_file].commands[st->command];
 					/* XXX could use a mutex here, but we choose not to */
 					addToSimpleStats(&command->stats,
-									 PG_TIME_GET_DOUBLE(now - st->stmt_begin));
+									 PG_TIME_GET_DOUBLE(end_time - st->stmt_begin));
+
+					/* Reset for next command */
+					st->socket_ready_time = 0;
 				}
 
 				/* Go ahead with next command, to be executed or skipped */
@@ -7897,6 +7911,9 @@ threadRun(void *arg)
 
 				if (!socket_has_input(sockets, sock, nsocks++))
 					continue;
+
+				/* Capture timestamp when socket becomes readable */
+				st->socket_ready_time = pg_time_now();
 			}
 			else if (st->state == CSTATE_FINISHED ||
 					 st->state == CSTATE_ABORTED)
