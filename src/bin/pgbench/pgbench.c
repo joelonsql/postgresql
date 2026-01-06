@@ -3162,6 +3162,8 @@ sendCommand(CState *st, Command *command)
 		sql = assignVariables(&st->variables, sql);
 
 		pg_log_debug("client %d sending %s", st->id, sql);
+		if (report_per_command)
+			st->stmt_begin = pg_time_now();
 		r = PQsendQuery(st->con, sql);
 		free(sql);
 	}
@@ -3173,6 +3175,8 @@ sendCommand(CState *st, Command *command)
 		getQueryParams(&st->variables, command, params);
 
 		pg_log_debug("client %d sending %s", st->id, sql);
+		if (report_per_command)
+			st->stmt_begin = pg_time_now();
 		r = PQsendQueryParams(st->con, sql, command->argc - 1,
 							  NULL, params, NULL, NULL, 0);
 	}
@@ -3184,6 +3188,8 @@ sendCommand(CState *st, Command *command)
 		getQueryParams(&st->variables, command, params);
 
 		pg_log_debug("client %d sending %s", st->id, command->prepname);
+		if (report_per_command)
+			st->stmt_begin = pg_time_now();
 		r = PQsendQueryPrepared(st->con, command->prepname, command->argc - 1,
 								params, NULL, NULL, 0);
 	}
@@ -3869,14 +3875,11 @@ advanceConnectionState(TState *thread, CState *st, StatsData *agg)
 					break;
 				}
 
-				/* record begin time of next command, and initiate it */
-				if (report_per_command)
-				{
-					now = pg_time_now();
-					st->stmt_begin = now;
-				}
-
-				/* Execute the command */
+				/*
+				 * Execute the command. For per-command timing, stmt_begin
+				 * is captured inside sendCommand() right before PQsend*
+				 * for maximum precision.
+				 */
 				if (command->type == SQL_COMMAND)
 				{
 					/* disallow \aset and \gset in pipeline mode */
