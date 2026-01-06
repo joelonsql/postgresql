@@ -4052,6 +4052,21 @@ advanceConnectionState(TState *thread, CState *st, StatsData *agg)
 				if (PQisBusy(st->con))
 					return;		/* don't have the whole result yet */
 
+				/*
+				 * Capture end timestamp immediately when result is ready,
+				 * before processing the result. This gives more precise
+				 * per-command latency measurements by excluding
+				 * readCommandResponse() overhead. For pipeline mode, stats
+				 * are recorded in CSTATE_END_COMMAND instead.
+				 */
+				if (report_per_command && PQpipelineStatus(st->con) != PQ_PIPELINE_ON)
+				{
+					now = pg_time_now();
+					command = sql_script[st->use_file].commands[st->command];
+					addToSimpleStats(&command->stats,
+									 PG_TIME_GET_DOUBLE(now - st->stmt_begin));
+				}
+
 				/* store or discard the query results */
 				if (readCommandResponse(st,
 										sql_script[st->use_file].commands[st->command]->meta,
@@ -4091,16 +4106,14 @@ advanceConnectionState(TState *thread, CState *st, StatsData *agg)
 			case CSTATE_END_COMMAND:
 
 				/*
-				 * command completed: accumulate per-command execution times
-				 * in thread-local data structure, if per-command latencies
-				 * are requested.
+				 * For pipeline mode only: accumulate per-command execution
+				 * times here. For non-pipeline mode, stats were already
+				 * recorded in CSTATE_WAIT_RESULT for more precise timing.
 				 */
-				if (report_per_command)
+				if (report_per_command && PQpipelineStatus(st->con) == PQ_PIPELINE_ON)
 				{
 					now = pg_time_now();
-
 					command = sql_script[st->use_file].commands[st->command];
-					/* XXX could use a mutex here, but we choose not to */
 					addToSimpleStats(&command->stats,
 									 PG_TIME_GET_DOUBLE(now - st->stmt_begin));
 				}
