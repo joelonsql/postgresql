@@ -627,6 +627,7 @@ typedef struct
 	pg_time_usec_t sleep_until; /* scheduled start time of next cmd */
 	pg_time_usec_t txn_begin;	/* used for measuring schedule lag times */
 	pg_time_usec_t stmt_begin;	/* used for measuring statement latencies */
+	pg_time_usec_t socket_ready_time;	/* when socket became readable */
 
 	/* whether client prepared each command of each script */
 	bool	  **prepared;
@@ -4053,15 +4054,15 @@ advanceConnectionState(TState *thread, CState *st, StatsData *agg)
 					return;		/* don't have the whole result yet */
 
 				/*
-				 * Capture end timestamp immediately when result is ready,
-				 * before processing the result. This gives more precise
-				 * per-command latency measurements by excluding
-				 * readCommandResponse() overhead. For pipeline mode, stats
+				 * Use the timestamp captured in threadRun() when the socket
+				 * became readable. This excludes advanceConnectionState(),
+				 * state machine, and PQisBusy/PQconsumeInput overhead from
+				 * per-command latency measurements. For pipeline mode, stats
 				 * are recorded in CSTATE_END_COMMAND instead.
 				 */
 				if (report_per_command && PQpipelineStatus(st->con) != PQ_PIPELINE_ON)
 				{
-					now = pg_time_now();
+					now = st->socket_ready_time;
 					command = sql_script[st->use_file].commands[st->command];
 					addToSimpleStats(&command->stats,
 									 PG_TIME_GET_DOUBLE(now - st->stmt_begin));
@@ -7751,6 +7752,9 @@ threadRun(void *arg)
 
 				if (!socket_has_input(sockets, sock, nsocks++))
 					continue;
+
+				/* Capture timestamp when socket becomes readable */
+				st->socket_ready_time = pg_time_now();
 			}
 			else if (st->state == CSTATE_FINISHED ||
 					 st->state == CSTATE_ABORTED)
