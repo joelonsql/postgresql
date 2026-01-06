@@ -3871,8 +3871,7 @@ advanceConnectionState(TState *thread, CState *st, StatsData *agg)
 				/* record begin time of next command, and initiate it */
 				if (report_per_command)
 				{
-					pg_time_now_lazy(&now);
-					st->stmt_begin = now;
+					st->stmt_begin = pg_time_now();  /* Fresh timestamp for precise measurement */
 				}
 
 				/* Execute the command */
@@ -4052,6 +4051,20 @@ advanceConnectionState(TState *thread, CState *st, StatsData *agg)
 				if (PQisBusy(st->con))
 					return;		/* don't have the whole result yet */
 
+				/*
+				 * Capture precise end timestamp immediately after result
+				 * received, before readCommandResponse() processing overhead.
+				 */
+				if (report_per_command)
+				{
+					pg_time_usec_t stmt_end = pg_time_now();
+
+					command = sql_script[st->use_file].commands[st->command];
+					/* XXX could use a mutex here, but we choose not to */
+					addToSimpleStats(&command->stats,
+									 PG_TIME_GET_DOUBLE(stmt_end - st->stmt_begin));
+				}
+
 				/* store or discard the query results */
 				if (readCommandResponse(st,
 										sql_script[st->use_file].commands[st->command]->meta,
@@ -4094,15 +4107,21 @@ advanceConnectionState(TState *thread, CState *st, StatsData *agg)
 				 * command completed: accumulate per-command execution times
 				 * in thread-local data structure, if per-command latencies
 				 * are requested.
+				 *
+				 * For non-pipeline mode, stats are recorded in CSTATE_WAIT_RESULT
+				 * immediately after the result is received, for more precise
+				 * measurement. Pipeline mode skips CSTATE_WAIT_RESULT, so we
+				 * record stats here instead.
 				 */
-				if (report_per_command)
+				if (report_per_command &&
+					PQpipelineStatus(st->con) != PQ_PIPELINE_OFF)
 				{
-					pg_time_now_lazy(&now);
+					pg_time_usec_t stmt_end = pg_time_now();
 
 					command = sql_script[st->use_file].commands[st->command];
 					/* XXX could use a mutex here, but we choose not to */
 					addToSimpleStats(&command->stats,
-									 PG_TIME_GET_DOUBLE(now - st->stmt_begin));
+									 PG_TIME_GET_DOUBLE(stmt_end - st->stmt_begin));
 				}
 
 				/* Go ahead with next command, to be executed or skipped */
@@ -6571,6 +6590,24 @@ printResults(StatsData *total,
 	{
 		printf("initial connection time = %.3f ms\n", 0.001 * conn_elapsed_duration);
 		printf("tps = %f (without initial connection time)\n", tps);
+	}
+
+	/* Print average transaction latency from measured command times */
+	if (report_per_command && total->cnt > 0)
+	{
+		double		total_latency_sec = 0.0;
+		int			i;
+
+		for (i = 0; i < num_scripts; i++)
+		{
+			Command   **cmd;
+
+			for (cmd = sql_script[i].commands; *cmd != NULL; cmd++)
+				total_latency_sec += (*cmd)->stats.sum;
+		}
+
+		printf("average transaction latency = %.3f ms\n",
+			   1000.0 * total_latency_sec / total->cnt);
 	}
 
 	/* Report per-script/command statistics */
