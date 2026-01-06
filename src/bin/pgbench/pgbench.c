@@ -3502,7 +3502,7 @@ doRetry(CState *st, pg_time_usec_t *now)
 	 */
 	if (latency_limit)
 	{
-		pg_time_now_lazy(now);
+		(*now) = pg_time_now();
 		if (*now - st->txn_scheduled > latency_limit)
 			return false;
 	}
@@ -3653,7 +3653,7 @@ printVerboseErrorMessages(CState *st, pg_time_usec_t *now, bool is_retry)
 	 */
 	if (latency_limit)
 	{
-		pg_time_now_lazy(now);
+		(*now) = pg_time_now();
 		appendPQExpBuffer(buf, ", %.3f%% of the maximum time of tries was used",
 						  (100.0 * (*now - st->txn_scheduled) / latency_limit));
 	}
@@ -3716,7 +3716,7 @@ advanceConnectionState(TState *thread, CState *st, StatsData *agg)
 
 				/* Start new transaction (script) */
 			case CSTATE_START_TX:
-				pg_time_now_lazy(&now);
+				now = pg_time_now();
 
 				/* establish connection if needed, i.e. under --connect */
 				if (st->con == NULL)
@@ -3794,7 +3794,7 @@ advanceConnectionState(TState *thread, CState *st, StatsData *agg)
 				 */
 				if (latency_limit)
 				{
-					pg_time_now_lazy(&now);
+					now = pg_time_now();
 
 					if (thread->throttle_trigger < now - latency_limit)
 					{
@@ -3835,7 +3835,7 @@ advanceConnectionState(TState *thread, CState *st, StatsData *agg)
 				 * Wait until it's time to start next transaction.
 				 */
 			case CSTATE_THROTTLE:
-				pg_time_now_lazy(&now);
+				now = pg_time_now();
 
 				if (now < st->txn_scheduled)
 					return;		/* still sleeping, nothing to do here */
@@ -3871,7 +3871,7 @@ advanceConnectionState(TState *thread, CState *st, StatsData *agg)
 				/* record begin time of next command, and initiate it */
 				if (report_per_command)
 				{
-					pg_time_now_lazy(&now);
+					now = pg_time_now();
 					st->stmt_begin = now;
 				}
 
@@ -4078,7 +4078,7 @@ advanceConnectionState(TState *thread, CState *st, StatsData *agg)
 				 * instead of CSTATE_START_TX.
 				 */
 			case CSTATE_SLEEP:
-				pg_time_now_lazy(&now);
+				now = pg_time_now();
 				if (now < st->sleep_until)
 					return;		/* still sleeping, nothing to do here */
 				/* Else done sleeping. */
@@ -4097,7 +4097,7 @@ advanceConnectionState(TState *thread, CState *st, StatsData *agg)
 				 */
 				if (report_per_command)
 				{
-					pg_time_now_lazy(&now);
+					now = pg_time_now();
 
 					command = sql_script[st->use_file].commands[st->command];
 					/* XXX could use a mutex here, but we choose not to */
@@ -4308,7 +4308,7 @@ advanceConnectionState(TState *thread, CState *st, StatsData *agg)
 					{
 						pg_time_usec_t start = now;
 
-						pg_time_now_lazy(&start);
+						start = pg_time_now();
 						finishCon(st);
 						now = pg_time_now();
 						thread->conn_duration += now - start;
@@ -4406,7 +4406,7 @@ executeMetaCommand(CState *st, pg_time_usec_t *now)
 			return CSTATE_ABORTED;
 		}
 
-		pg_time_now_lazy(now);
+		(*now) = pg_time_now();
 		st->sleep_until = (*now) + usec;
 		return CSTATE_SLEEP;
 	}
@@ -4761,7 +4761,7 @@ processXactStats(TState *thread, CState *st, pg_time_usec_t *now,
 
 	if (detailed && !skipped && st->estatus == ESTATUS_NO_ERROR)
 	{
-		pg_time_now_lazy(now);
+		(*now) = pg_time_now();
 
 		/* compute latency & lag */
 		latency = (*now) - st->txn_scheduled;
@@ -7626,7 +7626,7 @@ threadRun(void *arg)
 				pg_time_usec_t this_usec;
 
 				/* get current time if needed */
-				pg_time_now_lazy(&now);
+				now = pg_time_now();
 
 				/* min_usec should be the minimum delay across all clients */
 				this_usec = (st->state == CSTATE_SLEEP ?
@@ -7666,7 +7666,7 @@ threadRun(void *arg)
 		/* also wake up to print the next progress report on time */
 		if (progress && min_usec > 0 && thread->tid == 0)
 		{
-			pg_time_now_lazy(&now);
+			now = pg_time_now();
 
 			if (now >= next_report)
 				min_usec = 0;
