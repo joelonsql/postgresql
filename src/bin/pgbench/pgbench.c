@@ -848,6 +848,7 @@ static void clear_socket_set(socket_set *sa);
 static void add_socket_to_set(socket_set *sa, int fd, int idx);
 static int	wait_on_socket_set(socket_set *sa, int64 usecs);
 static bool socket_has_input(socket_set *sa, int fd, int idx);
+static EStatus getSQLErrorStatus(CState *st, const char *sqlState);
 
 /* callback used to build rows for COPY during data loading */
 typedef void (*initRowMethod) (PQExpBufferData *sql, int64 curr);
@@ -3147,6 +3148,140 @@ prepareCommandsInPipeline(CState *st)
 	st->prepared[st->use_file][st->command] = true;
 }
 
+/*
+ * Execute SQL command synchronously for precise per-command timing.
+ * Used when -r is enabled with single client (-c 1) and not in pipeline mode.
+ * This eliminates async polling overhead for the most accurate timing.
+ * Returns true on success, false on failure.
+ */
+static bool
+execCommandSync(CState *st, Command *command)
+{
+	PGresult   *res = NULL;
+	pg_time_usec_t start,
+				end;
+
+	/* Capture start timestamp */
+	start = pg_time_now();
+
+	if (querymode == QUERY_SIMPLE)
+	{
+		char	   *sql;
+
+		sql = pg_strdup(command->argv[0]);
+		sql = assignVariables(&st->variables, sql);
+
+		pg_log_debug("client %d sending %s", st->id, sql);
+		res = PQexec(st->con, sql);
+		free(sql);
+	}
+	else if (querymode == QUERY_EXTENDED)
+	{
+		const char *sql = command->argv[0];
+		const char *params[MAX_ARGS];
+
+		getQueryParams(&st->variables, command, params);
+
+		pg_log_debug("client %d sending %s", st->id, sql);
+		res = PQexecParams(st->con, sql, command->argc - 1,
+						   NULL, params, NULL, NULL, 0);
+	}
+	else if (querymode == QUERY_PREPARED)
+	{
+		const char *params[MAX_ARGS];
+
+		prepareCommand(st, st->command);
+		getQueryParams(&st->variables, command, params);
+
+		pg_log_debug("client %d sending %s", st->id, command->prepname);
+		res = PQexecPrepared(st->con, command->prepname, command->argc - 1,
+							 params, NULL, NULL, 0);
+	}
+
+	/* Capture end timestamp immediately after execution */
+	end = pg_time_now();
+
+	/* Record per-command timing */
+	addToSimpleStats(&command->stats, PG_TIME_GET_DOUBLE(end - start));
+
+	/* Check result status */
+	if (res == NULL)
+	{
+		pg_log_debug("client %d command failed: %s", st->id, PQerrorMessage(st->con));
+		return false;
+	}
+
+	switch (PQresultStatus(res))
+	{
+		case PGRES_COMMAND_OK:
+		case PGRES_TUPLES_OK:
+		case PGRES_EMPTY_QUERY:
+			/* Success - handle \gset/\aset if needed */
+			if (command->meta == META_GSET || command->meta == META_ASET)
+			{
+				int			ntuples = PQntuples(res);
+
+				if (command->meta == META_GSET && ntuples != 1)
+				{
+					pg_log_error("client %d script %d command %d: expected one row, got %d",
+								 st->id, st->use_file, st->command, ntuples);
+					st->estatus = ESTATUS_META_COMMAND_ERROR;
+					PQclear(res);
+					return false;
+				}
+				else if (command->meta == META_ASET && ntuples <= 0)
+				{
+					/* Skip empty result for \aset */
+					PQclear(res);
+					return true;
+				}
+
+				/* Store results into variables */
+				for (int fld = 0; fld < PQnfields(res); fld++)
+				{
+					char	   *varname = PQfname(res, fld);
+					char	   *varprefix = command->varprefix ? command->varprefix : "";
+
+					if (*varprefix != '\0')
+						varname = psprintf("%s%s", varprefix, varname);
+
+					if (!putVariable(&st->variables,
+									 command->meta == META_ASET ? "aset" : "gset",
+									 varname,
+									 PQgetvalue(res, ntuples - 1, fld)))
+					{
+						pg_log_error("client %d script %d command %d: error storing into variable %s",
+									 st->id, st->use_file, st->command, varname);
+						st->estatus = ESTATUS_META_COMMAND_ERROR;
+						if (*varprefix != '\0')
+							pg_free(varname);
+						PQclear(res);
+						return false;
+					}
+
+					if (*varprefix != '\0')
+						pg_free(varname);
+				}
+			}
+			PQclear(res);
+			return true;
+
+		case PGRES_NONFATAL_ERROR:
+		case PGRES_FATAL_ERROR:
+			st->estatus = getSQLErrorStatus(st, PQresultErrorField(res, PG_DIAG_SQLSTATE));
+			if (verbose_errors)
+				commandError(st, PQresultErrorMessage(res));
+			PQclear(res);
+			return false;
+
+		default:
+			pg_log_error("client %d script %d command %d: unexpected result status %d",
+						 st->id, st->use_file, st->command, PQresultStatus(res));
+			PQclear(res);
+			return false;
+	}
+}
+
 /* Send a SQL command, using the chosen querymode */
 static bool
 sendCommand(CState *st, Command *command)
@@ -3868,13 +4003,6 @@ advanceConnectionState(TState *thread, CState *st, StatsData *agg)
 					break;
 				}
 
-				/* record begin time of next command, and initiate it */
-				if (report_per_command)
-				{
-					pg_time_now_lazy(&now);
-					st->stmt_begin = now;
-				}
-
 				/* Execute the command */
 				if (command->type == SQL_COMMAND)
 				{
@@ -3895,18 +4023,46 @@ advanceConnectionState(TState *thread, CState *st, StatsData *agg)
 						}
 					}
 
-					if (!sendCommand(st, command))
+					/*
+					 * Use synchronous execution for precise per-command timing
+					 * when -r is enabled with single client and not in pipeline
+					 * mode. This eliminates async polling overhead.
+					 */
+					if (report_per_command && nclients == 1 &&
+						PQpipelineStatus(st->con) == PQ_PIPELINE_OFF)
 					{
-						commandFailed(st, "SQL", "SQL command send failed");
-						st->state = CSTATE_ABORTED;
+						/* Sync path: timing is handled inside execCommandSync */
+						st->stmt_begin = 0;		/* sentinel: stats already recorded */
+						if (!execCommandSync(st, command))
+						{
+							commandFailed(st, "SQL", "SQL command failed");
+							st->state = CSTATE_ABORTED;
+						}
+						else
+							st->state = CSTATE_END_COMMAND;
 					}
 					else
 					{
-						/* Wait for results, unless in pipeline mode */
-						if (PQpipelineStatus(st->con) == PQ_PIPELINE_OFF)
-							st->state = CSTATE_WAIT_RESULT;
+						/* Async path: record begin time for later stats */
+						if (report_per_command)
+						{
+							pg_time_now_lazy(&now);
+							st->stmt_begin = now;
+						}
+
+						if (!sendCommand(st, command))
+						{
+							commandFailed(st, "SQL", "SQL command send failed");
+							st->state = CSTATE_ABORTED;
+						}
 						else
-							st->state = CSTATE_END_COMMAND;
+						{
+							/* Wait for results, unless in pipeline mode */
+							if (PQpipelineStatus(st->con) == PQ_PIPELINE_OFF)
+								st->state = CSTATE_WAIT_RESULT;
+							else
+								st->state = CSTATE_END_COMMAND;
+						}
 					}
 				}
 				else if (command->type == META_COMMAND)
@@ -4094,8 +4250,11 @@ advanceConnectionState(TState *thread, CState *st, StatsData *agg)
 				 * command completed: accumulate per-command execution times
 				 * in thread-local data structure, if per-command latencies
 				 * are requested.
+				 *
+				 * Skip if stmt_begin is 0, which indicates the sync execution
+				 * path was used and stats were already recorded there.
 				 */
-				if (report_per_command)
+				if (report_per_command && st->stmt_begin != 0)
 				{
 					pg_time_now_lazy(&now);
 
