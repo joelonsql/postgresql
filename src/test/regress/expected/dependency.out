@@ -78,10 +78,10 @@ RESET SESSION AUTHORIZATION;
 DROP OWNED BY regress_dep_user1;
 -- all grants revoked
 \z deptest1
-                                            Access privileges
- Schema |   Name   | Type  |              Access privileges               | Column privileges | Policies 
---------+----------+-------+----------------------------------------------+-------------------+----------
- public | deptest1 | table | regress_dep_user0=arwdDxtm/regress_dep_user0 |                   | 
+                              Access privileges
+ Schema |   Name   | Type  | Access privileges | Column privileges | Policies 
+--------+----------+-------+-------------------+-------------------+----------
+ public | deptest1 | table |                   |                   | 
 (1 row)
 
 -- table was dropped

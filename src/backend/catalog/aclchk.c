@@ -1959,6 +1959,7 @@ ExecGrant_Relation(InternalGrant *istmt)
 		{
 			AclMode		avail_goptions;
 			Acl		   *new_acl;
+			Acl		   *default_acl;
 			Oid			grantorId;
 			HeapTuple	newtuple;
 			Datum		values[Natts_pg_class] = {0};
@@ -2006,15 +2007,26 @@ ExecGrant_Relation(InternalGrant *istmt)
 										   grantorId,
 										   ownerId);
 
+			default_acl = acldefault(objtype, ownerId);
+
 			/*
 			 * We need the members of both old and new ACLs so we can correct
 			 * the shared dependency information.
 			 */
 			nnewmembers = aclmembers(new_acl, &newmembers);
 
-			/* finished building new ACL value, now insert it */
+			/*
+			 * Finished building new ACL value, now insert it.  If the new ACL
+			 * equals acldefault() for this object type and owner, store NULL
+			 * instead to avoid storing redundant data. This ensures
+			 * consistency with pg_dump, which doesn't emit GRANT statements
+			 * for default privileges.
+			 */
 			replaces[Anum_pg_class_relacl - 1] = true;
-			values[Anum_pg_class_relacl - 1] = PointerGetDatum(new_acl);
+			if (aclequal(new_acl, default_acl))
+				nulls[Anum_pg_class_relacl - 1] = true;
+			else
+				values[Anum_pg_class_relacl - 1] = PointerGetDatum(new_acl);
 
 			newtuple = heap_modify_tuple(tuple, RelationGetDescr(relation),
 										 values, nulls, replaces);
@@ -2023,7 +2035,8 @@ ExecGrant_Relation(InternalGrant *istmt)
 			UnlockTuple(relation, &tuple->t_self, InplaceUpdateTupleLock);
 
 			/* Update initial privileges for extensions */
-			recordExtensionInitPriv(relOid, RelationRelationId, 0, new_acl);
+			recordExtensionInitPriv(relOid, RelationRelationId, 0,
+									aclequal(new_acl, default_acl) ? NULL : new_acl);
 
 			/* Update the shared dependency ACL info */
 			updateAclDependencies(RelationRelationId, relOid, 0,
@@ -2032,6 +2045,7 @@ ExecGrant_Relation(InternalGrant *istmt)
 								  nnewmembers, newmembers);
 
 			pfree(new_acl);
+			pfree(default_acl);
 		}
 		else
 			UnlockTuple(relation, &tuple->t_self, InplaceUpdateTupleLock);
@@ -2136,6 +2150,7 @@ ExecGrant_common(InternalGrant *istmt, Oid classid, AclMode default_privs,
 		AclMode		this_privileges;
 		Acl		   *old_acl;
 		Acl		   *new_acl;
+		Acl		   *default_acl;
 		Oid			grantorId;
 		Oid			ownerId;
 		HeapTuple	tuple;
@@ -2210,15 +2225,26 @@ ExecGrant_common(InternalGrant *istmt, Oid classid, AclMode default_privs,
 									   istmt->grantees, this_privileges,
 									   grantorId, ownerId);
 
+		default_acl = acldefault(get_object_type(classid, objectid), ownerId);
+
 		/*
 		 * We need the members of both old and new ACLs so we can correct the
 		 * shared dependency information.
 		 */
 		nnewmembers = aclmembers(new_acl, &newmembers);
 
-		/* finished building new ACL value, now insert it */
+		/*
+		 * Finished building new ACL value, now insert it.  If the new ACL
+		 * equals acldefault() for this object type and owner, store NULL
+		 * instead to avoid storing redundant data.  This ensures consistency
+		 * with pg_dump, which doesn't emit GRANT statements for default
+		 * privileges.
+		 */
 		replaces[get_object_attnum_acl(classid) - 1] = true;
-		values[get_object_attnum_acl(classid) - 1] = PointerGetDatum(new_acl);
+		if (aclequal(new_acl, default_acl))
+			nulls[get_object_attnum_acl(classid) - 1] = true;
+		else
+			values[get_object_attnum_acl(classid) - 1] = PointerGetDatum(new_acl);
 
 		newtuple = heap_modify_tuple(tuple, RelationGetDescr(relation), values,
 									 nulls, replaces);
@@ -2227,7 +2253,8 @@ ExecGrant_common(InternalGrant *istmt, Oid classid, AclMode default_privs,
 		UnlockTuple(relation, &tuple->t_self, InplaceUpdateTupleLock);
 
 		/* Update initial privileges for extensions */
-		recordExtensionInitPriv(objectid, classid, 0, new_acl);
+		recordExtensionInitPriv(objectid, classid, 0,
+								aclequal(new_acl, default_acl) ? NULL : new_acl);
 
 		/* Update the shared dependency ACL info */
 		updateAclDependencies(classid,
@@ -2238,6 +2265,7 @@ ExecGrant_common(InternalGrant *istmt, Oid classid, AclMode default_privs,
 
 		ReleaseSysCache(tuple);
 
+		pfree(default_acl);
 		pfree(new_acl);
 
 		/* prevent error when processing duplicate objects */
@@ -2286,6 +2314,7 @@ ExecGrant_Largeobject(InternalGrant *istmt)
 		AclMode		this_privileges;
 		Acl		   *old_acl;
 		Acl		   *new_acl;
+		Acl		   *default_acl;
 		Oid			grantorId;
 		Oid			ownerId;
 		HeapTuple	newtuple;
@@ -2362,16 +2391,26 @@ ExecGrant_Largeobject(InternalGrant *istmt)
 									   istmt->grantees, this_privileges,
 									   grantorId, ownerId);
 
+		default_acl = acldefault(OBJECT_LARGEOBJECT, ownerId);
+
 		/*
 		 * We need the members of both old and new ACLs so we can correct the
 		 * shared dependency information.
 		 */
 		nnewmembers = aclmembers(new_acl, &newmembers);
 
-		/* finished building new ACL value, now insert it */
+		/*
+		 * Finished building new ACL value, now insert it.  If the new ACL
+		 * equals acldefault() for this object type and owner, store NULL
+		 * instead to avoid storing redundant data.  This ensures consistency
+		 * with pg_dump, which doesn't emit GRANT statements for default
+		 * privileges.
+		 */
 		replaces[Anum_pg_largeobject_metadata_lomacl - 1] = true;
-		values[Anum_pg_largeobject_metadata_lomacl - 1]
-			= PointerGetDatum(new_acl);
+		if (aclequal(new_acl, default_acl))
+			nulls[Anum_pg_largeobject_metadata_lomacl - 1] = true;
+		else
+			values[Anum_pg_largeobject_metadata_lomacl - 1] = PointerGetDatum(new_acl);
 
 		newtuple = heap_modify_tuple(tuple, RelationGetDescr(relation),
 									 values, nulls, replaces);
@@ -2379,7 +2418,8 @@ ExecGrant_Largeobject(InternalGrant *istmt)
 		CatalogTupleUpdate(relation, &newtuple->t_self, newtuple);
 
 		/* Update initial privileges for extensions */
-		recordExtensionInitPriv(loid, LargeObjectRelationId, 0, new_acl);
+		recordExtensionInitPriv(loid, LargeObjectRelationId, 0,
+								aclequal(new_acl, default_acl) ? NULL : new_acl);
 
 		/* Update the shared dependency ACL info */
 		updateAclDependencies(LargeObjectRelationId,
@@ -2390,6 +2430,7 @@ ExecGrant_Largeobject(InternalGrant *istmt)
 
 		systable_endscan(scan);
 
+		pfree(default_acl);
 		pfree(new_acl);
 
 		/* prevent error when processing duplicate objects */

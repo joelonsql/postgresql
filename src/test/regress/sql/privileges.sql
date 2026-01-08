@@ -2114,3 +2114,31 @@ SELECT * FROM information_schema.table_privileges t
 
 DROP TABLE grantor_test1, grantor_test2, grantor_test3;
 DROP ROLE regress_grantor1, regress_grantor2, regress_grantor3;
+
+-- Test that ACL reverts to NULL when it matches acldefault()
+-- This ensures consistency with pg_dump which skips default ACLs
+
+CREATE ROLE regress_acl_owner;
+CREATE ROLE regress_acl_grantee;
+SET ROLE regress_acl_owner;
+CREATE TABLE acl_test1 (a int);
+RESET ROLE;
+
+-- Verify initial ACL is NULL (default)
+SELECT relacl FROM pg_class WHERE relname = 'acl_test1';
+
+-- GRANT ALL to owner should keep ACL as NULL (equals acldefault)
+GRANT ALL ON acl_test1 TO regress_acl_owner;
+SELECT relacl FROM pg_class WHERE relname = 'acl_test1';
+
+-- GRANT to another user should store ACL (now differs from acldefault)
+GRANT SELECT ON acl_test1 TO regress_acl_grantee;
+SELECT relacl FROM pg_class WHERE relname = 'acl_test1';
+
+-- REVOKE from grantee should return ACL to default (stored as NULL)
+REVOKE ALL ON acl_test1 FROM regress_acl_grantee;
+SELECT relacl FROM pg_class WHERE relname = 'acl_test1';
+
+DROP TABLE acl_test1;
+DROP ROLE regress_acl_owner;
+DROP ROLE regress_acl_grantee;
