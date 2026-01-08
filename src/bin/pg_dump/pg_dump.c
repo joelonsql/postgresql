@@ -10841,6 +10841,7 @@ getAdditionalACLs(Archive *fout)
 
 					daobj->dacl.privtype = privtype;
 					daobj->dacl.initprivs = pstrdup(initprivs);
+					dobj->components |= DUMP_COMPONENT_ACL;
 				}
 				else
 					pg_log_warning("unsupported pg_init_privs entry: %u %u %d",
