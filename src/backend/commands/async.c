@@ -68,7 +68,7 @@
  *
  *	  PreCommit_Notify() also stages any pending LISTEN/UNLISTEN actions.
  *	  LISTEN operations pre-allocate entries in both the per-backend
- *	  listenChannelsHash and the shared channelHash (with listening=false).
+ *	  localChannelTable and the shared globalChannelTable (with listening=false).
  *	  All allocations happen before committing to clog so failures safely abort.
  *
  *	  Once we have put all of the notifications into the queue, we return to
@@ -78,8 +78,8 @@
  *	  commit the staged listen/unlisten changes by setting listening=true for
  *	  staged LISTENs, or removing entries for UNLISTENs.  Then we signal any backends
  *	  that may be interested in our messages (including our own backend,
- *	  if listening).  This is done by SignalBackends(), which consults the
- *	  shared channel hash table to identify listeners for the channels that
+ *	  if listening).  This is done by SignalBackends(), which consults
+ *	  globalChannelTable to identify listeners for the channels that
  *	  have pending notifications in the current database.  Each selected
  *	  backend is marked as having a wakeup pending to avoid duplicate signals,
  *	  and a PROCSIG_NOTIFY_INTERRUPT signal is sent to it.
@@ -181,7 +181,7 @@
 #define NOTIFY_PAYLOAD_MAX_LENGTH	(BLCKSZ - NAMEDATALEN - 128)
 
 /*
- * Channel hash table definitions
+ * globalChannelTable definitions
  *
  * This hash table maps (database OID, channel name) keys to arrays of
  * ProcNumbers representing the backends listening on each channel.
@@ -323,7 +323,7 @@ typedef struct QueueBackendStatus
  * the control lock for the pg_notify SLRU buffers.
  * In order to avoid deadlocks, whenever we need multiple locks, we first get
  * NotifyQueueTailLock, then NotifyQueueLock, then SLRU bank lock, and lastly
- * channelHash partition locks.
+ * globalChannelTable partition locks.
  *
  * Each backend uses the backend[] array entry with index equal to its
  * ProcNumber.  We rely on this to make SendProcSignal fast.
@@ -344,15 +344,15 @@ typedef struct AsyncQueueControl
 	ProcNumber	firstListener;	/* id of first listener, or
 								 * INVALID_PROC_NUMBER */
 	TimestampTz lastQueueFillWarn;	/* time of last queue-full msg */
-	dsa_handle	channelHashDSA;
-	dshash_table_handle channelHashDSH;
+	dsa_handle	globalChannelTableDSA;
+	dshash_table_handle globalChannelTableDSH;
 	QueueBackendStatus backend[FLEXIBLE_ARRAY_MEMBER];
 } AsyncQueueControl;
 
 static AsyncQueueControl *asyncQueueControl;
 
-static dsa_area *channelDSA = NULL;
-static dshash_table *channelHash = NULL;
+static dsa_area *globalChannelDSA = NULL;
+static dshash_table *globalChannelTable = NULL;
 
 #define QUEUE_HEAD					(asyncQueueControl->head)
 #define QUEUE_TAIL					(asyncQueueControl->tail)
@@ -377,18 +377,18 @@ static SlruCtlData NotifyCtlData;
 #define QUEUE_FULL_WARN_INTERVAL	5000	/* warn at most once every 5s */
 
 /*
- * listenChannelsHash caches the channels this backend is listening on.
+ * localChannelTable caches the channels this backend is listening on.
  * Used by IsListeningOn() for fast lookups when reading notifications.
  * Entries are pre-allocated during PreCommit_Notify (before clog commit)
  * so allocation failures safely abort.  On abort, staged entries are removed.
  * Allocated in TopMemoryContext so it persists across transactions.
  */
-static HTAB *listenChannelsHash = NULL;
+static HTAB *localChannelTable = NULL;
 
 /*
  * State for pending LISTEN/UNLISTEN actions consists of an ordered list of
  * all actions requested in the current transaction.  During PreCommit_Notify,
- * we stage these changes in listenChannelsHash and the shared channelHash.
+ * we stage these changes in localChannelTable and the shared globalChannelTable.
  * On abort, AtAbort_Notify cleans up any staged-but-uncommitted entries.
  *
  * The list is kept in CurTransactionContext.  In subtransactions, each
@@ -458,7 +458,7 @@ typedef struct NotificationList
 	int			nestingLevel;	/* current transaction nesting depth */
 	List	   *events;			/* list of Notification structs */
 	HTAB	   *hashtab;		/* hash of NotificationHash structs, or NULL */
-	HTAB	   *channelSet;		/* hash of unique channel names, or NULL */
+	HTAB	   *uniqueChannelNames;		/* hash of unique channel names, or NULL */
 	struct NotificationList *upper; /* details for upper transaction levels */
 } NotificationList;
 
@@ -474,7 +474,7 @@ struct ChannelName
 	char		channel[NAMEDATALEN];
 };
 
-/* Entry for pendingListenChannels hash table */
+/* Entry for pendingListenActions hash table */
 struct PendingListenEntry
 {
 	char		channel[NAMEDATALEN];	/* hash key */
@@ -518,7 +518,7 @@ static List *pendingNotifyChannels = NIL;
  * Provides automatic deduplication of repeated LISTEN/UNLISTEN on same channel.
  * Populated during PreCommit_Notify and used by AtCommit_Notify/AtAbort_Notify.
  */
-static HTAB *pendingListenChannels = NULL;
+static HTAB *pendingListenActions = NULL;
 
 /*
  * Preallocated arrays for SignalBackends to avoid memory allocation after
@@ -542,10 +542,10 @@ int			max_notify_queue_pages = 1048576;
 static inline bool asyncQueuePagePrecedes(int64 p, int64 q);
 static void queue_listen(ListenActionKind action, const char *channel);
 static void Async_UnlistenOnExit(int code, Datum arg);
-static void Exec_ListenPreCommit(void);
-static void Exec_ListenPreCommitStage(const char *channel);
-static void Exec_UnlistenPreCommitStage(const char *channel);
-static void Exec_UnlistenAllPreCommitStage(void);
+static void BecomeRegisteredListener(void);
+static void PrepareTableEntriesForListen(const char *channel);
+static void PrepareTableEntriesForUnlisten(const char *channel);
+static void PrepareTableEntriesForUnlistenAll(void);
 static void CleanupListenersOnExit(void);
 static bool IsListeningOn(const char *channel);
 static void asyncQueueUnregister(void);
@@ -568,8 +568,10 @@ static uint32 notification_hash(const void *key, Size keysize);
 static int	notification_match(const void *key1, const void *key2, Size keysize);
 static void ClearPendingActionsAndNotifies(void);
 static inline void ChannelHashPrepareKey(ChannelHashKey *key, Oid dboid, const char *channel);
-static dshash_hash channelHashFunc(const void *key, size_t size, void *arg);
-static void initChannelHash(void);
+static dshash_hash globalChannelTableFunc(const void *key, size_t size, void *arg);
+static void initGlobalChannelTable(void);
+static void RemoveListenerFromChannel(ChannelListeners **entry_ptr, ListenerEntry *listeners, int idx);
+static void ProcessPendingListenActions(bool isCommit);
 
 /*
  * Determines whether p precedes q.
@@ -582,11 +584,11 @@ asyncQueuePagePrecedes(int64 p, int64 q)
 }
 
 /*
- * channelHashFunc
+ * globalChannelTableFunc
  *		Hash function for channel keys.
  */
 static dshash_hash
-channelHashFunc(const void *key, size_t size, void *arg)
+globalChannelTableFunc(const void *key, size_t size, void *arg)
 {
 	const ChannelHashKey *k = (const ChannelHashKey *) key;
 	dshash_hash h;
@@ -598,28 +600,28 @@ channelHashFunc(const void *key, size_t size, void *arg)
 	return h;
 }
 
-/* parameters for the channel hash table */
+/* parameters for globalChannelTable */
 static const dshash_parameters channelDSHParams = {
 	sizeof(ChannelHashKey),
 	sizeof(ChannelListeners),
 	dshash_memcmp,
-	channelHashFunc,
+	globalChannelTableFunc,
 	dshash_memcpy,
 	LWTRANCHE_NOTIFY_CHANNEL_HASH
 };
 
 /*
- * initChannelHash
- *		Lazy initialization of the channel hash table.
+ * initGlobalChannelTable
+ *		Lazy initialization of globalChannelTable.
  */
 static void
-initChannelHash(void)
+initGlobalChannelTable(void)
 {
 	MemoryContext oldcontext;
 
 	/* Quick exit if we already did this */
-	if (asyncQueueControl->channelHashDSH != DSHASH_HANDLE_INVALID &&
-		channelHash != NULL)
+	if (asyncQueueControl->globalChannelTableDSH != DSHASH_HANDLE_INVALID &&
+		globalChannelTable != NULL)
 		return;
 
 	/* Otherwise, use a lock to ensure only one process creates the table */
@@ -628,26 +630,26 @@ initChannelHash(void)
 	/* Be sure any local memory allocated by DSA routines is persistent */
 	oldcontext = MemoryContextSwitchTo(TopMemoryContext);
 
-	if (asyncQueueControl->channelHashDSH == DSHASH_HANDLE_INVALID)
+	if (asyncQueueControl->globalChannelTableDSH == DSHASH_HANDLE_INVALID)
 	{
-		/* Initialize dynamic shared hash table for channel hash */
-		channelDSA = dsa_create(LWTRANCHE_NOTIFY_CHANNEL_HASH);
-		dsa_pin(channelDSA);
-		dsa_pin_mapping(channelDSA);
-		channelHash = dshash_create(channelDSA, &channelDSHParams, NULL);
+		/* Initialize globalChannelTable and globalChannelDSA */
+		globalChannelDSA = dsa_create(LWTRANCHE_NOTIFY_CHANNEL_HASH);
+		dsa_pin(globalChannelDSA);
+		dsa_pin_mapping(globalChannelDSA);
+		globalChannelTable = dshash_create(globalChannelDSA, &channelDSHParams, NULL);
 
 		/* Store handles in shared memory for other backends to use */
-		asyncQueueControl->channelHashDSA = dsa_get_handle(channelDSA);
-		asyncQueueControl->channelHashDSH =
-			dshash_get_hash_table_handle(channelHash);
+		asyncQueueControl->globalChannelTableDSA = dsa_get_handle(globalChannelDSA);
+		asyncQueueControl->globalChannelTableDSH =
+			dshash_get_hash_table_handle(globalChannelTable);
 	}
-	else if (!channelHash)
+	else if (!globalChannelTable)
 	{
 		/* Attach to existing dynamic shared hash table */
-		channelDSA = dsa_attach(asyncQueueControl->channelHashDSA);
-		dsa_pin_mapping(channelDSA);
-		channelHash = dshash_attach(channelDSA, &channelDSHParams,
-									asyncQueueControl->channelHashDSH,
+		globalChannelDSA = dsa_attach(asyncQueueControl->globalChannelTableDSA);
+		dsa_pin_mapping(globalChannelDSA);
+		globalChannelTable = dshash_attach(globalChannelDSA, &channelDSHParams,
+									asyncQueueControl->globalChannelTableDSH,
 									NULL);
 	}
 
@@ -665,7 +667,7 @@ initListenChannelsHash(void)
 	HASHCTL		hash_ctl;
 
 	/* Quick exit if we already did this */
-	if (listenChannelsHash != NULL)
+	if (localChannelTable != NULL)
 		return;
 
 	/* Initialize local hash table for this backend's listened channels */
@@ -673,7 +675,7 @@ initListenChannelsHash(void)
 	hash_ctl.keysize = NAMEDATALEN;
 	hash_ctl.entrysize = sizeof(struct ChannelName);
 
-	listenChannelsHash =
+	localChannelTable =
 		hash_create("Listen Channels",
 					64,
 					&hash_ctl,
@@ -691,7 +693,7 @@ initPendingListenChannels(void)
 {
 	HASHCTL		hash_ctl;
 
-	if (pendingListenChannels != NULL)
+	if (pendingListenActions != NULL)
 		return;
 
 	memset(&hash_ctl, 0, sizeof(hash_ctl));
@@ -699,7 +701,7 @@ initPendingListenChannels(void)
 	hash_ctl.entrysize = sizeof(struct PendingListenEntry);
 	hash_ctl.hcxt = CurTransactionContext;
 
-	pendingListenChannels =
+	pendingListenActions =
 		hash_create("Pending Listen Channels",
 					16,
 					&hash_ctl,
@@ -749,8 +751,8 @@ AsyncShmemInit(void)
 		QUEUE_STOP_PAGE = 0;
 		QUEUE_FIRST_LISTENER = INVALID_PROC_NUMBER;
 		asyncQueueControl->lastQueueFillWarn = 0;
-		asyncQueueControl->channelHashDSA = DSA_HANDLE_INVALID;
-		asyncQueueControl->channelHashDSH = DSHASH_HANDLE_INVALID;
+		asyncQueueControl->globalChannelTableDSA = DSA_HANDLE_INVALID;
+		asyncQueueControl->globalChannelTableDSH = DSHASH_HANDLE_INVALID;
 		for (int i = 0; i < MaxBackends; i++)
 		{
 			QUEUE_BACKEND_PID(i) = InvalidPid;
@@ -890,7 +892,7 @@ Async_Notify(const char *channel, const char *payload)
 		notifies->events = list_make1(n);
 		/* We certainly don't need a hashtable yet */
 		notifies->hashtab = NULL;
-		notifies->channelSet = NULL;
+		notifies->uniqueChannelNames = NULL;
 		notifies->upper = pendingNotifies;
 		pendingNotifies = notifies;
 	}
@@ -917,7 +919,7 @@ Async_Notify(const char *channel, const char *payload)
  *		Common code for listen, unlisten, unlisten all commands.
  *
  *		Adds the request to the list of pending actions.
- *		Actual update of listenChannelsHash and channelHash happens during
+ *		Actual update of localChannelTable and globalChannelTable happens during
  *		PreCommit_Notify, with staged changes committed in AtCommit_Notify.
  */
 static void
@@ -1017,7 +1019,7 @@ Async_UnlistenAll(void)
  * SQL function: return a set of the channel names this backend is actively
  * listening to.
  *
- * Note: this coding relies on the fact that the listenChannelsHash cannot
+ * Note: this coding relies on the fact that the localChannelTable cannot
  * change within a transaction.
  */
 Datum
@@ -1035,11 +1037,11 @@ pg_listening_channels(PG_FUNCTION_ARGS)
 		funcctx = SRF_FIRSTCALL_INIT();
 
 		/* Initialize hash table iteration if we have any channels */
-		if (listenChannelsHash != NULL)
+		if (localChannelTable != NULL)
 		{
 			oldcontext = MemoryContextSwitchTo(funcctx->multi_call_memory_ctx);
 			status = (HASH_SEQ_STATUS *) palloc(sizeof(HASH_SEQ_STATUS));
-			hash_seq_init(status, listenChannelsHash);
+			hash_seq_init(status, localChannelTable);
 			funcctx->user_fctx = status;
 			MemoryContextSwitchTo(oldcontext);
 		}
@@ -1123,7 +1125,7 @@ PreCommit_Notify(void)
 
 	/* Preflight for any pending listen/unlisten actions */
 	if (pendingNotifies != NULL || pendingActions != NULL)
-		initChannelHash();
+		initGlobalChannelTable();
 
 	if (pendingNotifies != NULL)
 	{
@@ -1148,14 +1150,14 @@ PreCommit_Notify(void)
 			switch (actrec->action)
 			{
 				case LISTEN_LISTEN:
-					Exec_ListenPreCommit();
-					Exec_ListenPreCommitStage(actrec->channel);
+					BecomeRegisteredListener();
+					PrepareTableEntriesForListen(actrec->channel);
 					break;
 				case LISTEN_UNLISTEN:
-					Exec_UnlistenPreCommitStage(actrec->channel);
+					PrepareTableEntriesForUnlisten(actrec->channel);
 					break;
 				case LISTEN_UNLISTEN_ALL:
-					Exec_UnlistenAllPreCommitStage();
+					PrepareTableEntriesForUnlistenAll();
 					break;
 			}
 		}
@@ -1170,16 +1172,16 @@ PreCommit_Notify(void)
 		/*
 		 * Build list of unique channels for SignalBackends().
 		 *
-		 * If we have a channelSet, use it to efficiently get the unique
+		 * If we have a uniqueChannelNames, use it to efficiently get the unique
 		 * channels.  Otherwise, fall back to the linear approach.
 		 */
 		pendingNotifyChannels = NIL;
-		if (pendingNotifies->channelSet != NULL)
+		if (pendingNotifies->uniqueChannelNames != NULL)
 		{
 			HASH_SEQ_STATUS status;
 			struct ChannelName *channelEntry;
 
-			hash_seq_init(&status, pendingNotifies->channelSet);
+			hash_seq_init(&status, pendingNotifies->uniqueChannelNames);
 			while ((channelEntry = (struct ChannelName *) hash_seq_search(&status)) != NULL)
 				pendingNotifyChannels = lappend(pendingNotifyChannels, channelEntry->channel);
 		}
@@ -1278,11 +1280,119 @@ PreCommit_Notify(void)
 }
 
 /*
+ * RemoveListenerFromChannel --- remove a listener from globalChannelTable entry
+ *
+ * Decrements numListeners, compacts the array, and frees the entry if empty.
+ * Sets *entry_ptr to NULL if the entry was deleted.
+ */
+static void
+RemoveListenerFromChannel(ChannelListeners **entry_ptr, ListenerEntry *listeners, int idx)
+{
+	ChannelListeners *entry = *entry_ptr;
+
+	entry->numListeners--;
+	if (idx < entry->numListeners)
+		memmove(&listeners[idx], &listeners[idx + 1],
+				sizeof(ListenerEntry) * (entry->numListeners - idx));
+
+	if (entry->numListeners == 0)
+	{
+		dsa_free(globalChannelDSA, entry->listenersArray);
+		dshash_delete_entry(globalChannelTable, entry);
+		*entry_ptr = NULL;
+	}
+}
+
+/*
+ * ProcessPendingListenActions --- finalize or revert pending LISTEN/UNLISTEN
+ *
+ * This function processes entries in pendingListenActions at transaction end.
+ * It is called by both AtCommit_Notify and AtAbort_Notify to reduce code
+ * duplication and ensure the abort path stays tested through shared code.
+ *
+ * For commits (isCommit=true):
+ *   - LISTEN entries: set listening=true in globalChannelTable
+ *   - UNLISTEN entries: remove from both globalChannelTable and localChannelTable
+ *
+ * For aborts (isCommit=false):
+ *   - Staged LISTENs (listening=false in globalChannelTable): remove from both tables
+ *   - Staged UNLISTENs: nothing to undo (no changes were made to shared state)
+ *
+ * Note: Most of the abort path code only runs in a rare case - when a
+ * transaction fails AFTER PreCommit_Notify has staged changes but BEFORE
+ * AtCommit_Notify completes. By sharing code with the commit path, we ensure
+ * this logic stays tested.
+ */
+static void
+ProcessPendingListenActions(bool isCommit)
+{
+	HASH_SEQ_STATUS seq;
+	struct PendingListenEntry *pending;
+
+	if (pendingListenActions == NULL || globalChannelTable == NULL)
+		return;
+
+	hash_seq_init(&seq, pendingListenActions);
+	while ((pending = (struct PendingListenEntry *) hash_seq_search(&seq)) != NULL)
+	{
+		ChannelHashKey key;
+		ChannelListeners *entry;
+		ListenerEntry *listeners;
+
+		ChannelHashPrepareKey(&key, MyDatabaseId, pending->channel);
+		entry = dshash_find(globalChannelTable, &key, true);
+		if (entry == NULL)
+			elog(PANIC, "could not find globalChannelTable entry when expected");
+
+		listeners = (ListenerEntry *) dsa_get_address(globalChannelDSA, entry->listenersArray);
+
+		for (int i = 0; i < entry->numListeners; i++)
+		{
+			if (listeners[i].procNo != MyProcNumber)
+				continue;
+
+			if (isCommit)
+			{
+				if (pending->listening)
+				{
+					/* LISTEN being committed: set listening=true */
+					listeners[i].listening = true;
+				}
+				else
+				{
+					/* UNLISTEN being committed: remove from tables */
+					/* Remove from global table first, then local (per Tom's feedback) */
+					RemoveListenerFromChannel(&entry, listeners, i);
+					(void) hash_search(localChannelTable, pending->channel,
+									   HASH_REMOVE, NULL);
+				}
+			}
+			else /* abort */
+			{
+				if (!listeners[i].listening)
+				{
+					/* Staged LISTEN being aborted: remove pre-allocated entries */
+					/* Remove from global table first, then local (consistent ordering) */
+					RemoveListenerFromChannel(&entry, listeners, i);
+					(void) hash_search(localChannelTable, pending->channel,
+									   HASH_REMOVE, NULL);
+				}
+				/* Staged UNLISTEN: nothing to undo */
+			}
+			break;
+		}
+
+		if (entry != NULL)
+			dshash_release_lock(globalChannelTable, entry);
+	}
+}
+
+/*
  * AtCommit_Notify
  *
  *		This is called at transaction commit, after committing to clog.
  *
- *		Update listenChannelsHash and clear transaction-local state.
+ *		Update localChannelTable and clear transaction-local state.
  *
  *		If we issued any notifications in the transaction, send signals to
  *		listening backends (possibly including ourselves) to process them.
@@ -1303,68 +1413,11 @@ AtCommit_Notify(void)
 		elog(DEBUG1, "AtCommit_Notify");
 
 	/* Commit staged listen/unlisten changes */
-	if (pendingListenChannels != NULL)
-	{
-		HASH_SEQ_STATUS seq;
-		struct PendingListenEntry *pending;
-
-		hash_seq_init(&seq, pendingListenChannels);
-		while ((pending = (struct PendingListenEntry *) hash_seq_search(&seq)) != NULL)
-		{
-			ChannelHashKey key;
-			ChannelListeners *entry;
-			ListenerEntry *listeners;
-
-			ChannelHashPrepareKey(&key, MyDatabaseId, pending->channel);
-			entry = dshash_find(channelHash, &key, true);
-			if (entry == NULL)
-				continue;
-
-			listeners = (ListenerEntry *) dsa_get_address(channelDSA, entry->listenersArray);
-
-			for (int i = 0; i < entry->numListeners; i++)
-			{
-				if (listeners[i].procNo == MyProcNumber)
-				{
-					if (pending->listening)
-					{
-						/*
-						 * LISTEN being committed: set listening=true.
-						 * listenChannelsHash was pre-allocated in PreCommit.
-						 */
-						listeners[i].listening = true;
-					}
-					else
-					{
-						/* UNLISTEN being committed: remove from channelHash */
-						entry->numListeners--;
-						if (i < entry->numListeners)
-							memmove(&listeners[i], &listeners[i + 1],
-									sizeof(ListenerEntry) * (entry->numListeners - i));
-
-						/* Remove from local cache */
-						(void) hash_search(listenChannelsHash, pending->channel,
-										   HASH_REMOVE, NULL);
-
-						if (entry->numListeners == 0)
-						{
-							dsa_free(channelDSA, entry->listenersArray);
-							dshash_delete_entry(channelHash, entry);
-							entry = NULL;
-						}
-					}
-					break;
-				}
-			}
-
-			if (entry != NULL)
-				dshash_release_lock(channelHash, entry);
-		}
-	}
+	ProcessPendingListenActions(true);
 
 	/* If no longer listening to anything, get out of listener array */
 	if (amRegisteredListener &&
-		(listenChannelsHash == NULL || hash_get_num_entries(listenChannelsHash) == 0))
+		(localChannelTable == NULL || hash_get_num_entries(localChannelTable) == 0))
 		asyncQueueUnregister();
 
 	/*
@@ -1395,12 +1448,12 @@ AtCommit_Notify(void)
 }
 
 /*
- * Exec_ListenPreCommit --- subroutine for PreCommit_Notify
+ * BecomeRegisteredListener --- subroutine for PreCommit_Notify
  *
  * This function must make sure we are ready to catch any incoming messages.
  */
 static void
-Exec_ListenPreCommit(void)
+BecomeRegisteredListener(void)
 {
 	QueuePosition head;
 	QueuePosition max;
@@ -1414,7 +1467,7 @@ Exec_ListenPreCommit(void)
 		return;
 
 	if (Trace_notify)
-		elog(DEBUG1, "Exec_ListenPreCommit(%d)", MyProcPid);
+		elog(DEBUG1, "BecomeRegisteredListener(%d)", MyProcPid);
 
 	/*
 	 * Before registering, make sure we will unlisten before dying. (Note:
@@ -1493,15 +1546,15 @@ Exec_ListenPreCommit(void)
 }
 
 /*
- * Exec_ListenPreCommitStage --- subroutine for PreCommit_Notify
+ * PrepareTableEntriesForListen --- subroutine for PreCommit_Notify
  *
- * Stage a LISTEN by recording it in pendingListenChannels, pre-allocating
- * an entry in listenChannelsHash, and pre-allocating an entry in the shared
- * channelHash with listening=false.  The listening flag is set to true in
+ * Stage a LISTEN by recording it in pendingListenActions, pre-allocating
+ * an entry in localChannelTable, and pre-allocating an entry in the shared
+ * globalChannelTable with listening=false.  The listening flag is set to true in
  * AtCommit_Notify.  On abort, the pre-allocated entries are removed.
  */
 static void
-Exec_ListenPreCommitStage(const char *channel)
+PrepareTableEntriesForListen(const char *channel)
 {
 	ChannelHashKey key;
 	ChannelListeners *entry;
@@ -1511,15 +1564,15 @@ Exec_ListenPreCommitStage(const char *channel)
 
 	/* Record in local pending hash that we want to LISTEN */
 	pending = (struct PendingListenEntry *)
-		hash_search(pendingListenChannels, channel, HASH_ENTER, &found);
+		hash_search(pendingListenActions, channel, HASH_ENTER, &found);
 	pending->listening = true;
 
 	/* Pre-allocate in local cache (OOM-safe: before clog commit) */
-	(void) hash_search(listenChannelsHash, channel, HASH_ENTER, NULL);
+	(void) hash_search(localChannelTable, channel, HASH_ENTER, NULL);
 
-	/* Pre-allocate entry in shared channelHash with listening=false */
+	/* Pre-allocate entry in shared globalChannelTable with listening=false */
 	ChannelHashPrepareKey(&key, MyDatabaseId, channel);
-	entry = dshash_find_or_insert(channelHash, &key, &found);
+	entry = dshash_find_or_insert(globalChannelTable, &key, &found);
 
 	if (!found)
 	{
@@ -1530,12 +1583,12 @@ Exec_ListenPreCommitStage(const char *channel)
 
 	if (!DsaPointerIsValid(entry->listenersArray))
 	{
-		entry->listenersArray = dsa_allocate(channelDSA,
+		entry->listenersArray = dsa_allocate(globalChannelDSA,
 											 sizeof(ListenerEntry) * INITIAL_LISTENERS_ARRAY_SIZE);
 		entry->allocatedListeners = INITIAL_LISTENERS_ARRAY_SIZE;
 	}
 
-	listeners = (ListenerEntry *) dsa_get_address(channelDSA, entry->listenersArray);
+	listeners = (ListenerEntry *) dsa_get_address(globalChannelDSA, entry->listenersArray);
 
 	/*
 	 * Check if we already have an entry (possibly from earlier in this
@@ -1546,7 +1599,7 @@ Exec_ListenPreCommitStage(const char *channel)
 		if (listeners[i].procNo == MyProcNumber)
 		{
 			/* Already have an entry; listening flag stays as-is until commit */
-			dshash_release_lock(channelHash, entry);
+			dshash_release_lock(globalChannelTable, entry);
 			return;
 		}
 	}
@@ -1555,12 +1608,12 @@ Exec_ListenPreCommitStage(const char *channel)
 	if (entry->numListeners >= entry->allocatedListeners)
 	{
 		int			new_size = entry->allocatedListeners * 2;
-		dsa_pointer new_array = dsa_allocate(channelDSA,
+		dsa_pointer new_array = dsa_allocate(globalChannelDSA,
 											 sizeof(ListenerEntry) * new_size);
-		ListenerEntry *new_listeners = (ListenerEntry *) dsa_get_address(channelDSA, new_array);
+		ListenerEntry *new_listeners = (ListenerEntry *) dsa_get_address(globalChannelDSA, new_array);
 
 		memcpy(new_listeners, listeners, sizeof(ListenerEntry) * entry->numListeners);
-		dsa_free(channelDSA, entry->listenersArray);
+		dsa_free(globalChannelDSA, entry->listenersArray);
 		entry->listenersArray = new_array;
 		entry->allocatedListeners = new_size;
 		listeners = new_listeners;
@@ -1571,67 +1624,67 @@ Exec_ListenPreCommitStage(const char *channel)
 														 * committed */
 	entry->numListeners++;
 
-	dshash_release_lock(channelHash, entry);
+	dshash_release_lock(globalChannelTable, entry);
 }
 
 /*
- * Exec_UnlistenPreCommitStage --- subroutine for PreCommit_Notify
+ * PrepareTableEntriesForUnlisten --- subroutine for PreCommit_Notify
  *
- * Stage an UNLISTEN by recording it in pendingListenChannels.  We don't
- * touch channelHash yet - the listener keeps receiving signals until
+ * Stage an UNLISTEN by recording it in pendingListenActions.  We don't
+ * touch globalChannelTable yet - the listener keeps receiving signals until
  * commit, when the entry is removed.
  */
 static void
-Exec_UnlistenPreCommitStage(const char *channel)
+PrepareTableEntriesForUnlisten(const char *channel)
 {
 	struct PendingListenEntry *pending;
 	bool		found;
 
 	/*
 	 * Record in local pending hash that we want to UNLISTEN. Don't touch
-	 * listenChannelsHash or channelHash yet - we keep receiving signals until
+	 * localChannelTable or globalChannelTable yet - we keep receiving signals until
 	 * commit.
 	 */
 	pending = (struct PendingListenEntry *)
-		hash_search(pendingListenChannels, channel, HASH_ENTER, &found);
+		hash_search(pendingListenActions, channel, HASH_ENTER, &found);
 	pending->listening = false;
 }
 
 /*
- * Exec_UnlistenAllPreCommitStage --- subroutine for PreCommit_Notify
+ * PrepareTableEntriesForUnlistenAll --- subroutine for PreCommit_Notify
  *
- * Stage UNLISTEN * by recording all listened channels in pendingListenChannels
+ * Stage UNLISTEN * by recording all listened channels in pendingListenActions
  * with listening=false.
  */
 static void
-Exec_UnlistenAllPreCommitStage(void)
+PrepareTableEntriesForUnlistenAll(void)
 {
 	HASH_SEQ_STATUS seq;
 	struct ChannelName *channelEntry;
 	struct PendingListenEntry *pending;
 
 	/*
-	 * First, set all existing entries in pendingListenChannels to false. This
+	 * First, set all existing entries in pendingListenActions to false. This
 	 * handles the case of LISTEN foo; UNLISTEN ALL - foo needs to be marked
-	 * as unlisten even though it's not in listenChannelsHash yet.
+	 * as unlisten even though it's not in localChannelTable yet.
 	 */
-	hash_seq_init(&seq, pendingListenChannels);
+	hash_seq_init(&seq, pendingListenActions);
 	while ((pending = (struct PendingListenEntry *) hash_seq_search(&seq)) != NULL)
 		pending->listening = false;
 
 	/*
-	 * Then scan listenChannelsHash (committed channels) and add any that
-	 * aren't already in pendingListenChannels.
+	 * Then scan localChannelTable (committed channels) and add any that
+	 * aren't already in pendingListenActions.
 	 */
-	if (listenChannelsHash != NULL)
+	if (localChannelTable != NULL)
 	{
-		hash_seq_init(&seq, listenChannelsHash);
+		hash_seq_init(&seq, localChannelTable);
 		while ((channelEntry = (struct ChannelName *) hash_seq_search(&seq)) != NULL)
 		{
 			bool		found;
 
 			pending = (struct PendingListenEntry *)
-				hash_search(pendingListenChannels, channelEntry->channel, HASH_ENTER, &found);
+				hash_search(pendingListenActions, channelEntry->channel, HASH_ENTER, &found);
 			pending->listening = false;
 		}
 	}
@@ -1652,17 +1705,17 @@ CleanupListenersOnExit(void)
 		elog(DEBUG1, "CleanupListenersOnExit(%d)", MyProcPid);
 
 	/* Clear our local cache */
-	if (listenChannelsHash != NULL)
+	if (localChannelTable != NULL)
 	{
-		hash_destroy(listenChannelsHash);
-		listenChannelsHash = NULL;
+		hash_destroy(localChannelTable);
+		localChannelTable = NULL;
 	}
 
-	/* Now remove from the shared channelHash */
-	if (channelHash == NULL)
+	/* Now remove from the shared globalChannelTable */
+	if (globalChannelTable == NULL)
 		return;
 
-	dshash_seq_init(&status, channelHash, true);
+	dshash_seq_init(&status, globalChannelTable, true);
 	while ((entry = dshash_seq_next(&status)) != NULL)
 	{
 		if (entry->key.dboid == MyDatabaseId)
@@ -1670,7 +1723,7 @@ CleanupListenersOnExit(void)
 			ListenerEntry *listeners;
 			int			i;
 
-			listeners = (ListenerEntry *) dsa_get_address(channelDSA,
+			listeners = (ListenerEntry *) dsa_get_address(globalChannelDSA,
 														  entry->listenersArray);
 
 			for (i = 0; i < entry->numListeners; i++)
@@ -1684,7 +1737,7 @@ CleanupListenersOnExit(void)
 
 					if (entry->numListeners == 0)
 					{
-						dsa_free(channelDSA, entry->listenersArray);
+						dsa_free(globalChannelDSA, entry->listenersArray);
 						dshash_delete_current(&status);
 					}
 					break;
@@ -1703,10 +1756,10 @@ CleanupListenersOnExit(void)
 static bool
 IsListeningOn(const char *channel)
 {
-	if (listenChannelsHash == NULL)
+	if (localChannelTable == NULL)
 		return false;
 
-	return (hash_search(listenChannelsHash, channel, HASH_FIND, NULL) != NULL);
+	return (hash_search(localChannelTable, channel, HASH_FIND, NULL) != NULL);
 }
 
 /*
@@ -1716,7 +1769,7 @@ IsListeningOn(const char *channel)
 static void
 asyncQueueUnregister(void)
 {
-	Assert(listenChannelsHash == NULL || hash_get_num_entries(listenChannelsHash) == 0);	/* else caller error */
+	Assert(localChannelTable == NULL || hash_get_num_entries(localChannelTable) == 0);	/* else caller error */
 
 	if (!amRegisteredListener)	/* nothing to do */
 		return;
@@ -2092,18 +2145,18 @@ SignalBackends(void)
 		ChannelListeners *entry = NULL;
 		ListenerEntry *listeners;
 
-		if (channelHash != NULL)
+		if (globalChannelTable != NULL)
 		{
 			ChannelHashKey key;
 
 			ChannelHashPrepareKey(&key, MyDatabaseId, channel);
-			entry = dshash_find(channelHash, &key, false);
+			entry = dshash_find(globalChannelTable, &key, false);
 		}
 
 		if (entry == NULL)
 			continue;
 
-		listeners = (ListenerEntry *) dsa_get_address(channelDSA,
+		listeners = (ListenerEntry *) dsa_get_address(globalChannelDSA,
 													  entry->listenersArray);
 
 		for (int j = 0; j < entry->numListeners; j++)
@@ -2135,7 +2188,7 @@ SignalBackends(void)
 			count++;
 		}
 
-		dshash_release_lock(channelHash, entry);
+		dshash_release_lock(globalChannelTable, entry);
 	}
 
 	if (pendingNotifies != NULL)
@@ -2204,77 +2257,33 @@ SignalBackends(void)
 /*
  * AtAbort_Notify
  *
- *	This is called at transaction abort.
+ *		This is called at transaction abort.
  *
- *	Revert any staged listen/unlisten changes and clean up transaction state.
+ *		If we haven't gotten as far as PreCommit_Notify, there is nothing to do
+ *		here since pendingListenActions will be NULL and we made no changes to
+ *		shared data structures.
+ *
+ *		The more complex cleanup only runs in a rare case: when a transaction
+ *		fails AFTER PreCommit_Notify has staged changes in pendingListenActions
+ *		and the shared globalChannelTable, but BEFORE AtCommit_Notify completes.
+ *		This narrow window means the cleanup code is difficult to reach in tests,
+ *		but by sharing code with AtCommit_Notify via ProcessPendingListenActions,
+ *		we ensure this logic stays tested.
+ *
+ *		For staged LISTENs (entries with listening=false in globalChannelTable),
+ *		we must remove the pre-allocated entries from both tables.
+ *		For staged UNLISTENs on committed channels, there is nothing to undo
+ *		since we did not modify globalChannelTable during staging.
  */
 void
 AtAbort_Notify(void)
 {
-	/*
-	 * Revert staged listen/unlisten changes.  For staged LISTENs (entries
-	 * with listening=false), remove from channelHash.  For staged UNLISTENs
-	 * on committed channels (entries with listening=true), nothing to undo
-	 * since we didn't modify channelHash during staging.
-	 */
-	if (pendingListenChannels != NULL && channelHash != NULL)
-	{
-		HASH_SEQ_STATUS seq;
-		struct PendingListenEntry *pending;
-
-		hash_seq_init(&seq, pendingListenChannels);
-		while ((pending = (struct PendingListenEntry *) hash_seq_search(&seq)) != NULL)
-		{
-			ChannelHashKey key;
-			ChannelListeners *entry;
-			ListenerEntry *listeners;
-
-			ChannelHashPrepareKey(&key, MyDatabaseId, pending->channel);
-			entry = dshash_find(channelHash, &key, true);
-			if (entry == NULL)
-				continue;
-
-			listeners = (ListenerEntry *) dsa_get_address(channelDSA, entry->listenersArray);
-
-			for (int i = 0; i < entry->numListeners; i++)
-			{
-				if (listeners[i].procNo == MyProcNumber)
-				{
-					if (!listeners[i].listening)
-					{
-						/* Staged LISTEN (or LISTEN+UNLISTEN) being aborted */
-						/* Remove pre-allocated entries from both hashes */
-						(void) hash_search(listenChannelsHash, pending->channel,
-										   HASH_REMOVE, NULL);
-						entry->numListeners--;
-						if (i < entry->numListeners)
-							memmove(&listeners[i], &listeners[i + 1],
-									sizeof(ListenerEntry) * (entry->numListeners - i));
-
-						if (entry->numListeners == 0)
-						{
-							dsa_free(channelDSA, entry->listenersArray);
-							dshash_delete_entry(channelHash, entry);
-							entry = NULL;
-						}
-					}
-
-					/*
-					 * else: UNLISTEN on committed channel being aborted -
-					 * nothing to undo
-					 */
-					break;
-				}
-			}
-
-			if (entry != NULL)
-				dshash_release_lock(channelHash, entry);
-		}
-	}
+	/* Revert staged listen/unlisten changes */
+	ProcessPendingListenActions(false);
 
 	/* If we're no longer listening on anything, unregister */
 	if (amRegisteredListener &&
-		(listenChannelsHash == NULL || hash_get_num_entries(listenChannelsHash) == 0))
+		(localChannelTable == NULL || hash_get_num_entries(localChannelTable) == 0))
 		asyncQueueUnregister();
 
 	/* And clean up */
@@ -2510,7 +2519,7 @@ asyncQueueReadAllNotifications(void)
 	 *
 	 * What we do guarantee is that we'll see all notifications from
 	 * transactions committing after the snapshot we take here.
-	 * Exec_ListenPreCommit has already added us to the listener array,
+	 * BecomeRegisteredListener has already added us to the listener array,
 	 * so no not-yet-committed messages can be removed from the queue
 	 * before we see them.
 	 *----------
@@ -2661,7 +2670,7 @@ asyncQueueProcessPageEntries(QueuePosition *current,
 			 * over it on the first LISTEN in a session, and not get stuck on
 			 * it indefinitely.
 			 */
-			if (listenChannelsHash == NULL || hash_get_num_entries(listenChannelsHash) == 0)
+			if (localChannelTable == NULL || hash_get_num_entries(localChannelTable) == 0)
 				continue;
 
 			if (TransactionIdDidCommit(qe->xid))
@@ -2916,7 +2925,7 @@ ProcessIncomingNotify(bool flush)
 	notifyInterruptPending = false;
 
 	/* Do nothing else if we aren't actively listening */
-	if (listenChannelsHash == NULL || hash_get_num_entries(listenChannelsHash) == 0)
+	if (localChannelTable == NULL || hash_get_num_entries(localChannelTable) == 0)
 		return;
 
 	if (Trace_notify)
@@ -3027,7 +3036,7 @@ AddEventToPendingNotifies(Notification *n)
 		HASHCTL		hash_ctl;
 		ListCell   *l;
 
-		Assert(pendingNotifies->channelSet == NULL);
+		Assert(pendingNotifies->uniqueChannelNames == NULL);
 
 		/* Create the hash table */
 		hash_ctl.keysize = sizeof(Notification *);
@@ -3041,13 +3050,13 @@ AddEventToPendingNotifies(Notification *n)
 						&hash_ctl,
 						HASH_ELEM | HASH_FUNCTION | HASH_COMPARE | HASH_CONTEXT);
 
-		/* Create the channel hash table */
+		/* Create the uniqueChannelNames hash table */
 		memset(&hash_ctl, 0, sizeof(hash_ctl));
 		hash_ctl.keysize = NAMEDATALEN;
 		hash_ctl.entrysize = sizeof(struct ChannelName);
 		hash_ctl.hcxt = CurTransactionContext;
-		pendingNotifies->channelSet =
-			hash_create("Pending Notify Channels",
+		pendingNotifies->uniqueChannelNames =
+			hash_create("Unique Pending Notify Channels",
 						64L,
 						&hash_ctl,
 						HASH_ELEM | HASH_STRINGS | HASH_CONTEXT);
@@ -3065,8 +3074,8 @@ AddEventToPendingNotifies(Notification *n)
 							   &found);
 			Assert(!found);
 
-			/* Insert channel into channelSet */
-			(void) hash_search(pendingNotifies->channelSet,
+			/* Insert channel into uniqueChannelNames */
+			(void) hash_search(pendingNotifies->uniqueChannelNames,
 							   channel,
 							   HASH_ENTER,
 							   &found);
@@ -3082,7 +3091,7 @@ AddEventToPendingNotifies(Notification *n)
 	{
 		bool		found;
 
-		Assert(pendingNotifies->channelSet != NULL);
+		Assert(pendingNotifies->uniqueChannelNames != NULL);
 
 		(void) hash_search(pendingNotifies->hashtab,
 						   &n,
@@ -3090,11 +3099,11 @@ AddEventToPendingNotifies(Notification *n)
 						   &found);
 		Assert(!found);
 
-		/* Add channel to channelSet */
+		/* Add channel to uniqueChannelNames */
 		{
 			char	   *channel = n->data;
 
-			(void) hash_search(pendingNotifies->channelSet,
+			(void) hash_search(pendingNotifies->uniqueChannelNames,
 							   channel,
 							   HASH_ENTER,
 							   &found);
@@ -3150,10 +3159,10 @@ ClearPendingActionsAndNotifies(void)
 	pendingActions = NULL;
 	pendingNotifies = NULL;
 	pendingNotifyChannels = NIL;
-	if (pendingListenChannels != NULL)
+	if (pendingListenActions != NULL)
 	{
-		hash_destroy(pendingListenChannels);
-		pendingListenChannels = NULL;
+		hash_destroy(pendingListenActions);
+		pendingListenActions = NULL;
 	}
 }
 
