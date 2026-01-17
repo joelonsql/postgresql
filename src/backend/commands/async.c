@@ -162,6 +162,10 @@
 #include <unistd.h>
 #include <signal.h>
 
+#ifdef __APPLE__
+#include <pthread/qos.h>
+#endif
+
 #include "access/parallel.h"
 #include "access/slru.h"
 #include "access/transam.h"
@@ -2591,6 +2595,10 @@ asyncQueueReadAllNotifications(void)
 	QueuePosition pos;
 	QueuePosition head;
 	Snapshot	snapshot;
+#ifdef __APPLE__
+	qos_class_t saved_qos_class;
+	int			saved_relative_priority;
+#endif
 
 	/*
 	 * Fetch current state, indicate to others that we have woken up, and that
@@ -2612,6 +2620,21 @@ asyncQueueReadAllNotifications(void)
 
 	QUEUE_BACKEND_IS_ADVANCING(MyProcNumber) = true;
 	LWLockRelease(NotifyQueueLock);
+
+#ifdef __APPLE__
+	/*
+	 * On macOS, boost QoS to USER_INITIATED for the catch-up work.  The macOS
+	 * XNU scheduler aggressively penalizes compute-bound threads by reducing
+	 * their priority and time quantum.  This catch-up loop is compute-bound
+	 * (memory access, hash lookups) with no I/O to naturally yield the CPU.
+	 * USER_INITIATED tells the scheduler the user is waiting for this work,
+	 * preventing excessive preemption that would otherwise cause latency
+	 * spikes.
+	 */
+	pthread_get_qos_class_np(pthread_self(), &saved_qos_class,
+							 &saved_relative_priority);
+	pthread_set_qos_class_self_np(QOS_CLASS_USER_INITIATED, 0);
+#endif
 
 	/*----------
 	 * Get snapshot we'll use to decide which xacts are still in progress.
@@ -2705,6 +2728,11 @@ asyncQueueReadAllNotifications(void)
 
 		ExitOnAnyError = save_ExitOnAnyError;
 	}
+
+#ifdef __APPLE__
+	/* Restore original QoS class */
+	pthread_set_qos_class_self_np(saved_qos_class, saved_relative_priority);
+#endif
 
 	/* Done with snapshot */
 	UnregisterSnapshot(snapshot);
