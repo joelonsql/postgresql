@@ -1582,3 +1582,35 @@ SELECT pg_lsn(18446744073709551615::numeric);
 SELECT pg_lsn(-1::numeric);
 SELECT pg_lsn(18446744073709551616::numeric);
 SELECT pg_lsn('NaN'::numeric);
+
+--
+-- Detect numeric disk format changes
+--
+CREATE TABLE num_test_disk_format
+(
+  c1 numeric, c2 numeric, c3 numeric, c4 numeric,
+  c5 numeric, c6 numeric, c7 numeric, c8 numeric,
+  c9 numeric, c10 numeric, c11 numeric, c12 numeric
+);
+
+INSERT INTO num_test_disk_format
+(
+   c1, c2, c3, c4,
+   c5, c6, c7, c8,
+   c9, c10, c11, c12
+)
+VALUES
+(
+    0, 1, 2, 3,
+    255, 256, 9999, (10000 * 0xab + 0xcd)::numeric * 10000 + 0xef,
+    4, 5, 6, 7
+);
+
+CHECKPOINT;
+
+SELECT regexp_replace(
+    right(encode(pg_read_binary_file(pg_relation_filepath('num_test_disk_format')),'hex'),16*8),
+    '([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})',
+    '\1 \2 \3 \4 \5 \6 \7 \8'||E'\n',
+    'g'
+);

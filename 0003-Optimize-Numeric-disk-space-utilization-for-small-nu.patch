@@ -1,0 +1,461 @@
+From d52a227539fee998cc7e591ef9fa4313578b467f Mon Sep 17 00:00:00 2001
+From: Joel Jakobsson <joel@compiler.org>
+Date: Thu, 16 Feb 2023 22:43:14 +0100
+Subject: [PATCH 3/3] Optimize Numeric disk space utilization for small
+ numbers.
+
+This patch reduces storage size by two bytes for numbers that fit in a single
+NBASE-digit and that also fit in a single byte, i.e. are less than or equal
+to 0xff (255).
+
+Since such numbers will also only occupy one byte in the palloc'd data in
+memory when read from disk, we cannot just copy the pointer in
+init_var_from_num() for such values, since reading the NumericDigit would
+read beyond the single byte. To avoid having to do an additional palloc,
+add a new fixed-width NumericDigit array, fixed_buf[2], to NumericVar,
+which will be on the stack when used by init_var_from_num().
+---
+ src/backend/utils/adt/numeric.c       | 191 ++++++++++++++++++++------
+ src/test/regress/expected/numeric.out |  17 ++-
+ src/test/regress/sql/numeric.sql      |   2 +-
+ 3 files changed, 161 insertions(+), 49 deletions(-)
+
+diff --git a/src/backend/utils/adt/numeric.c b/src/backend/utils/adt/numeric.c
+index c2d3b58d51..fc266ab3a3 100644
+--- a/src/backend/utils/adt/numeric.c
++++ b/src/backend/utils/adt/numeric.c
+@@ -310,6 +310,7 @@ typedef struct NumericVar
+ 	int			dscale;			/* display scale */
+ 	NumericDigit *buf;			/* start of palloc'd space for digits[] */
+ 	NumericDigit *digits;		/* base-NBASE digits */
++	NumericDigit fixed_buf[2];
+ } NumericVar;
+
+
+@@ -415,18 +416,18 @@ typedef struct NumericSumAccum
+  */
+ static const NumericDigit const_zero_data[1] = {0};
+ static const NumericVar const_zero =
+-{0, 0, NUMERIC_POS, 0, NULL, (NumericDigit *) const_zero_data};
++{0, 0, NUMERIC_POS, 0, NULL, (NumericDigit *) const_zero_data, {0}};
+
+ static const NumericDigit const_one_data[1] = {1};
+ static const NumericVar const_one =
+-{1, 0, NUMERIC_POS, 0, NULL, (NumericDigit *) const_one_data};
++{1, 0, NUMERIC_POS, 0, NULL, (NumericDigit *) const_one_data, {0}};
+
+ static const NumericVar const_minus_one =
+-{1, 0, NUMERIC_NEG, 0, NULL, (NumericDigit *) const_one_data};
++{1, 0, NUMERIC_NEG, 0, NULL, (NumericDigit *) const_one_data, {0}};
+
+ static const NumericDigit const_two_data[1] = {2};
+ static const NumericVar const_two =
+-{1, 0, NUMERIC_POS, 0, NULL, (NumericDigit *) const_two_data};
++{1, 0, NUMERIC_POS, 0, NULL, (NumericDigit *) const_two_data, {0}};
+
+ #if DEC_DIGITS == 4
+ static const NumericDigit const_zero_point_nine_data[1] = {9000};
+@@ -436,7 +437,7 @@ static const NumericDigit const_zero_point_nine_data[1] = {90};
+ static const NumericDigit const_zero_point_nine_data[1] = {9};
+ #endif
+ static const NumericVar const_zero_point_nine =
+-{1, -1, NUMERIC_POS, 1, NULL, (NumericDigit *) const_zero_point_nine_data};
++{1, -1, NUMERIC_POS, 1, NULL, (NumericDigit *) const_zero_point_nine_data, {0}};
+
+ #if DEC_DIGITS == 4
+ static const NumericDigit const_one_point_one_data[2] = {1, 1000};
+@@ -446,16 +447,16 @@ static const NumericDigit const_one_point_one_data[2] = {1, 10};
+ static const NumericDigit const_one_point_one_data[2] = {1, 1};
+ #endif
+ static const NumericVar const_one_point_one =
+-{2, 0, NUMERIC_POS, 1, NULL, (NumericDigit *) const_one_point_one_data};
++{2, 0, NUMERIC_POS, 1, NULL, (NumericDigit *) const_one_point_one_data, {0}};
+
+ static const NumericVar const_nan =
+-{0, 0, NUMERIC_NAN, 0, NULL, NULL};
++{0, 0, NUMERIC_NAN, 0, NULL, NULL, {0}};
+
+ static const NumericVar const_pinf =
+-{0, 0, NUMERIC_PINF, 0, NULL, NULL};
++{0, 0, NUMERIC_PINF, 0, NULL, NULL, {0}};
+
+ static const NumericVar const_ninf =
+-{0, 0, NUMERIC_NINF, 0, NULL, NULL};
++{0, 0, NUMERIC_NINF, 0, NULL, NULL, {0}};
+
+ #if DEC_DIGITS == 4
+ static const int round_powers[4] = {0, 1000, 100, 10};
+@@ -2535,9 +2536,40 @@ cmp_numerics(Numeric num1, Numeric num2)
+ 	}
+ 	else
+ 	{
+-		result = cmp_var_common((NumericDigit *) NUMERIC_DIGITS(num1), NUMERIC_NDIGITS(num1),
++		NumericDigitData *disk_digits1 = NUMERIC_DIGITS(num1);
++		NumericDigitData *disk_digits2 = NUMERIC_DIGITS(num2);
++		NumericDigit *digits1;
++		NumericDigit *digits2;
++		NumericDigit fixed_buf1[2] = {0};
++		NumericDigit fixed_buf2[2] = {0};
++		int nbytes1 = NUMERIC_NBYTES(num1);
++		int nbytes2 = NUMERIC_NBYTES(num2);
++		int ndigits1 = (nbytes1 + 1) / sizeof(NumericDigit);
++		int ndigits2 = (nbytes2 + 1) / sizeof(NumericDigit);
++
++		if (nbytes1 == 1)
++		{
++			fixed_buf1[1] = (NumericDigit) disk_digits1[0];
++			digits1 = fixed_buf1 + 1;
++		}
++		else
++		{
++			digits1 = (NumericDigit *) disk_digits1;
++		}
++
++		if (nbytes2 == 1)
++		{
++			fixed_buf2[1] = (NumericDigit) disk_digits2[0];
++			digits2 = fixed_buf2 + 1;
++		}
++		else
++		{
++			digits2 = (NumericDigit *) disk_digits2;
++		}
++
++		result = cmp_var_common(digits1, ndigits1,
+ 								NUMERIC_WEIGHT(num1), NUMERIC_SIGN(num1),
+-								(NumericDigit *) NUMERIC_DIGITS(num2), NUMERIC_NDIGITS(num2),
++								digits2, ndigits2,
+ 								NUMERIC_WEIGHT(num2), NUMERIC_SIGN(num2));
+ 	}
+
+@@ -2693,7 +2725,11 @@ hash_numeric(PG_FUNCTION_ARGS)
+ 	int			end_offset;
+ 	int			i;
+ 	int			hash_len;
++	int			ndigits;
++	int			nbytes;
++	NumericDigitData *disk_digits;
+ 	NumericDigit *digits;
++	NumericDigit fixed_buf[2];
+
+ 	/* If it's NaN or infinity, don't try to hash the rest of the fields */
+ 	if (NUMERIC_IS_SPECIAL(key))
+@@ -2709,8 +2745,21 @@ hash_numeric(PG_FUNCTION_ARGS)
+ 	 * zeros are suppressed, but we're paranoid. Note that we measure the
+ 	 * starting and ending offsets in units of NumericDigits, not bytes.
+ 	 */
+-	digits = (NumericDigit *) NUMERIC_DIGITS(key);
+-	for (i = 0; i < NUMERIC_NDIGITS(key); i++)
++	disk_digits = NUMERIC_DIGITS(key);
++	nbytes = NUMERIC_NBYTES(key);
++	ndigits = (nbytes + 1) / sizeof(NumericDigit);
++	if (nbytes == 1)
++	{
++		fixed_buf[0] = 0;
++		fixed_buf[1] = (NumericDigit) disk_digits[0];
++		digits = fixed_buf + 1;
++	}
++	else
++	{
++		digits = (NumericDigit *) disk_digits;
++	}
++
++	for (i = 0; i < ndigits; i++)
+ 	{
+ 		if (digits[i] != (NumericDigit) 0)
+ 			break;
+@@ -2728,10 +2777,10 @@ hash_numeric(PG_FUNCTION_ARGS)
+ 	 * If there are no non-zero digits, then the value of the number is zero,
+ 	 * regardless of any other fields.
+ 	 */
+-	if (NUMERIC_NDIGITS(key) == start_offset)
++	if (ndigits == start_offset)
+ 		PG_RETURN_UINT32(-1);
+
+-	for (i = NUMERIC_NDIGITS(key) - 1; i >= 0; i--)
++	for (i = ndigits - 1; i >= 0; i--)
+ 	{
+ 		if (digits[i] != (NumericDigit) 0)
+ 			break;
+@@ -2740,7 +2789,7 @@ hash_numeric(PG_FUNCTION_ARGS)
+ 	}
+
+ 	/* If we get here, there should be at least one non-zero digit */
+-	Assert(start_offset + end_offset < NUMERIC_NDIGITS(key));
++	Assert(start_offset + end_offset < ndigits);
+
+ 	/*
+ 	 * Note that we don't hash on the Numeric's scale, since two numerics can
+@@ -2748,7 +2797,7 @@ hash_numeric(PG_FUNCTION_ARGS)
+ 	 * sign, although we could: since a sign difference implies inequality,
+ 	 * this shouldn't affect correctness.
+ 	 */
+-	hash_len = NUMERIC_NDIGITS(key) - start_offset - end_offset;
++	hash_len = ndigits - start_offset - end_offset;
+ 	digit_hash = hash_any((unsigned char *) (digits + start_offset),
+ 						  hash_len * sizeof(NumericDigit));
+
+@@ -2774,7 +2823,11 @@ hash_numeric_extended(PG_FUNCTION_ARGS)
+ 	int			end_offset;
+ 	int			i;
+ 	int			hash_len;
++	int			ndigits;
++	int			nbytes;
++	NumericDigitData *disk_digits;
+ 	NumericDigit *digits;
++	NumericDigit fixed_buf[2];
+
+ 	/* If it's NaN or infinity, don't try to hash the rest of the fields */
+ 	if (NUMERIC_IS_SPECIAL(key))
+@@ -2784,9 +2837,21 @@ hash_numeric_extended(PG_FUNCTION_ARGS)
+ 	start_offset = 0;
+ 	end_offset = 0;
+
+-	digits = (NumericDigit *) NUMERIC_DIGITS(key);
++	disk_digits = NUMERIC_DIGITS(key);
++	nbytes = NUMERIC_NBYTES(key);
++	ndigits = (nbytes + 1) / sizeof(NumericDigit);
++	if (nbytes == 1)
++	{
++		fixed_buf[0] = 0;
++		fixed_buf[1] = (NumericDigit) disk_digits[0];
++		digits = fixed_buf + 1;
++	}
++	else
++	{
++		digits = (NumericDigit *) disk_digits;
++	}
+
+-	for (i = 0; i < NUMERIC_NDIGITS(key); i++)
++	for (i = 0; i < ndigits; i++)
+ 	{
+ 		if (digits[i] != (NumericDigit) 0)
+ 			break;
+@@ -2796,10 +2861,10 @@ hash_numeric_extended(PG_FUNCTION_ARGS)
+ 		weight--;
+ 	}
+
+-	if (NUMERIC_NDIGITS(key) == start_offset)
++	if (ndigits == start_offset)
+ 		PG_RETURN_UINT64(seed - 1);
+
+-	for (i = NUMERIC_NDIGITS(key) - 1; i >= 0; i--)
++	for (i = ndigits - 1; i >= 0; i--)
+ 	{
+ 		if (digits[i] != (NumericDigit) 0)
+ 			break;
+@@ -2807,10 +2872,11 @@ hash_numeric_extended(PG_FUNCTION_ARGS)
+ 		end_offset++;
+ 	}
+
+-	Assert(start_offset + end_offset < NUMERIC_NDIGITS(key));
++	Assert(start_offset + end_offset < ndigits);
+
+-	hash_len = NUMERIC_NDIGITS(key) - start_offset - end_offset;
+-	digit_hash = hash_any_extended((unsigned char *) (digits + start_offset),
++	hash_len = ndigits - start_offset - end_offset;
++	digit_hash = hash_any_extended((unsigned char *) (digits
++													  + start_offset),
+ 								   hash_len * sizeof(NumericDigit),
+ 								   seed);
+
+@@ -6777,11 +6843,18 @@ int2int4_sum(PG_FUNCTION_ARGS)
+ static void
+ dump_numeric(const char *str, Numeric num)
+ {
+-	NumericDigit *digits = NUMERIC_DIGITS(num);
++	NumericDigitData *disk_digits;
++	NumericDigit *digits;
+ 	int			ndigits;
+ 	int			i;
+
++	disk_digits = NUMERIC_DIGITS(num);
+ 	ndigits = NUMERIC_NDIGITS(num);
++	digits = digitbuf_alloc(ndigits);
++	for (i = 0; i < ndigits; i++)
++	{
++		digits[i] = (NumericDigit) *((int16 *) &disk_digits[i*2]);
++	}
+
+ 	printf("%s: NUMERIC w=%d d=%d ", str,
+ 		   NUMERIC_WEIGHT(num), NUMERIC_DSCALE(num));
+@@ -6873,9 +6946,17 @@ static void
+ alloc_var(NumericVar *var, int ndigits)
+ {
+ 	digitbuf_free(var->buf);
+-	var->buf = digitbuf_alloc(ndigits + 1);
+-	var->buf[0] = 0;			/* spare digit for rounding */
+-	var->digits = var->buf + 1;
++	if (ndigits == 1)
++	{
++		var->fixed_buf[0] = 0;		/* spare digit for rounding */
++		var->digits = var->fixed_buf + 1;
++	}
++	else
++	{
++		var->buf = digitbuf_alloc(ndigits + 1);
++		var->buf[0] = 0;			/* spare digit for rounding */
++		var->digits = var->buf + 1;
++	}
+ 	var->ndigits = ndigits;
+ }
+
+@@ -7339,17 +7420,22 @@ invalid_syntax:
+ static void
+ set_var_from_num(Numeric num, NumericVar *dest)
+ {
+-	int			ndigits;
++	int nbytes = NUMERIC_NBYTES(num);
+
+-	ndigits = NUMERIC_NDIGITS(num);
+-
+-	alloc_var(dest, ndigits);
++	alloc_var(dest, (nbytes + 1) / sizeof(NumericDigit));
+
+ 	dest->weight = NUMERIC_WEIGHT(num);
+ 	dest->sign = NUMERIC_SIGN(num);
+ 	dest->dscale = NUMERIC_DSCALE(num);
+
+-	memcpy(dest->digits, NUMERIC_DIGITS(num), ndigits * sizeof(NumericDigit));
++	if (nbytes == 1)
++	{
++		dest->digits[0] = (NumericDigit) (NUMERIC_DIGITS(num))[0];
++	}
++	else
++	{
++		memcpy(dest->digits, NUMERIC_DIGITS(num), nbytes);
++	}
+ }
+
+
+@@ -7370,11 +7456,24 @@ set_var_from_num(Numeric num, NumericVar *dest)
+ static void
+ init_var_from_num(Numeric num, NumericVar *dest)
+ {
+-	dest->ndigits = NUMERIC_NDIGITS(num);
++	int	nbytes = NUMERIC_NBYTES(num);
++
++	if (nbytes == 1)
++	{
++		dest->ndigits = 1;
++		dest->fixed_buf[0] = 0;
++		dest->fixed_buf[1] = (NUMERIC_DIGITS(num))[0];
++		dest->digits = dest->fixed_buf + 1;
++	}
++	else
++	{
++		dest->ndigits = (nbytes + 1) / sizeof(NumericDigit);
++		dest->digits = (NumericDigit *) NUMERIC_DIGITS(num);
++	}
++
+ 	dest->weight = NUMERIC_WEIGHT(num);
+ 	dest->sign = NUMERIC_SIGN(num);
+ 	dest->dscale = NUMERIC_DSCALE(num);
+-	dest->digits = (NumericDigit *) NUMERIC_DIGITS(num);
+ 	dest->buf = NULL;			/* digits array is not palloc'd */
+ }
+
+@@ -7707,6 +7806,7 @@ make_result_opt_error(const NumericVar *var, bool *have_error)
+ 	int			sign = var->sign;
+ 	int			n;
+ 	Size		len;
++	int			n_bytes;
+
+ 	if (have_error)
+ 		*have_error = false;
+@@ -7751,12 +7851,18 @@ make_result_opt_error(const NumericVar *var, bool *have_error)
+ 	{
+ 		weight = 0;
+ 		sign = NUMERIC_POS;
++		n_bytes = 0;
++	}
++	else
++	{
++		n_bytes = (n == 1 && digits[0] <= (NumericDigit) 255)
++			? 1 : n * sizeof(NumericDigit);
+ 	}
+
+ 	/* Build the result */
+ 	if (NUMERIC_CAN_BE_SHORT(var->dscale, weight))
+ 	{
+-		len = NUMERIC_HDRSZ_SHORT + n * sizeof(NumericDigit);
++		len = NUMERIC_HDRSZ_SHORT + n_bytes;
+ 		result = (Numeric) palloc(len);
+ 		SET_VARSIZE(result, len);
+ 		result->choice.n_short.n_header =
+@@ -7768,7 +7874,7 @@ make_result_opt_error(const NumericVar *var, bool *have_error)
+ 	}
+ 	else
+ 	{
+-		len = NUMERIC_HDRSZ + n * sizeof(NumericDigit);
++		len = NUMERIC_HDRSZ + n_bytes;
+ 		result = (Numeric) palloc(len);
+ 		SET_VARSIZE(result, len);
+ 		result->choice.n_long.n_sign_dscale =
+@@ -7777,8 +7883,15 @@ make_result_opt_error(const NumericVar *var, bool *have_error)
+ 	}
+
+ 	Assert(NUMERIC_NDIGITS(result) == n);
+-	if (n > 0)
+-		memcpy(NUMERIC_DIGITS(result), digits, n * sizeof(NumericDigit));
++
++	if (n_bytes == 1)
++	{
++		(NUMERIC_DIGITS(result))[0] = (uint8) digits[0];
++	}
++	else if (n > 0)
++	{
++		memcpy(NUMERIC_DIGITS(result), digits, n_bytes);
++	}
+
+ 	/* Check for overflow of int16 fields */
+ 	if (NUMERIC_WEIGHT(result) != weight ||
+diff --git a/src/test/regress/expected/numeric.out b/src/test/regress/expected/numeric.out
+index e77bf267d0..4731ad3fa2 100644
+--- a/src/test/regress/expected/numeric.out
++++ b/src/test/regress/expected/numeric.out
+@@ -3551,21 +3551,20 @@ VALUES
+ );
+ CHECKPOINT;
+ SELECT regexp_replace(
+-    right(encode(pg_read_binary_file(pg_relation_filepath('num_test_disk_format')),'hex'),16*8),
++    right(encode(pg_read_binary_file(pg_relation_filepath('num_test_disk_format')),'hex'),16*7),
+     '([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})',
+     '\1 \2 \3 \4 \5 \6 \7 \8'||E'\n',
+     'g'
+ );
+      regexp_replace      
+ -------------------------
+- 07 00 80 0b 00 80 01 00+
+- 0b 00 80 02 00 0b 00 80+
+- 03 00 0b 00 80 ff 00 0b+
+- 00 80 00 01 0b 00 80 0f+
+- 27 13 02 80 ab 00 cd 00+
+- ef 00 0b 00 80 04 00 0b+
+- 00 80 05 00 0b 00 80 06+
+- 00 0b 00 80 07 00 00 00+
++ 07 00 80 09 00 80 01 09+
++ 00 80 02 09 00 80 03 09+
++ 00 80 ff 0b 00 80 00 01+
++ 0b 00 80 0f 27 13 02 80+
++ ab 00 cd 00 ef 00 09 00+
++ 80 04 09 00 80 05 09 00+
++ 80 06 09 00 80 07 00 00+
+  
+ (1 row)
+
+diff --git a/src/test/regress/sql/numeric.sql b/src/test/regress/sql/numeric.sql
+index 8a6b8d941b..562194132a 100644
+--- a/src/test/regress/sql/numeric.sql
++++ b/src/test/regress/sql/numeric.sql
+@@ -1503,7 +1503,7 @@ VALUES
+ CHECKPOINT;
+
+ SELECT regexp_replace(
+-    right(encode(pg_read_binary_file(pg_relation_filepath('num_test_disk_format')),'hex'),16*8),
++    right(encode(pg_read_binary_file(pg_relation_filepath('num_test_disk_format')),'hex'),16*7),
+     '([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})',
+     '\1 \2 \3 \4 \5 \6 \7 \8'||E'\n',
+     'g'
+--
+2.37.1 (Apple Git-137.1)

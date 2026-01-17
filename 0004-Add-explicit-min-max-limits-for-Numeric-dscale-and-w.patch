@@ -1,0 +1,69 @@
+From 250b3675e3d20468e14a22b5f3f86189a1e124c2 Mon Sep 17 00:00:00 2001
+From: Joel Jakobsson <joel@compiler.org>
+Date: Fri, 17 Feb 2023 00:44:44 +0100
+Subject: [PATCH 4/6] Add explicit min/max limits for Numeric dscale and weight.
+
+This patch adds explicit min/max limits for the dscale and weight fields in the
+NumericData struct. The limits are necessary to prepare for changing the
+NumericDigit type from int16 to int32 without unintentionally changing the
+limits for dscale and weight.
+
+The old overflow checks using NUMERIC_WEIGHT() and NUMERIC_DSCALE() have been
+replaced with explicit checks that catch overflows and return or raise errors,
+thus never reaching the new asserts.
+
+NUMERIC_DSCALE_MAX was already defined as 0x3FFFF (16383).
+
+NUMERIC_DSCALE_MIN is set to 0, as negative output dscale is not allowed.
+
+NUMERIC_WEIGHT_MAX is calculated as (0x20000 / DEC_DIGITS) - 1, where 0x20000
+represents 131072 in hex and evaluates to 0x7FFF (32767) for DEC_DIGITS = 4.
+
+NUMERIC_WEIGHT_MIN is calculated as -(NUMERIC_DSCALE_MAX + 1) / DEC_DIGITS,
+and evaluates to -4096 for DEC_DIGITS = 4.
+---
+ src/backend/utils/adt/numeric.c | 15 ++++++++++++---
+ 1 file changed, 12 insertions(+), 3 deletions(-)
+
+diff --git a/src/backend/utils/adt/numeric.c b/src/backend/utils/adt/numeric.c
+index fc266ab3a3..63b4baedba 100644
+--- a/src/backend/utils/adt/numeric.c
++++ b/src/backend/utils/adt/numeric.c
+@@ -234,6 +234,9 @@ struct NumericData
+
+ #define NUMERIC_DSCALE_MASK			0x3FFF
+ #define NUMERIC_DSCALE_MAX			NUMERIC_DSCALE_MASK
++#define NUMERIC_DSCALE_MIN			0
++#define NUMERIC_WEIGHT_MAX			((0x20000/DEC_DIGITS)-1)
++#define NUMERIC_WEIGHT_MIN			(-(NUMERIC_DSCALE_MAX+1)/DEC_DIGITS)
+
+ #define NUMERIC_SIGN(n) \
+ 	(NUMERIC_IS_SHORT(n) ? \
+@@ -7893,9 +7896,11 @@ make_result_opt_error(const NumericVar *var, bool *have_error)
+ 		memcpy(NUMERIC_DIGITS(result), digits, n_bytes);
+ 	}
+
+-	/* Check for overflow of int16 fields */
+-	if (NUMERIC_WEIGHT(result) != weight ||
+-		NUMERIC_DSCALE(result) != var->dscale)
++	/* Check for overflow */
++	if (weight > NUMERIC_WEIGHT_MAX ||
++		weight < NUMERIC_WEIGHT_MIN ||
++		var->dscale < NUMERIC_DSCALE_MIN ||
++		var->dscale > NUMERIC_DSCALE_MAX)
+ 	{
+ 		if (have_error)
+ 		{
+@@ -7910,6 +7915,10 @@ make_result_opt_error(const NumericVar *var, bool *have_error)
+ 		}
+ 	}
+
++	/* Assert no overflow of int16 fields */
++	Assert(NUMERIC_WEIGHT(result) == weight);
++	Assert(NUMERIC_DSCALE(result) == var->dscale);
++
+ 	dump_numeric("make_result()", result);
+ 	return result;
+ }
+--
+2.37.1 (Apple Git-137.1)
