@@ -100,6 +100,7 @@ typedef signed char NumericDigit;
 #define MUL_GUARD_DIGITS	2	/* these are measured in NBASE digits */
 #define DIV_GUARD_DIGITS	4
 
+typedef uint8 NumericDigitData;
 typedef int16 NumericDigit;
 #endif
 
@@ -137,14 +138,14 @@ typedef int16 NumericDigit;
 struct NumericShort
 {
 	uint16		n_header;		/* Sign + display scale + weight */
-	NumericDigit n_data[FLEXIBLE_ARRAY_MEMBER]; /* Digits */
+	NumericDigitData n_data[FLEXIBLE_ARRAY_MEMBER]; /* Digits */
 };
 
 struct NumericLong
 {
 	uint16		n_sign_dscale;	/* Sign + display scale */
 	int16		n_weight;		/* Weight of 1st digit	*/
-	NumericDigit n_data[FLEXIBLE_ARRAY_MEMBER]; /* Digits */
+	NumericDigitData n_data[FLEXIBLE_ARRAY_MEMBER]; /* Digits */
 };
 
 union NumericChoice
@@ -487,8 +488,8 @@ static void dump_var(const char *str, NumericVar *var);
 
 #define NUMERIC_DIGITS(num) (NUMERIC_HEADER_IS_SHORT(num) ? \
 	(num)->choice.n_short.n_data : (num)->choice.n_long.n_data)
-#define NUMERIC_NDIGITS(num) \
-	((VARSIZE(num) - NUMERIC_HEADER_SIZE(num)) / sizeof(NumericDigit))
+#define NUMERIC_NBYTES(num) (VARSIZE(num) - NUMERIC_HEADER_SIZE(num))
+#define NUMERIC_NDIGITS(num) ((NUMERIC_NBYTES(num) + 1) / sizeof(NumericDigit))
 #define NUMERIC_CAN_BE_SHORT(scale,weight) \
 	((scale) <= NUMERIC_SHORT_DSCALE_MAX && \
 	(weight) <= NUMERIC_SHORT_WEIGHT_MAX && \
@@ -2562,9 +2563,9 @@ cmp_numerics(Numeric num1, Numeric num2)
 	}
 	else
 	{
-		result = cmp_var_common(NUMERIC_DIGITS(num1), NUMERIC_NDIGITS(num1),
+		result = cmp_var_common((NumericDigit *) NUMERIC_DIGITS(num1), NUMERIC_NDIGITS(num1),
 								NUMERIC_WEIGHT(num1), NUMERIC_SIGN(num1),
-								NUMERIC_DIGITS(num2), NUMERIC_NDIGITS(num2),
+								(NumericDigit *) NUMERIC_DIGITS(num2), NUMERIC_NDIGITS(num2),
 								NUMERIC_WEIGHT(num2), NUMERIC_SIGN(num2));
 	}
 
@@ -2736,7 +2737,7 @@ hash_numeric(PG_FUNCTION_ARGS)
 	 * zeros are suppressed, but we're paranoid. Note that we measure the
 	 * starting and ending offsets in units of NumericDigits, not bytes.
 	 */
-	digits = NUMERIC_DIGITS(key);
+	digits = (NumericDigit *) NUMERIC_DIGITS(key);
 	for (i = 0; i < NUMERIC_NDIGITS(key); i++)
 	{
 		if (digits[i] != (NumericDigit) 0)
@@ -2776,7 +2777,7 @@ hash_numeric(PG_FUNCTION_ARGS)
 	 * this shouldn't affect correctness.
 	 */
 	hash_len = NUMERIC_NDIGITS(key) - start_offset - end_offset;
-	digit_hash = hash_any((unsigned char *) (NUMERIC_DIGITS(key) + start_offset),
+	digit_hash = hash_any((unsigned char *) (digits + start_offset),
 						  hash_len * sizeof(NumericDigit));
 
 	/* Mix in the weight, via XOR */
@@ -2811,7 +2812,8 @@ hash_numeric_extended(PG_FUNCTION_ARGS)
 	start_offset = 0;
 	end_offset = 0;
 
-	digits = NUMERIC_DIGITS(key);
+	digits = (NumericDigit *) NUMERIC_DIGITS(key);
+
 	for (i = 0; i < NUMERIC_NDIGITS(key); i++)
 	{
 		if (digits[i] != (NumericDigit) 0)
@@ -2836,8 +2838,7 @@ hash_numeric_extended(PG_FUNCTION_ARGS)
 	Assert(start_offset + end_offset < NUMERIC_NDIGITS(key));
 
 	hash_len = NUMERIC_NDIGITS(key) - start_offset - end_offset;
-	digit_hash = hash_any_extended((unsigned char *) (NUMERIC_DIGITS(key)
-													  + start_offset),
+	digit_hash = hash_any_extended((unsigned char *) (digits + start_offset),
 								   hash_len * sizeof(NumericDigit),
 								   seed);
 
@@ -7184,7 +7185,7 @@ init_var_from_num(Numeric num, NumericVar *dest)
 	dest->weight = NUMERIC_WEIGHT(num);
 	dest->sign = NUMERIC_SIGN(num);
 	dest->dscale = NUMERIC_DSCALE(num);
-	dest->digits = NUMERIC_DIGITS(num);
+	dest->digits = (NumericDigit *) NUMERIC_DIGITS(num);
 	dest->buf = NULL;			/* digits array is not palloc'd */
 }
 
