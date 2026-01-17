@@ -546,6 +546,12 @@ static bool unlistenExitRegistered = false;
 /* True if we're currently registered as a listener in asyncQueueControl */
 static bool amRegisteredListener = false;
 
+#ifdef __APPLE__
+/* Saved QoS class from before we became a listener */
+static qos_class_t saved_listener_qos_class;
+static int saved_listener_relative_priority;
+#endif
+
 /*
  * Queue head positions for direct advancement.
  * These are captured during PreCommit_Notify while holding the heavyweight
@@ -1501,6 +1507,18 @@ BecomeRegisteredListener(void)
 	/* Now we are listed in the global array, so remember we're listening */
 	amRegisteredListener = true;
 
+#ifdef __APPLE__
+	/*
+	 * Boost QoS to USER_INITIATED for the entire time we're a listener.
+	 * The macOS XNU scheduler penalizes compute-bound threads, which can
+	 * cause latency spikes in notification processing.  USER_INITIATED
+	 * tells the scheduler the user is waiting for this work.
+	 */
+	pthread_get_qos_class_np(pthread_self(), &saved_listener_qos_class,
+							 &saved_listener_relative_priority);
+	pthread_set_qos_class_self_np(QOS_CLASS_USER_INITIATED, 0);
+#endif
+
 	/*
 	 * Try to move our pointer forward as far as possible.  This will skip
 	 * over already-committed notifications, which we want to do because they
@@ -1940,6 +1958,12 @@ asyncQueueUnregister(void)
 	}
 	QUEUE_NEXT_LISTENER(MyProcNumber) = INVALID_PROC_NUMBER;
 	LWLockRelease(NotifyQueueLock);
+
+#ifdef __APPLE__
+	/* Restore original QoS class now that we're no longer listening */
+	pthread_set_qos_class_self_np(saved_listener_qos_class,
+								  saved_listener_relative_priority);
+#endif
 
 	/* mark ourselves as no longer listed in the global array */
 	amRegisteredListener = false;
@@ -2595,10 +2619,6 @@ asyncQueueReadAllNotifications(void)
 	QueuePosition pos;
 	QueuePosition head;
 	Snapshot	snapshot;
-#ifdef __APPLE__
-	qos_class_t saved_qos_class;
-	int			saved_relative_priority;
-#endif
 
 	/*
 	 * Fetch current state, indicate to others that we have woken up, and that
@@ -2620,21 +2640,6 @@ asyncQueueReadAllNotifications(void)
 
 	QUEUE_BACKEND_IS_ADVANCING(MyProcNumber) = true;
 	LWLockRelease(NotifyQueueLock);
-
-#ifdef __APPLE__
-	/*
-	 * On macOS, boost QoS to USER_INITIATED for the catch-up work.  The macOS
-	 * XNU scheduler aggressively penalizes compute-bound threads by reducing
-	 * their priority and time quantum.  This catch-up loop is compute-bound
-	 * (memory access, hash lookups) with no I/O to naturally yield the CPU.
-	 * USER_INITIATED tells the scheduler the user is waiting for this work,
-	 * preventing excessive preemption that would otherwise cause latency
-	 * spikes.
-	 */
-	pthread_get_qos_class_np(pthread_self(), &saved_qos_class,
-							 &saved_relative_priority);
-	pthread_set_qos_class_self_np(QOS_CLASS_USER_INITIATED, 0);
-#endif
 
 	/*----------
 	 * Get snapshot we'll use to decide which xacts are still in progress.
@@ -2728,11 +2733,6 @@ asyncQueueReadAllNotifications(void)
 
 		ExitOnAnyError = save_ExitOnAnyError;
 	}
-
-#ifdef __APPLE__
-	/* Restore original QoS class */
-	pthread_set_qos_class_self_np(saved_qos_class, saved_relative_priority);
-#endif
 
 	/* Done with snapshot */
 	UnregisterSnapshot(snapshot);
