@@ -101,7 +101,7 @@ typedef signed char NumericDigit;
 #define DIV_GUARD_DIGITS	4
 
 typedef uint8 NumericDigitData;
-typedef int16 NumericDigit;
+typedef int32 NumericDigit;
 #endif
 
 #define NBASE_SQR	(NBASE * NBASE)
@@ -485,7 +485,8 @@ static void dump_var(const char *str, NumericVar *var);
 #define NUMERIC_DIGITS(num) (NUMERIC_HEADER_IS_SHORT(num) ? \
 	(num)->choice.n_short.n_data : (num)->choice.n_long.n_data)
 #define NUMERIC_NBYTES(num) (VARSIZE(num) - NUMERIC_HEADER_SIZE(num))
-#define NUMERIC_NDIGITS(num) ((NUMERIC_NBYTES(num) + 1) / sizeof(NumericDigit))
+#define NUMERIC_NDIGITS(num) \
+	((NUMERIC_NBYTES(num) + sizeof(NumericDigit) - 1) / sizeof(NumericDigit))
 #define NUMERIC_CAN_BE_SHORT(scale,weight) \
 	((scale) <= NUMERIC_SHORT_DSCALE_MAX && \
 	(weight) <= NUMERIC_SHORT_WEIGHT_MAX && \
@@ -1156,7 +1157,7 @@ numeric_send(PG_FUNCTION_ARGS)
 	pq_sendint16(&buf, x.sign);
 	pq_sendint16(&buf, x.dscale);
 	for (i = 0; i < x.ndigits; i++)
-		pq_sendint16(&buf, x.digits[i]);
+		pq_sendint32(&buf, x.digits[i]);
 
 	PG_RETURN_BYTEA_P(pq_endtypsend(&buf));
 }
@@ -7457,7 +7458,7 @@ numericvar_serialize(StringInfo buf, const NumericVar *var)
 	pq_sendint32(buf, var->sign);
 	pq_sendint32(buf, var->dscale);
 	for (i = 0; i < var->ndigits; i++)
-		pq_sendint16(buf, var->digits[i]);
+		pq_sendint32(buf, var->digits[i]);
 }
 
 /*
@@ -7477,7 +7478,7 @@ numericvar_deserialize(StringInfo buf, NumericVar *var)
 	var->sign = pq_getmsgint(buf, sizeof(int32));
 	var->dscale = pq_getmsgint(buf, sizeof(int32));
 	for (i = 0; i < len; i++)
-		var->digits[i] = pq_getmsgint(buf, sizeof(int16));
+		var->digits[i] = pq_getmsgint(buf, sizeof(int32));
 }
 
 
@@ -12086,10 +12087,10 @@ accum_sum_final(NumericSumAccum *accum, NumericVar *result)
 	for (i = 0; i < accum->ndigits; i++)
 	{
 		Assert(accum->pos_digits[i] < NBASE);
-		pos_var.digits[i] = (int16) accum->pos_digits[i];
+		pos_var.digits[i] = accum->pos_digits[i];
 
 		Assert(accum->neg_digits[i] < NBASE);
-		neg_var.digits[i] = (int16) accum->neg_digits[i];
+		neg_var.digits[i] = accum->neg_digits[i];
 	}
 
 	/* And add them together */
