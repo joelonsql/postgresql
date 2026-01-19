@@ -8792,6 +8792,7 @@ mul_var(const NumericVar *var1, const NumericVar *var2, NumericVar *result,
 	int			var2ndigits;
 	NumericDigit *var1digits;
 	NumericDigit *var2digits;
+	NumericDigit *var2copy;
 	NumericDigit *res_digits;
 	int			i,
 				i1,
@@ -8886,13 +8887,50 @@ mul_var(const NumericVar *var1, const NumericVar *var2, NumericVar *result,
 	 * possible value divided by NBASE-1, ie, at the top of the loop it is
 	 * known that no dig[] entry exceeds maxdig * (NBASE-1).
 	 */
-	dig = (uint64 *) palloc0(res_ndigits * sizeof(uint64));
+	/*
+	 * Allocate result digit array and var2 copy contiguously for better cache
+	 * locality in the inner loop, which accesses both arrays.
+	 */
+	dig = (uint64 *) palloc(res_ndigits * sizeof(uint64) +
+							var2ndigits * sizeof(NumericDigit));
+	var2copy = (NumericDigit *) (dig + res_ndigits);
+	memcpy(var2copy, var2digits, var2ndigits * sizeof(NumericDigit));
 	maxdig = 0;
 
 	/*
 	 * The outer loop iterates over the digits of var1.
+	 *
+	 * The first iteration is special: we use plain assignment (=) instead of
+	 * addition (+=), and only zero the portion of dig[] that we write to.
+	 * This avoids zeroing the entire array upfront.
 	 */
 	for (i1 = var1ndigits - 1; i1 >= 0; i1--)
+	{
+		NumericDigit var1digit = var1digits[i1];
+
+		if (var1digit == 0)
+			continue;
+
+		/* Found first non-zero digit; handle specially */
+		{
+			int			i2limit = Min(var2ndigits, res_ndigits - i1 - 2);
+			uint64	   *dig_i1_2 = &dig[i1 + 2];
+
+			/* Zero only the portion we're about to write, plus leading part */
+			memset(dig, 0, (i1 + 2) * sizeof(uint64));
+
+			for (i2 = 0; i2 < i2limit; i2++)
+				dig_i1_2[i2] = (uint64) var1digit * var2copy[i2];
+		}
+		maxdig = var1digit;
+		i1--;
+		break;
+	}
+
+	/*
+	 * Remaining iterations: add var1digit * var2 to the accumulator.
+	 */
+	for (; i1 >= 0; i1--)
 	{
 		NumericDigit var1digit = var1digits[i1];
 
@@ -8933,7 +8971,7 @@ mul_var(const NumericVar *var1, const NumericVar *var2, NumericVar *result,
 			uint64	   *dig_i1_2 = &dig[i1 + 2];
 
 			for (i2 = 0; i2 < i2limit; i2++)
-				dig_i1_2[i2] += (uint64) var1digit * var2digits[i2];
+				dig_i1_2[i2] += (uint64) var1digit * var2copy[i2];
 		}
 	}
 
