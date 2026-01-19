@@ -779,11 +779,20 @@ ProcessStartupPacket(Port *port, bool ssl_done, bool gss_done)
 			{
 				/*
 				 * Any option beginning with _pq_. is reserved for use as a
-				 * protocol-level option, but at present no such options are
-				 * defined.
+				 * protocol-level option.
 				 */
-				unrecognized_protocol_options =
-					lappend(unrecognized_protocol_options, pstrdup(nameptr));
+				if (strcmp(nameptr, "_pq_.numeric_nbase") == 0)
+				{
+					if (strcmp(valptr, "1e8") == 0)
+						port->numeric_nbase_1e8 = true;
+					/* Silently ignore other values for forward compatibility */
+				}
+				else
+				{
+					/* Unrecognized _pq_. option */
+					unrecognized_protocol_options =
+						lappend(unrecognized_protocol_options, pstrdup(nameptr));
+				}
 			}
 			else
 			{

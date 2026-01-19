@@ -1499,8 +1499,9 @@ pqGetNegotiateProtocolVersion3(PGconn *conn)
 	conn->pversion = their_version;
 
 	/*
-	 * We don't currently request any protocol extensions, so we don't expect
-	 * the server to reply with any either.
+	 * Process any protocol options that the server doesn't recognize.
+	 * We currently request _pq_.numeric_nbase, which older servers won't
+	 * understand - that's fine, they'll just send the old format.
 	 */
 	for (int i = 0; i < num; i++)
 	{
@@ -1513,6 +1514,19 @@ pqGetNegotiateProtocolVersion3(PGconn *conn)
 			libpq_append_conn_error(conn, "received invalid protocol negotiation message: server reported unsupported parameter name without a \"%s\" prefix (\"%s\")", "_pq_.", conn->workBuffer.data);
 			goto failure;
 		}
+
+		/*
+		 * Check if this is an option we actually requested.  Currently
+		 * we only request _pq_.numeric_nbase, which older servers won't
+		 * understand.  That's okay - we'll just receive the old format.
+		 */
+		if (strcmp(conn->workBuffer.data, "_pq_.numeric_nbase") == 0)
+		{
+			/* Server doesn't support NBASE=1e8, will send NBASE=1e4 */
+			continue;
+		}
+
+		/* Unknown option that we didn't request - this is an error */
 		libpq_append_conn_error(conn, "received invalid protocol negotiation message: server reported an unsupported parameter that was not requested (\"%s\")", conn->workBuffer.data);
 		goto failure;
 	}
@@ -2463,6 +2477,13 @@ build_startup_packet(const PGconn *conn, char *packet,
 
 	if (conn->client_encoding_initial && conn->client_encoding_initial[0])
 		ADD_STARTUP_OPTION("client_encoding", conn->client_encoding_initial);
+
+	/*
+	 * Request NBASE=1e8 numeric binary format.  If the server doesn't
+	 * recognize this option, it will return NegotiateProtocolVersion
+	 * listing it as unrecognized, and will send NBASE=1e4 format.
+	 */
+	ADD_STARTUP_OPTION("_pq_.numeric_nbase", "1e8");
 
 	/* Add any environment-driven GUC settings needed */
 	for (next_eo = options; next_eo->envName; next_eo++)

@@ -1,0 +1,1188 @@
+-- psql -q -f /Users/joel/numeric-test/init.sql > nbase1e4.out  0.01s user 0.01s system 0% cpu 2:03.84 total
+ setseed 
+---------
+ 
+(1 row)
+
+Time: 0.316 ms
+ndigits=1
+Time: 550.124 ms
+Time: 576.870 ms
+Time: 558.663 ms
+ndigits=2
+Time: 522.577 ms
+Time: 585.351 ms
+Time: 565.256 ms
+ndigits=3
+Time: 537.743 ms
+Time: 671.778 ms
+Time: 582.765 ms
+ndigits=4
+Time: 553.512 ms
+Time: 794.142 ms
+Time: 571.979 ms
+ndigits=5
+Time: 525.223 ms
+Time: 639.038 ms
+Time: 609.180 ms
+ndigits=6
+Time: 564.143 ms
+Time: 638.817 ms
+Time: 950.258 ms
+ndigits=7
+Time: 575.513 ms
+Time: 674.134 ms
+Time: 650.680 ms
+ndigits=8
+Time: 497.581 ms
+Time: 552.244 ms
+Time: 537.077 ms
+ndigits=9
+Time: 523.586 ms
+Time: 589.662 ms
+Time: 552.688 ms
+ndigits=10
+Time: 612.498 ms
+Time: 704.306 ms
+Time: 633.654 ms
+ndigits=100
+Time: 790.622 ms
+Time: 911.281 ms
+Time: 842.674 ms
+ndigits=1000
+Time: 426.227 ms
+Time: 509.940 ms
+Time: 495.485 ms
+ndigits=10000
+Time: 517.791 ms
+Time: 549.318 ms
+Time: 507.334 ms
+ndigits=100000
+Time: 542.569 ms
+Time: 509.993 ms
+Time: 465.483 ms
+ndigits=mixed
+Time: 4561.101 ms (00:04.561)
+Time: 4443.936 ms (00:04.444)
+Time: 4656.805 ms (00:04.657)
+add ndigits=1
+ hash_numeric 
+--------------
+  -2012848097
+(1 row)
+
+Time: 85.119 ms
+ hash_numeric 
+--------------
+  -2012848097
+(1 row)
+
+Time: 83.977 ms
+ hash_numeric 
+--------------
+  -2012848097
+(1 row)
+
+Time: 85.005 ms
+add ndigits=2
+ hash_numeric 
+--------------
+  -2012848097
+(1 row)
+
+Time: 87.316 ms
+ hash_numeric 
+--------------
+  -2012848097
+(1 row)
+
+Time: 86.974 ms
+ hash_numeric 
+--------------
+  -2012848097
+(1 row)
+
+Time: 88.198 ms
+add ndigits=3
+ hash_numeric 
+--------------
+  -2012848097
+(1 row)
+
+Time: 84.574 ms
+ hash_numeric 
+--------------
+  -2012848097
+(1 row)
+
+Time: 83.215 ms
+ hash_numeric 
+--------------
+  -2012848097
+(1 row)
+
+Time: 83.606 ms
+add ndigits=4
+ hash_numeric 
+--------------
+  -2012848097
+(1 row)
+
+Time: 85.486 ms
+ hash_numeric 
+--------------
+  -2012848097
+(1 row)
+
+Time: 84.651 ms
+ hash_numeric 
+--------------
+  -2012848097
+(1 row)
+
+Time: 84.882 ms
+add ndigits=5
+ hash_numeric 
+--------------
+  -2012848097
+(1 row)
+
+Time: 89.386 ms
+ hash_numeric 
+--------------
+  -2012848097
+(1 row)
+
+Time: 88.749 ms
+ hash_numeric 
+--------------
+  -2012848097
+(1 row)
+
+Time: 88.405 ms
+add ndigits=6
+ hash_numeric 
+--------------
+  -2012848097
+(1 row)
+
+Time: 141.093 ms
+ hash_numeric 
+--------------
+  -2012848097
+(1 row)
+
+Time: 93.810 ms
+ hash_numeric 
+--------------
+  -2012848097
+(1 row)
+
+Time: 93.552 ms
+add ndigits=7
+ hash_numeric 
+--------------
+  -2012848097
+(1 row)
+
+Time: 1034.771 ms (00:01.035)
+ hash_numeric 
+--------------
+  -2012848097
+(1 row)
+
+Time: 93.886 ms
+ hash_numeric 
+--------------
+  -2012848097
+(1 row)
+
+Time: 94.028 ms
+add ndigits=8
+ hash_numeric 
+--------------
+  -2012848097
+(1 row)
+
+Time: 1063.832 ms (00:01.064)
+ hash_numeric 
+--------------
+  -2012848097
+(1 row)
+
+Time: 94.200 ms
+ hash_numeric 
+--------------
+  -2012848097
+(1 row)
+
+Time: 94.396 ms
+add ndigits=9
+ hash_numeric 
+--------------
+  -2012848097
+(1 row)
+
+Time: 1172.098 ms (00:01.172)
+ hash_numeric 
+--------------
+  -2012848097
+(1 row)
+
+Time: 98.700 ms
+ hash_numeric 
+--------------
+  -2012848097
+(1 row)
+
+Time: 98.412 ms
+add ndigits=10
+ hash_numeric 
+--------------
+  -2012848097
+(1 row)
+
+Time: 1116.175 ms (00:01.116)
+ hash_numeric 
+--------------
+  -2012848097
+(1 row)
+
+Time: 103.029 ms
+ hash_numeric 
+--------------
+  -2012848097
+(1 row)
+
+Time: 105.184 ms
+add ndigits=100
+ hash_numeric 
+--------------
+  -2012848097
+(1 row)
+
+Time: 1707.010 ms (00:01.707)
+ hash_numeric 
+--------------
+  -2012848097
+(1 row)
+
+Time: 122.708 ms
+ hash_numeric 
+--------------
+  -2012848097
+(1 row)
+
+Time: 123.151 ms
+add ndigits=1000
+ hash_numeric 
+--------------
+   -282860964
+(1 row)
+
+Time: 1617.204 ms (00:01.617)
+ hash_numeric 
+--------------
+   -282860964
+(1 row)
+
+Time: 47.055 ms
+ hash_numeric 
+--------------
+   -282860964
+(1 row)
+
+Time: 47.386 ms
+add ndigits=10000
+ hash_numeric 
+--------------
+    140640842
+(1 row)
+
+Time: 414.871 ms
+ hash_numeric 
+--------------
+    140640842
+(1 row)
+
+Time: 82.806 ms
+ hash_numeric 
+--------------
+    140640842
+(1 row)
+
+Time: 72.962 ms
+add ndigits=100000
+ hash_numeric 
+--------------
+    407037373
+(1 row)
+
+Time: 205.995 ms
+ hash_numeric 
+--------------
+    407037373
+(1 row)
+
+Time: 202.766 ms
+ hash_numeric 
+--------------
+    407037373
+(1 row)
+
+Time: 212.963 ms
+add ndigits=mixed
+ hash_numeric 
+--------------
+    140640842
+(1 row)
+
+Time: 227.906 ms
+ hash_numeric 
+--------------
+    140640842
+(1 row)
+
+Time: 197.134 ms
+ hash_numeric 
+--------------
+    140640842
+(1 row)
+
+Time: 194.546 ms
+sub ndigits=1
+ hash_numeric 
+--------------
+  -2012848097
+(1 row)
+
+Time: 83.165 ms
+ hash_numeric 
+--------------
+  -2012848097
+(1 row)
+
+Time: 82.301 ms
+ hash_numeric 
+--------------
+  -2012848097
+(1 row)
+
+Time: 82.610 ms
+sub ndigits=2
+ hash_numeric 
+--------------
+  -2012848097
+(1 row)
+
+Time: 87.048 ms
+ hash_numeric 
+--------------
+  -2012848097
+(1 row)
+
+Time: 86.325 ms
+ hash_numeric 
+--------------
+  -2012848097
+(1 row)
+
+Time: 86.287 ms
+sub ndigits=3
+ hash_numeric 
+--------------
+  -2012848097
+(1 row)
+
+Time: 85.802 ms
+ hash_numeric 
+--------------
+  -2012848097
+(1 row)
+
+Time: 86.681 ms
+ hash_numeric 
+--------------
+  -2012848097
+(1 row)
+
+Time: 87.720 ms
+sub ndigits=4
+ hash_numeric 
+--------------
+  -2012848097
+(1 row)
+
+Time: 86.484 ms
+ hash_numeric 
+--------------
+  -2012848097
+(1 row)
+
+Time: 85.571 ms
+ hash_numeric 
+--------------
+  -2012848097
+(1 row)
+
+Time: 84.978 ms
+sub ndigits=5
+ hash_numeric 
+--------------
+  -2012848097
+(1 row)
+
+Time: 90.554 ms
+ hash_numeric 
+--------------
+  -2012848097
+(1 row)
+
+Time: 89.376 ms
+ hash_numeric 
+--------------
+  -2012848097
+(1 row)
+
+Time: 90.807 ms
+sub ndigits=6
+ hash_numeric 
+--------------
+  -2012848097
+(1 row)
+
+Time: 91.387 ms
+ hash_numeric 
+--------------
+  -2012848097
+(1 row)
+
+Time: 91.219 ms
+ hash_numeric 
+--------------
+  -2012848097
+(1 row)
+
+Time: 90.896 ms
+sub ndigits=7
+ hash_numeric 
+--------------
+  -2012848097
+(1 row)
+
+Time: 92.668 ms
+ hash_numeric 
+--------------
+  -2012848097
+(1 row)
+
+Time: 91.060 ms
+ hash_numeric 
+--------------
+  -2012848097
+(1 row)
+
+Time: 89.707 ms
+sub ndigits=8
+ hash_numeric 
+--------------
+  -2012848097
+(1 row)
+
+Time: 92.873 ms
+ hash_numeric 
+--------------
+  -2012848097
+(1 row)
+
+Time: 91.794 ms
+ hash_numeric 
+--------------
+  -2012848097
+(1 row)
+
+Time: 91.167 ms
+sub ndigits=9
+ hash_numeric 
+--------------
+  -2012848097
+(1 row)
+
+Time: 97.411 ms
+ hash_numeric 
+--------------
+  -2012848097
+(1 row)
+
+Time: 95.732 ms
+ hash_numeric 
+--------------
+  -2012848097
+(1 row)
+
+Time: 95.238 ms
+sub ndigits=10
+ hash_numeric 
+--------------
+  -2012848097
+(1 row)
+
+Time: 99.249 ms
+ hash_numeric 
+--------------
+  -2012848097
+(1 row)
+
+Time: 98.746 ms
+ hash_numeric 
+--------------
+  -2012848097
+(1 row)
+
+Time: 99.192 ms
+sub ndigits=100
+ hash_numeric 
+--------------
+  -2012848097
+(1 row)
+
+Time: 117.365 ms
+ hash_numeric 
+--------------
+  -2012848097
+(1 row)
+
+Time: 117.315 ms
+ hash_numeric 
+--------------
+  -2012848097
+(1 row)
+
+Time: 116.219 ms
+sub ndigits=1000
+ hash_numeric 
+--------------
+   -282860964
+(1 row)
+
+Time: 39.757 ms
+ hash_numeric 
+--------------
+   -282860964
+(1 row)
+
+Time: 38.453 ms
+ hash_numeric 
+--------------
+   -282860964
+(1 row)
+
+Time: 41.469 ms
+sub ndigits=10000
+ hash_numeric 
+--------------
+    140640842
+(1 row)
+
+Time: 67.724 ms
+ hash_numeric 
+--------------
+    140640842
+(1 row)
+
+Time: 65.516 ms
+ hash_numeric 
+--------------
+    140640842
+(1 row)
+
+Time: 65.508 ms
+sub ndigits=100000
+ hash_numeric 
+--------------
+    407037373
+(1 row)
+
+Time: 168.829 ms
+ hash_numeric 
+--------------
+    407037373
+(1 row)
+
+Time: 160.607 ms
+ hash_numeric 
+--------------
+    407037373
+(1 row)
+
+Time: 161.393 ms
+sub ndigits=mixed
+ hash_numeric 
+--------------
+    140640842
+(1 row)
+
+Time: 192.762 ms
+ hash_numeric 
+--------------
+    140640842
+(1 row)
+
+Time: 195.720 ms
+ hash_numeric 
+--------------
+    140640842
+(1 row)
+
+Time: 193.430 ms
+mul ndigits=1
+ hash_numeric 
+--------------
+  -2012848097
+(1 row)
+
+Time: 81.429 ms
+ hash_numeric 
+--------------
+  -2012848097
+(1 row)
+
+Time: 79.466 ms
+ hash_numeric 
+--------------
+  -2012848097
+(1 row)
+
+Time: 80.555 ms
+mul ndigits=2
+ hash_numeric 
+--------------
+  -2012848097
+(1 row)
+
+Time: 80.342 ms
+ hash_numeric 
+--------------
+  -2012848097
+(1 row)
+
+Time: 82.146 ms
+ hash_numeric 
+--------------
+  -2012848097
+(1 row)
+
+Time: 79.865 ms
+mul ndigits=3
+ hash_numeric 
+--------------
+  -2012848097
+(1 row)
+
+Time: 78.526 ms
+ hash_numeric 
+--------------
+  -2012848097
+(1 row)
+
+Time: 78.956 ms
+ hash_numeric 
+--------------
+  -2012848097
+(1 row)
+
+Time: 79.877 ms
+mul ndigits=4
+ hash_numeric 
+--------------
+  -2012848097
+(1 row)
+
+Time: 81.142 ms
+ hash_numeric 
+--------------
+  -2012848097
+(1 row)
+
+Time: 79.470 ms
+ hash_numeric 
+--------------
+  -2012848097
+(1 row)
+
+Time: 79.913 ms
+mul ndigits=5
+ hash_numeric 
+--------------
+  -2012848097
+(1 row)
+
+Time: 90.053 ms
+ hash_numeric 
+--------------
+  -2012848097
+(1 row)
+
+Time: 89.641 ms
+ hash_numeric 
+--------------
+  -2012848097
+(1 row)
+
+Time: 89.673 ms
+mul ndigits=6
+ hash_numeric 
+--------------
+  -2012848097
+(1 row)
+
+Time: 95.448 ms
+ hash_numeric 
+--------------
+  -2012848097
+(1 row)
+
+Time: 95.335 ms
+ hash_numeric 
+--------------
+  -2012848097
+(1 row)
+
+Time: 95.433 ms
+mul ndigits=7
+ hash_numeric 
+--------------
+  -2012848097
+(1 row)
+
+Time: 108.097 ms
+ hash_numeric 
+--------------
+  -2012848097
+(1 row)
+
+Time: 108.861 ms
+ hash_numeric 
+--------------
+  -2012848097
+(1 row)
+
+Time: 108.463 ms
+mul ndigits=8
+ hash_numeric 
+--------------
+  -2012848097
+(1 row)
+
+Time: 109.071 ms
+ hash_numeric 
+--------------
+  -2012848097
+(1 row)
+
+Time: 108.848 ms
+ hash_numeric 
+--------------
+  -2012848097
+(1 row)
+
+Time: 109.021 ms
+mul ndigits=9
+ hash_numeric 
+--------------
+  -2012848097
+(1 row)
+
+Time: 117.557 ms
+ hash_numeric 
+--------------
+  -2012848097
+(1 row)
+
+Time: 117.033 ms
+ hash_numeric 
+--------------
+  -2012848097
+(1 row)
+
+Time: 116.382 ms
+mul ndigits=10
+ hash_numeric 
+--------------
+  -2012848097
+(1 row)
+
+Time: 121.579 ms
+ hash_numeric 
+--------------
+  -2012848097
+(1 row)
+
+Time: 120.105 ms
+ hash_numeric 
+--------------
+  -2012848097
+(1 row)
+
+Time: 118.509 ms
+mul ndigits=100
+ hash_numeric 
+--------------
+  -2012848097
+(1 row)
+
+Time: 188.748 ms
+ hash_numeric 
+--------------
+  -2012848097
+(1 row)
+
+Time: 190.805 ms
+ hash_numeric 
+--------------
+  -2012848097
+(1 row)
+
+Time: 189.821 ms
+mul ndigits=1000
+ hash_numeric 
+--------------
+   -282860964
+(1 row)
+
+Time: 256.731 ms
+ hash_numeric 
+--------------
+   -282860964
+(1 row)
+
+Time: 258.341 ms
+ hash_numeric 
+--------------
+   -282860964
+(1 row)
+
+Time: 256.499 ms
+mul ndigits=10000
+ hash_numeric 
+--------------
+    140640842
+(1 row)
+
+Time: 2239.627 ms (00:02.240)
+ hash_numeric 
+--------------
+    140640842
+(1 row)
+
+Time: 2263.688 ms (00:02.264)
+ hash_numeric 
+--------------
+    140640842
+(1 row)
+
+Time: 2235.018 ms (00:02.235)
+mul ndigits=mixed
+ hash_numeric 
+--------------
+    140640842
+(1 row)
+
+Time: 14339.811 ms (00:14.340)
+ hash_numeric 
+--------------
+    140640842
+(1 row)
+
+Time: 14365.759 ms (00:14.366)
+ hash_numeric 
+--------------
+    140640842
+(1 row)
+
+Time: 14343.807 ms (00:14.344)
+div ndigits=1
+ hash_numeric 
+--------------
+  -2012848097
+(1 row)
+
+Time: 105.704 ms
+ hash_numeric 
+--------------
+  -2012848097
+(1 row)
+
+Time: 104.886 ms
+ hash_numeric 
+--------------
+  -2012848097
+(1 row)
+
+Time: 105.704 ms
+div ndigits=2
+ hash_numeric 
+--------------
+  -2012848097
+(1 row)
+
+Time: 112.813 ms
+ hash_numeric 
+--------------
+  -2012848097
+(1 row)
+
+Time: 111.583 ms
+ hash_numeric 
+--------------
+  -2012848097
+(1 row)
+
+Time: 111.778 ms
+div ndigits=3
+ hash_numeric 
+--------------
+  -2012848097
+(1 row)
+
+Time: 113.143 ms
+ hash_numeric 
+--------------
+  -2012848097
+(1 row)
+
+Time: 113.586 ms
+ hash_numeric 
+--------------
+  -2012848097
+(1 row)
+
+Time: 112.525 ms
+div ndigits=4
+ hash_numeric 
+--------------
+  -2012848097
+(1 row)
+
+Time: 145.326 ms
+ hash_numeric 
+--------------
+  -2012848097
+(1 row)
+
+Time: 146.030 ms
+ hash_numeric 
+--------------
+  -2012848097
+(1 row)
+
+Time: 147.454 ms
+div ndigits=5
+ hash_numeric 
+--------------
+  -2012848097
+(1 row)
+
+Time: 152.198 ms
+ hash_numeric 
+--------------
+  -2012848097
+(1 row)
+
+Time: 150.333 ms
+ hash_numeric 
+--------------
+  -2012848097
+(1 row)
+
+Time: 150.849 ms
+div ndigits=6
+ hash_numeric 
+--------------
+  -2012848097
+(1 row)
+
+Time: 151.945 ms
+ hash_numeric 
+--------------
+  -2012848097
+(1 row)
+
+Time: 149.799 ms
+ hash_numeric 
+--------------
+  -2012848097
+(1 row)
+
+Time: 150.502 ms
+div ndigits=7
+ hash_numeric 
+--------------
+  -2012848097
+(1 row)
+
+Time: 150.344 ms
+ hash_numeric 
+--------------
+  -2012848097
+(1 row)
+
+Time: 149.207 ms
+ hash_numeric 
+--------------
+  -2012848097
+(1 row)
+
+Time: 151.562 ms
+div ndigits=8
+ hash_numeric 
+--------------
+  -2012848097
+(1 row)
+
+Time: 151.007 ms
+ hash_numeric 
+--------------
+  -2012848097
+(1 row)
+
+Time: 150.044 ms
+ hash_numeric 
+--------------
+  -2012848097
+(1 row)
+
+Time: 149.707 ms
+div ndigits=9
+ hash_numeric 
+--------------
+  -2012848097
+(1 row)
+
+Time: 154.808 ms
+ hash_numeric 
+--------------
+  -2012848097
+(1 row)
+
+Time: 154.833 ms
+ hash_numeric 
+--------------
+  -2012848097
+(1 row)
+
+Time: 153.698 ms
+div ndigits=10
+ hash_numeric 
+--------------
+  -2012848097
+(1 row)
+
+Time: 155.092 ms
+ hash_numeric 
+--------------
+  -2012848097
+(1 row)
+
+Time: 154.335 ms
+ hash_numeric 
+--------------
+  -2012848097
+(1 row)
+
+Time: 153.928 ms
+div ndigits=100
+ hash_numeric 
+--------------
+  -2012848097
+(1 row)
+
+Time: 180.782 ms
+ hash_numeric 
+--------------
+  -2012848097
+(1 row)
+
+Time: 180.776 ms
+ hash_numeric 
+--------------
+  -2012848097
+(1 row)
+
+Time: 178.755 ms
+div ndigits=1000
+ hash_numeric 
+--------------
+   -282860964
+(1 row)
+
+Time: 63.936 ms
+ hash_numeric 
+--------------
+   -282860964
+(1 row)
+
+Time: 62.314 ms
+ hash_numeric 
+--------------
+   -282860964
+(1 row)
+
+Time: 61.580 ms
+div ndigits=10000
+ hash_numeric 
+--------------
+    140640842
+(1 row)
+
+Time: 82.371 ms
+ hash_numeric 
+--------------
+    140640842
+(1 row)
+
+Time: 81.451 ms
+ hash_numeric 
+--------------
+    140640842
+(1 row)
+
+Time: 81.807 ms
+div ndigits=100000
+ hash_numeric 
+--------------
+    407037373
+(1 row)
+
+Time: 240.621 ms
+ hash_numeric 
+--------------
+    407037373
+(1 row)
+
+Time: 260.858 ms
+ hash_numeric 
+--------------
+    407037373
+(1 row)
+
+Time: 260.851 ms
+div ndigits=mixed
+ hash_numeric 
+--------------
+  -1573519458
+(1 row)
+
+Time: 2783.461 ms (00:02.783)
+ hash_numeric 
+--------------
+  -1573519458
+(1 row)
+
+Time: 2781.014 ms (00:02.781)
+ hash_numeric 
+--------------
+  -1573519458
+(1 row)
+
+Time: 2791.578 ms (00:02.792)

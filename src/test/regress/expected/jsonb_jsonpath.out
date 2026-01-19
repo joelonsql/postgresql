@@ -1473,7 +1473,7 @@ select jsonb_path_query('[{"a": 1, "b": [1, 2]}, {"c": {"a": "bbb"}}]', '$[*].ke
 -----------------------------------------------
  {"id": 12, "key": "a", "value": 1}
  {"id": 12, "key": "b", "value": [1, 2]}
- {"id": 72, "key": "c", "value": {"a": "bbb"}}
+ {"id": 84, "key": "c", "value": {"a": "bbb"}}
 (3 rows)
 
 select jsonb_path_query('[{"a": 1, "b": [1, 2]}, {"c": {"a": "bbb"}}]', 'strict $.keyvalue()');
@@ -1483,7 +1483,7 @@ select jsonb_path_query('[{"a": 1, "b": [1, 2]}, {"c": {"a": "bbb"}}]', 'lax $.k
 -----------------------------------------------
  {"id": 12, "key": "a", "value": 1}
  {"id": 12, "key": "b", "value": [1, 2]}
- {"id": 72, "key": "c", "value": {"a": "bbb"}}
+ {"id": 84, "key": "c", "value": {"a": "bbb"}}
 (3 rows)
 
 select jsonb_path_query('[{"a": 1, "b": [1, 2]}, {"c": {"a": "bbb"}}]', 'strict $.keyvalue().a');

@@ -1,0 +1,2685 @@
+From 63a2a99be13192ec4262d4d179969b2646e76930 Mon Sep 17 00:00:00 2001
+From: Joel Jacobson <joel@compiler.org>
+Date: Sat, 17 Jan 2026 21:59:49 +0100
+Subject: [PATCH 1/3] Increase NBASE from 10,000 to 100,000,000
+
+This changes the internal numeric representation to use base 10^8 instead
+of base 10^4, so each NumericDigit now represents 8 decimal digits instead
+of 4. This makes the base-NBASE^2 optimizations in mul_var() and div_var()
+unnecessary, since NBASE itself is now 10^8.
+
+Key changes:
+- NBASE changed from 10000 to 100000000
+- DEC_DIGITS changed from 4 to 8
+- MUL_GUARD_DIGITS reduced from 2 to 1
+- DIV_GUARD_DIGITS reduced from 4 to 2
+- Simplified mul_var() to use direct int64 arithmetic without digit-pair
+  conversion, removing the base-NBASE^2 optimization from commit 8dc28d7
+- Simplified div_var() to use direct int64 arithmetic without digit-pair
+  conversion, removing the base-NBASE^2 optimization from commit 9428c001
+- Removed NBASE_SQR macro which is no longer needed
+- Updated NumericSumAccum to use int64 arrays instead of int32
+- Fixed random_var() to process 2 digits at a time instead of 4, since
+  only 2 NBASE digits fit in uint64 with NBASE=10^8
+- Added DEC_DIGITS == 8 cases throughout for digit extraction/formatting
+- Updated constant arrays (round_powers, const_zero_point_nine, etc.)
+- Updated div_var short-division thresholds for larger NBASE
+- Updated expected test output for precision changes
+---
+ src/backend/utils/adt/numeric.c              | 942 +++++++++----------
+ src/test/regress/expected/aggregates.out     |  36 +-
+ src/test/regress/expected/jsonb_jsonpath.out |   4 +-
+ src/test/regress/expected/memoize.out        |   6 +-
+ src/test/regress/expected/numeric.out        | 118 +--
+ src/test/regress/expected/random.out         | 140 +--
+ src/test/regress/expected/window.out         | 428 ++++-----
+ 7 files changed, 832 insertions(+), 842 deletions(-)
+
+diff --git a/src/backend/utils/adt/numeric.c b/src/backend/utils/adt/numeric.c
+index 26852131ff6..6e9200b4bb2 100644
+--- a/src/backend/utils/adt/numeric.c
++++ b/src/backend/utils/adt/numeric.c
+@@ -58,18 +58,18 @@
+  * Numeric values are represented in a base-NBASE floating point format.
+  * Each "digit" ranges from 0 to NBASE-1.  The type NumericDigit is signed
+  * and wide enough to store a digit.  We assume that NBASE*NBASE can fit in
+- * an int.  Although the purely calculational routines could handle any even
+- * NBASE that's less than sqrt(INT_MAX), in practice we are only interested
++ * an int64.  Although the purely calculational routines could handle any even
++ * NBASE that's less than sqrt(PG_INT64_MAX), in practice we are only interested
+  * in NBASE a power of ten, so that I/O conversions and decimal rounding
+  * are easy.  Also, it's actually more efficient if NBASE is rather less than
+- * sqrt(INT_MAX), so that there is "headroom" for mul_var and div_var to
++ * sqrt(PG_INT64_MAX), so that there is "headroom" for mul_var and div_var to
+  * postpone processing carries.
+  *
+- * Values of NBASE other than 10000 are considered of historical interest only
+- * and are no longer supported in any sense; no mechanism exists for the client
+- * to discover the base, so every client supporting binary mode expects the
+- * base-10000 format.  If you plan to change this, also note the numeric
+- * abbreviation code, which assumes NBASE=10000.
++ * Values of NBASE other than 100000000 are considered of historical interest
++ * only and are no longer supported in any sense; no mechanism exists for the
++ * client to discover the base, so every client supporting binary mode expects
++ * the base-100000000 format.  If you plan to change this, also note the
++ * numeric abbreviation code, which assumes NBASE=100000000.
+  * ----------
+  */
+ 
+@@ -93,18 +93,27 @@ typedef signed char NumericDigit;
+ typedef signed char NumericDigit;
+ #endif
+ 
+-#if 1
++#if 0
+ #define NBASE		10000
+ #define HALF_NBASE	5000
+ #define DEC_DIGITS	4			/* decimal digits per NBASE digit */
+ #define MUL_GUARD_DIGITS	2	/* these are measured in NBASE digits */
+ #define DIV_GUARD_DIGITS	4
+ 
++typedef int32 NumericDigit;
++#endif
++
++#if 1
++#define NBASE		100000000
++#define HALF_NBASE	50000000
++#define DEC_DIGITS	8			/* decimal digits per NBASE digit */
++#define MUL_GUARD_DIGITS	1	/* these are measured in NBASE digits */
++#define DIV_GUARD_DIGITS	2
++
++typedef int32 NumericDigit;
++#endif
++
+ typedef uint8 NumericDigitData;
+-typedef int32 NumericDigit;
+-#endif
+-
+-#define NBASE_SQR	(NBASE * NBASE)
+ 
+ /*
+  * The Numeric type as stored on disk.
+@@ -349,8 +358,8 @@ typedef struct
+  * Fast sum accumulator.
+  *
+  * NumericSumAccum is used to implement SUM(), and other standard aggregates
+- * that track the sum of input values.  It uses 32-bit integers to store the
+- * digits, instead of the normal 16-bit integers (with NBASE=10000).  This
++ * that track the sum of input values.  It uses 64-bit integers to store the
++ * digits, instead of the normal 32-bit integers (with NBASE=100000000). This
+  * way, we can safely accumulate up to NBASE - 1 values without propagating
+  * carry, before risking overflow of any of the digits.  'num_uncarried'
+  * tracks how many values have been accumulated without propagating carry.
+@@ -382,8 +391,8 @@ typedef struct NumericSumAccum
+ 	int			dscale;
+ 	int			num_uncarried;
+ 	bool		have_carry_space;
+-	int32	   *pos_digits;
+-	int32	   *neg_digits;
++	int64	   *pos_digits;
++	int64	   *neg_digits;
+ } NumericSumAccum;
+ 
+ 
+@@ -425,7 +434,9 @@ static const NumericDigit const_two_data[1] = {2};
+ static const NumericVar const_two =
+ {1, 0, NUMERIC_POS, 0, NULL, (NumericDigit *) const_two_data};
+ 
+-#if DEC_DIGITS == 4
++#if DEC_DIGITS == 8
++static const NumericDigit const_zero_point_nine_data[1] = {90000000};
++#elif DEC_DIGITS == 4
+ static const NumericDigit const_zero_point_nine_data[1] = {9000};
+ #elif DEC_DIGITS == 2
+ static const NumericDigit const_zero_point_nine_data[1] = {90};
+@@ -435,7 +446,9 @@ static const NumericDigit const_zero_point_nine_data[1] = {9};
+ static const NumericVar const_zero_point_nine =
+ {1, -1, NUMERIC_POS, 1, NULL, (NumericDigit *) const_zero_point_nine_data};
+ 
+-#if DEC_DIGITS == 4
++#if DEC_DIGITS == 8
++static const NumericDigit const_one_point_one_data[2] = {1, 10000000};
++#elif DEC_DIGITS == 4
+ static const NumericDigit const_one_point_one_data[2] = {1, 1000};
+ #elif DEC_DIGITS == 2
+ static const NumericDigit const_one_point_one_data[2] = {1, 10};
+@@ -454,7 +467,9 @@ static const NumericVar const_pinf =
+ static const NumericVar const_ninf =
+ {0, 0, NUMERIC_NINF, 0, NULL, NULL};
+ 
+-#if DEC_DIGITS == 4
++#if DEC_DIGITS == 8
++static const int round_powers[8] = {0, 10000000, 1000000, 100000, 10000, 1000, 100, 10};
++#elif DEC_DIGITS == 4
+ static const int round_powers[4] = {0, 1000, 100, 10};
+ #endif
+ 
+@@ -2332,16 +2347,16 @@ numeric_cmp_abbrev(Datum x, Datum y, SortSupport ssup)
+  *
+  * The 63-bit value is constructed as:
+  *
+- *	0 + 7bits weight + 4 x 14-bit packed digit words
++ *	0 + 7bits weight + 2 x 28-bit packed digit words
+  *
+  * The weight in this case is again stored in excess-44, but this time it is
+- * the original weight in digit words (i.e. powers of 10000). The first four
++ * the original weight in digit words (i.e. powers of 10^8). The first two
+  * digit words of the value (if present; trailing zeros are assumed as needed)
+- * are packed into 14 bits each to form the rest of the value. Again,
++ * are packed into 28 bits each to form the rest of the value. Again,
+  * out-of-range values are rounded off to 0 or 0x7FFFFFFFFFFFFFFF. The
+- * representable range in this case is 10^-176 to 10^332, which is considered
+- * to be good enough for all practical purposes, and comparison of 4 words
+- * means that at least 13 decimal digits are compared, which is considered to
++ * representable range in this case is 10^-352 to 10^664, which is considered
++ * to be good enough for all practical purposes, and comparison of 2 words
++ * means that at least 15 decimal digits are compared, which is considered to
+  * be a reasonable compromise between effectiveness and efficiency in computing
+  * the abbreviation.
+  *
+@@ -2375,16 +2390,10 @@ numeric_abbrev_convert_var(const NumericVar *var, NumericSortSupport *nss)
+ 		switch (ndigits)
+ 		{
+ 			default:
+-				result |= ((int64) var->digits[3]);
+-				/* FALLTHROUGH */
+-			case 3:
+-				result |= ((int64) var->digits[2]) << 14;
+-				/* FALLTHROUGH */
+-			case 2:
+-				result |= ((int64) var->digits[1]) << 28;
++				result |= ((int64) var->digits[1]);
+ 				/* FALLTHROUGH */
+ 			case 1:
+-				result |= ((int64) var->digits[0]) << 42;
++				result |= ((int64) var->digits[0]) << 28;
+ 				break;
+ 		}
+ 	}
+@@ -4305,7 +4314,9 @@ int64_div_fast_to_numeric(int64 val1, int log10val2)
+ 	 */
+ 	if (m > 0)
+ 	{
+-#if DEC_DIGITS == 4
++#if DEC_DIGITS == 8
++		static const int pow10[] = {1, 10, 100, 1000, 10000, 100000, 1000000, 10000000};
++#elif DEC_DIGITS == 4
+ 		static const int pow10[] = {1, 10, 100, 1000};
+ #elif DEC_DIGITS == 2
+ 		static const int pow10[] = {1, 10};
+@@ -6900,7 +6911,12 @@ set_var_from_str(const char *str, const char *cp,
+ 
+ 	while (ndigits-- > 0)
+ 	{
+-#if DEC_DIGITS == 4
++#if DEC_DIGITS == 8
++		*digits++ = ((((((decdigits[i] * 10 + decdigits[i + 1]) * 10 +
++						 decdigits[i + 2]) * 10 + decdigits[i + 3]) * 10 +
++					   decdigits[i + 4]) * 10 + decdigits[i + 5]) * 10 +
++					 decdigits[i + 6]) * 10 + decdigits[i + 7];
++#elif DEC_DIGITS == 4
+ 		*digits++ = ((decdigits[i] * 10 + decdigits[i + 1]) * 10 +
+ 					 decdigits[i + 2]) * 10 + decdigits[i + 3];
+ #elif DEC_DIGITS == 2
+@@ -7270,7 +7286,48 @@ get_str_from_var(const NumericVar *var)
+ 		{
+ 			dig = (d < var->ndigits) ? var->digits[d] : 0;
+ 			/* In the first digit, suppress extra leading decimal zeroes */
+-#if DEC_DIGITS == 4
++#if DEC_DIGITS == 8
++			{
++				bool		putit = (d > 0);
++
++				d1 = dig / 10000000;
++				dig -= d1 * 10000000;
++				putit |= (d1 > 0);
++				if (putit)
++					*cp++ = d1 + '0';
++				d1 = dig / 1000000;
++				dig -= d1 * 1000000;
++				putit |= (d1 > 0);
++				if (putit)
++					*cp++ = d1 + '0';
++				d1 = dig / 100000;
++				dig -= d1 * 100000;
++				putit |= (d1 > 0);
++				if (putit)
++					*cp++ = d1 + '0';
++				d1 = dig / 10000;
++				dig -= d1 * 10000;
++				putit |= (d1 > 0);
++				if (putit)
++					*cp++ = d1 + '0';
++				d1 = dig / 1000;
++				dig -= d1 * 1000;
++				putit |= (d1 > 0);
++				if (putit)
++					*cp++ = d1 + '0';
++				d1 = dig / 100;
++				dig -= d1 * 100;
++				putit |= (d1 > 0);
++				if (putit)
++					*cp++ = d1 + '0';
++				d1 = dig / 10;
++				dig -= d1 * 10;
++				putit |= (d1 > 0);
++				if (putit)
++					*cp++ = d1 + '0';
++				*cp++ = dig + '0';
++			}
++#elif DEC_DIGITS == 4
+ 			{
+ 				bool		putit = (d > 0);
+ 
+@@ -7317,7 +7374,30 @@ get_str_from_var(const NumericVar *var)
+ 		for (i = 0; i < dscale; d++, i += DEC_DIGITS)
+ 		{
+ 			dig = (d >= 0 && d < var->ndigits) ? var->digits[d] : 0;
+-#if DEC_DIGITS == 4
++#if DEC_DIGITS == 8
++			d1 = dig / 10000000;
++			dig -= d1 * 10000000;
++			*cp++ = d1 + '0';
++			d1 = dig / 1000000;
++			dig -= d1 * 1000000;
++			*cp++ = d1 + '0';
++			d1 = dig / 100000;
++			dig -= d1 * 100000;
++			*cp++ = d1 + '0';
++			d1 = dig / 10000;
++			dig -= d1 * 10000;
++			*cp++ = d1 + '0';
++			d1 = dig / 1000;
++			dig -= d1 * 1000;
++			*cp++ = d1 + '0';
++			d1 = dig / 100;
++			dig -= d1 * 100;
++			*cp++ = d1 + '0';
++			d1 = dig / 10;
++			dig -= d1 * 10;
++			*cp++ = d1 + '0';
++			*cp++ = dig + '0';
++#elif DEC_DIGITS == 4
+ 			d1 = dig / 1000;
+ 			dig -= d1 * 1000;
+ 			*cp++ = d1 + '0';
+@@ -7663,7 +7743,22 @@ apply_typmod(NumericVar *var, int32 typmod, Node *escontext)
+ 			if (dig)
+ 			{
+ 				/* Adjust for any high-order decimal zero digits */
+-#if DEC_DIGITS == 4
++#if DEC_DIGITS == 8
++				if (dig < 10)
++					ddigits -= 7;
++				else if (dig < 100)
++					ddigits -= 6;
++				else if (dig < 1000)
++					ddigits -= 5;
++				else if (dig < 10000)
++					ddigits -= 4;
++				else if (dig < 100000)
++					ddigits -= 3;
++				else if (dig < 1000000)
++					ddigits -= 2;
++				else if (dig < 10000000)
++					ddigits -= 1;
++#elif DEC_DIGITS == 4
+ 				if (dig < 10)
+ 					ddigits -= 3;
+ 				else if (dig < 100)
+@@ -8304,30 +8399,21 @@ mul_var(const NumericVar *var1, const NumericVar *var2, NumericVar *result,
+ 		int rscale)
+ {
+ 	int			res_ndigits;
+-	int			res_ndigitpairs;
+ 	int			res_sign;
+ 	int			res_weight;
+-	int			pair_offset;
+ 	int			maxdigits;
+-	int			maxdigitpairs;
+-	uint64	   *dig,
+-			   *dig_i1_off;
+-	uint64		maxdig;
+-	uint64		carry;
+-	uint64		newdig;
++	int64	   *dig;
++	int64		carry;
++	int64		maxdig;
++	int64		newdig;
+ 	int			var1ndigits;
+ 	int			var2ndigits;
+-	int			var1ndigitpairs;
+-	int			var2ndigitpairs;
+ 	NumericDigit *var1digits;
+ 	NumericDigit *var2digits;
+-	uint32		var1digitpair;
+-	uint32	   *var2digitpairs;
+ 	NumericDigit *res_digits;
+ 	int			i,
+ 				i1,
+-				i2,
+-				i2limit;
++				i2;
+ 
+ 	/*
+ 	 * Arrange for var1 to be the shorter of the two numbers.  This improves
+@@ -8387,145 +8473,63 @@ mul_var(const NumericVar *var1, const NumericVar *var2, NumericVar *result,
+ 	 * var2ndigits digits, but we allocate at least one extra output digit in
+ 	 * case rscale-driven rounding produces a carry out of the highest exact
+ 	 * digit.
+-	 *
+-	 * The computation itself is done using base-NBASE^2 arithmetic, so we
+-	 * actually process the input digits in pairs, producing a base-NBASE^2
+-	 * intermediate result.  This significantly improves performance, since
+-	 * schoolbook multiplication is O(N^2) in the number of input digits, and
+-	 * working in base NBASE^2 effectively halves "N".
+-	 *
+-	 * Note: in a truncated computation, we must compute at least one extra
+-	 * output digit to ensure that all the guard digits are fully computed.
+ 	 */
+-	/* digit pairs in each input */
+-	var1ndigitpairs = (var1ndigits + 1) / 2;
+-	var2ndigitpairs = (var2ndigits + 1) / 2;
+-
+-	/* digits in exact result */
+-	res_ndigits = var1ndigits + var2ndigits;
+-
+-	/* digit pairs in exact result with at least one extra output digit */
+-	res_ndigitpairs = res_ndigits / 2 + 1;
+-
+-	/* pair offset to align result to end of dig[] */
+-	pair_offset = res_ndigitpairs - var1ndigitpairs - var2ndigitpairs + 1;
+-
+-	/* maximum possible result weight (odd-length inputs shifted up below) */
+-	res_weight = var1->weight + var2->weight + 1 + 2 * res_ndigitpairs -
+-		res_ndigits - (var1ndigits & 1) - (var2ndigits & 1);
+-
+-	/* rscale-based truncation with at least one extra output digit */
++	res_ndigits = var1ndigits + var2ndigits + 1;
++	res_weight = var1->weight + var2->weight + 2;
+ 	maxdigits = res_weight + 1 + (rscale + DEC_DIGITS - 1) / DEC_DIGITS +
+ 		MUL_GUARD_DIGITS;
+-	maxdigitpairs = maxdigits / 2 + 1;
++	res_ndigits = Min(res_ndigits, maxdigits);
+ 
+-	res_ndigitpairs = Min(res_ndigitpairs, maxdigitpairs);
+-	res_ndigits = 2 * res_ndigitpairs;
+-
+-	/*
+-	 * In the computation below, digit pair i1 of var1 and digit pair i2 of
+-	 * var2 are multiplied and added to digit i1+i2+pair_offset of dig[]. Thus
+-	 * input digit pairs with index >= res_ndigitpairs - pair_offset don't
+-	 * contribute to the result, and can be ignored.
+-	 */
+-	if (res_ndigitpairs <= pair_offset)
++	if (res_ndigits < 3)
+ 	{
+ 		/* All input digits will be ignored; so result is zero */
+ 		zero_var(result);
+ 		result->dscale = rscale;
+ 		return;
+ 	}
+-	var1ndigitpairs = Min(var1ndigitpairs, res_ndigitpairs - pair_offset);
+-	var2ndigitpairs = Min(var2ndigitpairs, res_ndigitpairs - pair_offset);
+ 
+ 	/*
+-	 * We do the arithmetic in an array "dig[]" of unsigned 64-bit integers.
+-	 * Since PG_UINT64_MAX is much larger than NBASE^4, this gives us a lot of
+-	 * headroom to avoid normalizing carries immediately.
++	 * We do the arithmetic in an array "dig[]" of signed int64's.  Since
++	 * PG_INT64_MAX is noticeably larger than NBASE*NBASE, this gives us headroom
++	 * to avoid normalizing carries immediately.
+ 	 *
+ 	 * maxdig tracks the maximum possible value of any dig[] entry; when this
+-	 * threatens to exceed PG_UINT64_MAX, we take the time to propagate
+-	 * carries.  Furthermore, we need to ensure that overflow doesn't occur
+-	 * during the carry propagation passes either.  The carry values could be
+-	 * as much as PG_UINT64_MAX / NBASE^2, so really we must normalize when
+-	 * digits threaten to exceed PG_UINT64_MAX - PG_UINT64_MAX / NBASE^2.
++	 * threatens to exceed PG_INT64_MAX, we take the time to propagate carries.
++	 * Furthermore, we need to ensure that overflow doesn't occur during the
++	 * carry propagation passes either.  The carry values could be as much as
++	 * PG_INT64_MAX/NBASE, so really we must normalize when digits threaten to
++	 * exceed PG_INT64_MAX - PG_INT64_MAX/NBASE.
+ 	 *
+-	 * To avoid overflow in maxdig itself, it actually represents the maximum
+-	 * possible value divided by NBASE^2-1, i.e., at the top of the loop it is
+-	 * known that no dig[] entry exceeds maxdig * (NBASE^2-1).
+-	 *
+-	 * The conversion of var1 to base NBASE^2 is done on the fly, as each new
+-	 * digit is required.  The digits of var2 are converted upfront, and
+-	 * stored at the end of dig[].  To avoid loss of precision, the input
+-	 * digits are aligned with the start of digit pair array, effectively
+-	 * shifting them up (multiplying by NBASE) if the inputs have an odd
+-	 * number of NBASE digits.
+-	 */
+-	dig = (uint64 *) palloc(res_ndigitpairs * sizeof(uint64) +
+-							var2ndigitpairs * sizeof(uint32));
+-
+-	/* convert var2 to base NBASE^2, shifting up if its length is odd */
+-	var2digitpairs = (uint32 *) (dig + res_ndigitpairs);
+-
+-	for (i2 = 0; i2 < var2ndigitpairs - 1; i2++)
+-		var2digitpairs[i2] = var2digits[2 * i2] * NBASE + var2digits[2 * i2 + 1];
+-
+-	if (2 * i2 + 1 < var2ndigits)
+-		var2digitpairs[i2] = var2digits[2 * i2] * NBASE + var2digits[2 * i2 + 1];
+-	else
+-		var2digitpairs[i2] = var2digits[2 * i2] * NBASE;
+-
+-	/*
+-	 * Start by multiplying var2 by the least significant contributing digit
+-	 * pair from var1, storing the results at the end of dig[], and filling
+-	 * the leading digits with zeros.
+-	 *
+-	 * The loop here is the same as the inner loop below, except that we set
+-	 * the results in dig[], rather than adding to them.  This is the
+-	 * performance bottleneck for multiplication, so we want to keep it simple
+-	 * enough so that it can be auto-vectorized.  Accordingly, process the
+-	 * digits left-to-right even though schoolbook multiplication would
+-	 * suggest right-to-left.  Since we aren't propagating carries in this
+-	 * loop, the order does not matter.
++	 * To avoid overflow in maxdig itself, it actually represents the max
++	 * possible value divided by NBASE-1, ie, at the top of the loop it is
++	 * known that no dig[] entry exceeds maxdig * (NBASE-1).
+ 	 */
+-	i1 = var1ndigitpairs - 1;
+-	if (2 * i1 + 1 < var1ndigits)
+-		var1digitpair = var1digits[2 * i1] * NBASE + var1digits[2 * i1 + 1];
+-	else
+-		var1digitpair = var1digits[2 * i1] * NBASE;
+-	maxdig = var1digitpair;
+-
+-	i2limit = Min(var2ndigitpairs, res_ndigitpairs - i1 - pair_offset);
+-	dig_i1_off = &dig[i1 + pair_offset];
+-
+-	memset(dig, 0, (i1 + pair_offset) * sizeof(uint64));
+-	for (i2 = 0; i2 < i2limit; i2++)
+-		dig_i1_off[i2] = (uint64) var1digitpair * var2digitpairs[i2];
++	dig = (int64 *) palloc0(res_ndigits * sizeof(int64));
++	maxdig = 0;
+ 
+ 	/*
+-	 * Next, multiply var2 by the remaining digit pairs from var1, adding the
+-	 * results to dig[] at the appropriate offsets, and normalizing whenever
+-	 * there is a risk of any dig[] entry overflowing.
++	 * The outer loop iterates over the digits of var1.
+ 	 */
+-	for (i1 = i1 - 1; i1 >= 0; i1--)
++	for (i1 = var1ndigits - 1; i1 >= 0; i1--)
+ 	{
+-		var1digitpair = var1digits[2 * i1] * NBASE + var1digits[2 * i1 + 1];
+-		if (var1digitpair == 0)
++		NumericDigit var1digit = var1digits[i1];
++
++		if (var1digit == 0)
+ 			continue;
+ 
+ 		/* Time to normalize? */
+-		maxdig += var1digitpair;
+-		if (maxdig > (PG_UINT64_MAX - PG_UINT64_MAX / NBASE_SQR) / (NBASE_SQR - 1))
++		maxdig += var1digit;
++		if (maxdig > (PG_INT64_MAX - PG_INT64_MAX / NBASE) / (NBASE - 1))
+ 		{
+-			/* Yes, do it (to base NBASE^2) */
++			/* Yes, do it */
+ 			carry = 0;
+-			for (i = res_ndigitpairs - 1; i >= 0; i--)
++			for (i = res_ndigits - 1; i >= 0; i--)
+ 			{
+ 				newdig = dig[i] + carry;
+-				if (newdig >= NBASE_SQR)
++				if (newdig >= NBASE)
+ 				{
+-					carry = newdig / NBASE_SQR;
+-					newdig -= carry * NBASE_SQR;
++					carry = newdig / NBASE;
++					newdig -= carry * NBASE;
+ 				}
+ 				else
+ 					carry = 0;
+@@ -8533,37 +8537,43 @@ mul_var(const NumericVar *var1, const NumericVar *var2, NumericVar *result,
+ 			}
+ 			Assert(carry == 0);
+ 			/* Reset maxdig to indicate new worst-case */
+-			maxdig = 1 + var1digitpair;
++			maxdig = 1 + var1digit;
+ 		}
+ 
+-		/* Multiply and add */
+-		i2limit = Min(var2ndigitpairs, res_ndigitpairs - i1 - pair_offset);
+-		dig_i1_off = &dig[i1 + pair_offset];
++		/*
++		 * Add the appropriate multiple of var2 into the accumulator.
++		 *
++		 * As above, digits of var2 can be ignored if they don't contribute,
++		 * i.e., if i1 + i2 + 2 >= res_ndigits.
++		 */
++		{
++			int			i2limit = Min(var2ndigits, res_ndigits - i1 - 2);
++			int64	   *dig_i1_2 = &dig[i1 + 2];
+ 
+-		for (i2 = 0; i2 < i2limit; i2++)
+-			dig_i1_off[i2] += (uint64) var1digitpair * var2digitpairs[i2];
++			for (i2 = 0; i2 < i2limit; i2++)
++				dig_i1_2[i2] += (int64) var1digit * (int64) var2digits[i2];
++		}
+ 	}
+ 
+ 	/*
+-	 * Now we do a final carry propagation pass to normalize back to base
+-	 * NBASE^2, and construct the base-NBASE result digits.  Note that this is
+-	 * still done at full precision w/guard digits.
++	 * Now we do a final carry propagation pass to normalize the result, and
++	 * construct the result digits.  Note that this is still done at full
++	 * precision w/guard digits.
+ 	 */
+ 	alloc_var(result, res_ndigits);
+ 	res_digits = result->digits;
+ 	carry = 0;
+-	for (i = res_ndigitpairs - 1; i >= 0; i--)
++	for (i = res_ndigits - 1; i >= 0; i--)
+ 	{
+ 		newdig = dig[i] + carry;
+-		if (newdig >= NBASE_SQR)
++		if (newdig >= NBASE)
+ 		{
+-			carry = newdig / NBASE_SQR;
+-			newdig -= carry * NBASE_SQR;
++			carry = newdig / NBASE;
++			newdig -= carry * NBASE;
+ 		}
+ 		else
+ 			carry = 0;
+-		res_digits[2 * i + 1] = (NumericDigit) ((uint32) newdig % NBASE);
+-		res_digits[2 * i] = (NumericDigit) ((uint32) newdig / NBASE);
++		res_digits[i] = (NumericDigit) newdig;
+ 	}
+ 	Assert(carry == 0);
+ 
+@@ -8603,8 +8613,8 @@ mul_var_short(const NumericVar *var1, const NumericVar *var2,
+ 	int			res_ndigits;
+ 	NumericDigit *res_buf;
+ 	NumericDigit *res_digits;
+-	uint32		carry = 0;
+-	uint32		term;
++	uint64		carry = 0;
++	uint64		term;
+ 
+ 	/* Check preconditions */
+ 	Assert(var1ndigits >= 1);
+@@ -8635,12 +8645,12 @@ mul_var_short(const NumericVar *var1, const NumericVar *var2,
+ 	 * carry up as we go.  The i'th result digit consists of the sum of the
+ 	 * products var1digits[i1] * var2digits[i2] for which i = i1 + i2 + 1.
+ 	 */
+-#define PRODSUM1(v1,i1,v2,i2) ((v1)[(i1)] * (v2)[(i2)])
+-#define PRODSUM2(v1,i1,v2,i2) (PRODSUM1(v1,i1,v2,i2) + (v1)[(i1)+1] * (v2)[(i2)-1])
+-#define PRODSUM3(v1,i1,v2,i2) (PRODSUM2(v1,i1,v2,i2) + (v1)[(i1)+2] * (v2)[(i2)-2])
+-#define PRODSUM4(v1,i1,v2,i2) (PRODSUM3(v1,i1,v2,i2) + (v1)[(i1)+3] * (v2)[(i2)-3])
+-#define PRODSUM5(v1,i1,v2,i2) (PRODSUM4(v1,i1,v2,i2) + (v1)[(i1)+4] * (v2)[(i2)-4])
+-#define PRODSUM6(v1,i1,v2,i2) (PRODSUM5(v1,i1,v2,i2) + (v1)[(i1)+5] * (v2)[(i2)-5])
++#define PRODSUM1(v1,i1,v2,i2) ((int64)(v1)[(i1)] * (v2)[(i2)])
++#define PRODSUM2(v1,i1,v2,i2) (PRODSUM1(v1,i1,v2,i2) + (int64)(v1)[(i1)+1] * (v2)[(i2)-1])
++#define PRODSUM3(v1,i1,v2,i2) (PRODSUM2(v1,i1,v2,i2) + (int64)(v1)[(i1)+2] * (v2)[(i2)-2])
++#define PRODSUM4(v1,i1,v2,i2) (PRODSUM3(v1,i1,v2,i2) + (int64)(v1)[(i1)+3] * (v2)[(i2)-3])
++#define PRODSUM5(v1,i1,v2,i2) (PRODSUM4(v1,i1,v2,i2) + (int64)(v1)[(i1)+4] * (v2)[(i2)-4])
++#define PRODSUM6(v1,i1,v2,i2) (PRODSUM5(v1,i1,v2,i2) + (int64)(v1)[(i1)+5] * (v2)[(i2)-5])
+ 
+ 	switch (var1ndigits)
+ 	{
+@@ -8886,19 +8896,16 @@ div_var(const NumericVar *var1, const NumericVar *var2, NumericVar *result,
+ 	int			res_sign;
+ 	int			res_weight;
+ 	int			res_ndigits;
+-	int			var1ndigitpairs;
+-	int			var2ndigitpairs;
+-	int			res_ndigitpairs;
+-	int			div_ndigitpairs;
++	int			div_ndigits;
+ 	int64	   *dividend;
+-	int32	   *divisor;
++	int64	   *divisor;
+ 	double		fdivisor,
+ 				fdivisorinverse,
+ 				fdividend,
+ 				fquotient;
+ 	int64		maxdiv;
+ 	int			qi;
+-	int32		qdigit;
++	int64		qdigit;
+ 	int64		carry;
+ 	int64		newdig;
+ 	int64	   *remainder;
+@@ -8915,24 +8922,19 @@ div_var(const NumericVar *var1, const NumericVar *var2, NumericVar *result,
+ 				 errmsg("division by zero")));
+ 
+ 	/*
+-	 * If the divisor has just one or two digits, delegate to div_var_int(),
++	 * If the divisor has just one digit, delegate to div_var_int(),
+ 	 * which uses fast short division.
+ 	 *
+ 	 * Similarly, on platforms with 128-bit integer support, delegate to
+-	 * div_var_int64() for divisors with three or four digits.
++	 * div_var_int64() for divisors with two digits.
+ 	 */
+-	if (var2ndigits <= 2)
++	if (var2ndigits == 1)
+ 	{
+ 		int			idivisor;
+ 		int			idivisor_weight;
+ 
+ 		idivisor = var2->digits[0];
+ 		idivisor_weight = var2->weight;
+-		if (var2ndigits == 2)
+-		{
+-			idivisor = idivisor * NBASE + var2->digits[1];
+-			idivisor_weight--;
+-		}
+ 		if (var2->sign == NUMERIC_NEG)
+ 			idivisor = -idivisor;
+ 
+@@ -8940,18 +8942,13 @@ div_var(const NumericVar *var1, const NumericVar *var2, NumericVar *result,
+ 		return;
+ 	}
+ #ifdef HAVE_INT128
+-	if (var2ndigits <= 4)
++	if (var2ndigits == 2)
+ 	{
+ 		int64		idivisor;
+ 		int			idivisor_weight;
+ 
+-		idivisor = var2->digits[0];
+-		idivisor_weight = var2->weight;
+-		for (i = 1; i < var2ndigits; i++)
+-		{
+-			idivisor = idivisor * NBASE + var2->digits[i];
+-			idivisor_weight--;
+-		}
++		idivisor = (int64) var2->digits[0] * NBASE + var2->digits[1];
++		idivisor_weight = var2->weight - 1;
+ 		if (var2->sign == NUMERIC_NEG)
+ 			idivisor = -idivisor;
+ 
+@@ -8997,7 +8994,7 @@ div_var(const NumericVar *var1, const NumericVar *var2, NumericVar *result,
+ 		res_sign = NUMERIC_POS;
+ 	else
+ 		res_sign = NUMERIC_NEG;
+-	res_weight = var1->weight - var2->weight + 1;
++	res_weight = var1->weight - var2->weight;
+ 	/* The number of accurate result digits we need to produce: */
+ 	res_ndigits = res_weight + 1 + (rscale + DEC_DIGITS - 1) / DEC_DIGITS;
+ 	/* ... but always at least 1 */
+@@ -9009,90 +9006,67 @@ div_var(const NumericVar *var1, const NumericVar *var2, NumericVar *result,
+ 	if (!exact)
+ 		res_ndigits += DIV_GUARD_DIGITS;
+ 
+-	/*
+-	 * The computation itself is done using base-NBASE^2 arithmetic, so we
+-	 * actually process the input digits in pairs, producing a base-NBASE^2
+-	 * intermediate result.  This significantly improves performance, since
+-	 * the computation is O(N^2) in the number of input digits, and working in
+-	 * base NBASE^2 effectively halves "N".
+-	 */
+-	var1ndigitpairs = (var1ndigits + 1) / 2;
+-	var2ndigitpairs = (var2ndigits + 1) / 2;
+-	res_ndigitpairs = (res_ndigits + 1) / 2;
+-	res_ndigits = 2 * res_ndigitpairs;
+-
+ 	/*
+ 	 * We do the arithmetic in an array "dividend[]" of signed 64-bit
+-	 * integers.  Since PG_INT64_MAX is much larger than NBASE^4, this gives
+-	 * us a lot of headroom to avoid normalizing carries immediately.
++	 * integers.  Since PG_INT64_MAX is much larger than NBASE*NBASE, this
++	 * gives us headroom to avoid normalizing carries immediately.
+ 	 *
+ 	 * When performing an exact computation, the working dividend requires
+-	 * res_ndigitpairs + var2ndigitpairs digits.  If var1 is larger than that,
++	 * res_ndigits + var2ndigits digits.  If var1 is larger than that,
+ 	 * the extra digits do not contribute to the result, and are ignored.
+ 	 *
+ 	 * When performing an approximate computation, the working dividend only
+-	 * requires res_ndigitpairs digits (which includes the extra guard
+-	 * digits).  All input digits beyond that are ignored.
++	 * requires res_ndigits digits (which includes the extra guard digits).
++	 * All input digits beyond that are ignored.
+ 	 */
+ 	if (exact)
+ 	{
+-		div_ndigitpairs = res_ndigitpairs + var2ndigitpairs;
+-		var1ndigitpairs = Min(var1ndigitpairs, div_ndigitpairs);
++		div_ndigits = res_ndigits + var2ndigits;
++		var1ndigits = Min(var1ndigits, div_ndigits);
+ 	}
+ 	else
+ 	{
+-		div_ndigitpairs = res_ndigitpairs;
+-		var1ndigitpairs = Min(var1ndigitpairs, div_ndigitpairs);
+-		var2ndigitpairs = Min(var2ndigitpairs, div_ndigitpairs);
++		div_ndigits = res_ndigits;
++		var1ndigits = Min(var1ndigits, div_ndigits);
++		var2ndigits = Min(var2ndigits, div_ndigits);
+ 	}
+ 
+ 	/*
+-	 * Allocate room for the working dividend (div_ndigitpairs 64-bit digits)
+-	 * plus the divisor (var2ndigitpairs 32-bit base-NBASE^2 digits).
++	 * Allocate room for the working dividend (div_ndigits 64-bit digits)
++	 * plus the divisor (var2ndigits 64-bit digits).
+ 	 *
+ 	 * For convenience, we allocate one extra dividend digit, which is set to
+-	 * zero and not counted in div_ndigitpairs, so that the main loop below
++	 * zero and not counted in div_ndigits, so that the main loop below
+ 	 * can safely read and write the (qi+1)'th digit in the approximate case.
+ 	 */
+-	dividend = (int64 *) palloc((div_ndigitpairs + 1) * sizeof(int64) +
+-								var2ndigitpairs * sizeof(int32));
+-	divisor = (int32 *) (dividend + div_ndigitpairs + 1);
+-
+-	/* load var1 into dividend[0 .. var1ndigitpairs-1], zeroing the rest */
+-	for (i = 0; i < var1ndigitpairs - 1; i++)
+-		dividend[i] = var1->digits[2 * i] * NBASE + var1->digits[2 * i + 1];
+-
+-	if (2 * i + 1 < var1ndigits)
+-		dividend[i] = var1->digits[2 * i] * NBASE + var1->digits[2 * i + 1];
+-	else
+-		dividend[i] = var1->digits[2 * i] * NBASE;
+-
+-	memset(dividend + i + 1, 0, (div_ndigitpairs - i) * sizeof(int64));
+-
+-	/* load var2 into divisor[0 .. var2ndigitpairs-1] */
+-	for (i = 0; i < var2ndigitpairs - 1; i++)
+-		divisor[i] = var2->digits[2 * i] * NBASE + var2->digits[2 * i + 1];
+-
+-	if (2 * i + 1 < var2ndigits)
+-		divisor[i] = var2->digits[2 * i] * NBASE + var2->digits[2 * i + 1];
+-	else
+-		divisor[i] = var2->digits[2 * i] * NBASE;
++	dividend = (int64 *) palloc((div_ndigits + 1) * sizeof(int64) +
++								var2ndigits * sizeof(int64));
++	divisor = (int64 *) (dividend + div_ndigits + 1);
++
++	/* load var1 into dividend[0 .. var1ndigits-1], zeroing the rest */
++	for (i = 0; i < var1ndigits; i++)
++		dividend[i] = var1->digits[i];
++	memset(dividend + var1ndigits, 0, (div_ndigits + 1 - var1ndigits) * sizeof(int64));
++
++	/* load var2 into divisor[0 .. var2ndigits-1] */
++	for (i = 0; i < var2ndigits; i++)
++		divisor[i] = var2->digits[i];
+ 
+ 	/*
+ 	 * We estimate each quotient digit using floating-point arithmetic, taking
+-	 * the first 2 base-NBASE^2 digits of the (current) dividend and divisor.
++	 * the first 2 base-NBASE digits of the (current) dividend and divisor.
+ 	 * This must be float to avoid overflow.
+ 	 *
+-	 * Since the floating-point dividend and divisor use 4 base-NBASE input
+-	 * digits, they include roughly 40-53 bits of information from their
+-	 * respective inputs (assuming NBASE is 10000), which fits well in IEEE
++	 * Since the floating-point dividend and divisor use 2 base-NBASE input
++	 * digits, they include roughly 53 bits of information from their
++	 * respective inputs (with NBASE is 100000000), which fits well in IEEE
+ 	 * double-precision variables.  The relative error in the floating-point
+-	 * quotient digit will then be less than around 2/NBASE^3, so the
+-	 * estimated base-NBASE^2 quotient digit will typically be correct, and
+-	 * should not be off by more than one from the correct value.
++	 * quotient digit will then be less than around 2/NBASE^2, so the
++	 * estimated quotient digit will typically be correct, and should not be
++	 * off by more than one from the correct value.
+ 	 */
+-	fdivisor = (double) divisor[0] * NBASE_SQR;
+-	if (var2ndigitpairs > 1)
++	fdivisor = (double) divisor[0] * NBASE;
++	if (var2ndigits > 1)
+ 		fdivisor += (double) divisor[1];
+ 	fdivisorinverse = 1.0 / fdivisor;
+ 
+@@ -9101,14 +9075,14 @@ div_var(const NumericVar *var1, const NumericVar *var2, NumericVar *result,
+ 	 * entry; when this threatens to exceed PG_INT64_MAX, we take the time to
+ 	 * propagate carries.  Furthermore, we need to ensure that overflow
+ 	 * doesn't occur during the carry propagation passes either.  The carry
+-	 * values may have an absolute value as high as PG_INT64_MAX/NBASE^2 + 1,
++	 * values may have an absolute value as high as PG_INT64_MAX/NBASE + 1,
+ 	 * so really we must normalize when digits threaten to exceed PG_INT64_MAX
+-	 * - PG_INT64_MAX/NBASE^2 - 1.
++	 * - PG_INT64_MAX/NBASE - 1.
+ 	 *
+ 	 * To avoid overflow in maxdiv itself, it represents the max absolute
+-	 * value divided by NBASE^2-1, i.e., at the top of the loop it is known
++	 * value divided by NBASE-1, i.e., at the top of the loop it is known
+ 	 * that no dividend[] entry has an absolute value exceeding maxdiv *
+-	 * (NBASE^2-1).
++	 * (NBASE-1).
+ 	 *
+ 	 * Actually, though, that holds good only for dividend[] entries after
+ 	 * dividend[qi]; the adjustment done at the bottom of the loop may cause
+@@ -9121,43 +9095,43 @@ div_var(const NumericVar *var1, const NumericVar *var2, NumericVar *result,
+ 	/*
+ 	 * Outer loop computes next quotient digit, which goes in dividend[qi].
+ 	 */
+-	for (qi = 0; qi < res_ndigitpairs; qi++)
++	for (qi = 0; qi < res_ndigits; qi++)
+ 	{
+ 		/* Approximate the current dividend value */
+-		fdividend = (double) dividend[qi] * NBASE_SQR;
++		fdividend = (double) dividend[qi] * NBASE;
+ 		fdividend += (double) dividend[qi + 1];
+ 
+ 		/* Compute the (approximate) quotient digit */
+ 		fquotient = fdividend * fdivisorinverse;
+-		qdigit = (fquotient >= 0.0) ? ((int32) fquotient) :
+-			(((int32) fquotient) - 1);	/* truncate towards -infinity */
++		qdigit = (fquotient >= 0.0) ? ((int64) fquotient) :
++			(((int64) fquotient) - 1);	/* truncate towards -infinity */
+ 
+ 		if (qdigit != 0)
+ 		{
+ 			/* Do we need to normalize now? */
+ 			maxdiv += i64abs(qdigit);
+-			if (maxdiv > (PG_INT64_MAX - PG_INT64_MAX / NBASE_SQR - 1) / (NBASE_SQR - 1))
++			if (maxdiv > (PG_INT64_MAX - PG_INT64_MAX / NBASE - 1) / (NBASE - 1))
+ 			{
+ 				/*
+-				 * Yes, do it.  Note that if var2ndigitpairs is much smaller
+-				 * than div_ndigitpairs, we can save a significant amount of
++				 * Yes, do it.  Note that if var2ndigits is much smaller
++				 * than div_ndigits, we can save a significant amount of
+ 				 * effort here by noting that we only need to normalise those
+ 				 * dividend[] entries touched where prior iterations
+ 				 * subtracted multiples of the divisor.
+ 				 */
+ 				carry = 0;
+-				for (i = Min(qi + var2ndigitpairs - 2, div_ndigitpairs - 1); i > qi; i--)
++				for (i = Min(qi + var2ndigits - 2, div_ndigits - 1); i > qi; i--)
+ 				{
+ 					newdig = dividend[i] + carry;
+ 					if (newdig < 0)
+ 					{
+-						carry = -((-newdig - 1) / NBASE_SQR) - 1;
+-						newdig -= carry * NBASE_SQR;
++						carry = -((-newdig - 1) / NBASE) - 1;
++						newdig -= carry * NBASE;
+ 					}
+-					else if (newdig >= NBASE_SQR)
++					else if (newdig >= NBASE)
+ 					{
+-						carry = newdig / NBASE_SQR;
+-						newdig -= carry * NBASE_SQR;
++						carry = newdig / NBASE;
++						newdig -= carry * NBASE;
+ 					}
+ 					else
+ 						carry = 0;
+@@ -9167,7 +9141,7 @@ div_var(const NumericVar *var1, const NumericVar *var2, NumericVar *result,
+ 
+ 				/*
+ 				 * All the dividend[] digits except possibly dividend[qi] are
+-				 * now in the range 0..NBASE^2-1.  We do not need to consider
++				 * now in the range 0..NBASE-1.  We do not need to consider
+ 				 * dividend[qi] in the maxdiv value anymore, so we can reset
+ 				 * maxdiv to 1.
+ 				 */
+@@ -9177,11 +9151,11 @@ div_var(const NumericVar *var1, const NumericVar *var2, NumericVar *result,
+ 				 * Recompute the quotient digit since new info may have
+ 				 * propagated into the top two dividend digits.
+ 				 */
+-				fdividend = (double) dividend[qi] * NBASE_SQR;
++				fdividend = (double) dividend[qi] * NBASE;
+ 				fdividend += (double) dividend[qi + 1];
+ 				fquotient = fdividend * fdivisorinverse;
+-				qdigit = (fquotient >= 0.0) ? ((int32) fquotient) :
+-					(((int32) fquotient) - 1);	/* truncate towards -infinity */
++				qdigit = (fquotient >= 0.0) ? ((int64) fquotient) :
++					(((int64) fquotient) - 1);	/* truncate towards -infinity */
+ 
+ 				maxdiv += i64abs(qdigit);
+ 			}
+@@ -9194,7 +9168,7 @@ div_var(const NumericVar *var1, const NumericVar *var2, NumericVar *result,
+ 			 * itself, note that qdigit is approximately trunc(dividend[qi] /
+ 			 * divisor[0]), which would make the new value simply dividend[qi]
+ 			 * mod divisor[0].  The lower-order terms in qdigit can change
+-			 * this result by not more than about twice PG_INT64_MAX/NBASE^2,
++			 * this result by not more than about twice PG_INT64_MAX/NBASE,
+ 			 * so overflow is impossible.
+ 			 *
+ 			 * This inner loop is the performance bottleneck for division, so
+@@ -9203,11 +9177,11 @@ div_var(const NumericVar *var1, const NumericVar *var2, NumericVar *result,
+ 			 */
+ 			if (qdigit != 0)
+ 			{
+-				int			istop = Min(var2ndigitpairs, div_ndigitpairs - qi);
++				int			istop = Min(var2ndigits, div_ndigits - qi);
+ 				int64	   *dividend_qi = &dividend[qi];
+ 
+ 				for (i = 0; i < istop; i++)
+-					dividend_qi[i] -= (int64) qdigit * divisor[i];
++					dividend_qi[i] -= qdigit * divisor[i];
+ 			}
+ 		}
+ 
+@@ -9220,23 +9194,23 @@ div_var(const NumericVar *var1, const NumericVar *var2, NumericVar *result,
+ 		 * overflowing, if we consider the first two terms in the numerator
+ 		 * and denominator of qdigit, we can see that the final value of
+ 		 * dividend[qi + 1] will be approximately a remainder mod
+-		 * (divisor[0]*NBASE^2 + divisor[1]).  Accounting for the lower-order
++		 * (divisor[0]*NBASE + divisor[1]).  Accounting for the lower-order
+ 		 * terms is a bit complicated but ends up adding not much more than
+-		 * PG_INT64_MAX/NBASE^2 to the possible range.  Thus, dividend[qi + 1]
++		 * PG_INT64_MAX/NBASE to the possible range.  Thus, dividend[qi + 1]
+ 		 * cannot overflow here, and in its role as dividend[qi] in the next
+ 		 * loop iteration, it can't be large enough to cause overflow in the
+ 		 * carry propagation step (if any), either.
+ 		 *
+ 		 * But having said that: dividend[qi] can be more than
+-		 * PG_INT64_MAX/NBASE^2, as noted above, which means that the product
+-		 * dividend[qi] * NBASE^2 *can* overflow.  When that happens, adding
++		 * PG_INT64_MAX/NBASE, as noted above, which means that the product
++		 * dividend[qi] * NBASE *can* overflow.  When that happens, adding
+ 		 * it to dividend[qi + 1] will always cause a canceling overflow so
+ 		 * that the end result is correct.  We could avoid the intermediate
+ 		 * overflow by doing the multiplication and addition using unsigned
+ 		 * int64 arithmetic, which is modulo 2^64, but so far there appears no
+ 		 * need.
+ 		 */
+-		dividend[qi + 1] += dividend[qi] * NBASE_SQR;
++		dividend[qi + 1] += dividend[qi] * NBASE;
+ 
+ 		dividend[qi] = qdigit;
+ 	}
+@@ -9245,31 +9219,30 @@ div_var(const NumericVar *var1, const NumericVar *var2, NumericVar *result,
+ 	 * If an exact result was requested, use the remainder to correct the
+ 	 * approximate quotient.  The remainder is in dividend[], immediately
+ 	 * after the quotient digits.  Note, however, that although the remainder
+-	 * starts at dividend[qi = res_ndigitpairs], the first digit is the result
++	 * starts at dividend[qi = res_ndigits], the first digit is the result
+ 	 * of folding two remainder digits into one above, and the remainder
+-	 * currently only occupies var2ndigitpairs - 1 digits (the last digit of
++	 * currently only occupies var2ndigits - 1 digits (the last digit of
+ 	 * the working dividend was untouched by the computation above).  Thus we
+-	 * expand the remainder down by one base-NBASE^2 digit when we normalize
+-	 * it, so that it completely fills the last var2ndigitpairs digits of the
+-	 * dividend array.
++	 * expand the remainder down by one digit when we normalize it, so that
++	 * it completely fills the last var2ndigits digits of the dividend array.
+ 	 */
+ 	if (exact)
+ 	{
+ 		/* Normalize the remainder, expanding it down by one digit */
+ 		remainder = &dividend[qi];
+ 		carry = 0;
+-		for (i = var2ndigitpairs - 2; i >= 0; i--)
++		for (i = var2ndigits - 2; i >= 0; i--)
+ 		{
+ 			newdig = remainder[i] + carry;
+ 			if (newdig < 0)
+ 			{
+-				carry = -((-newdig - 1) / NBASE_SQR) - 1;
+-				newdig -= carry * NBASE_SQR;
++				carry = -((-newdig - 1) / NBASE) - 1;
++				newdig -= carry * NBASE;
+ 			}
+-			else if (newdig >= NBASE_SQR)
++			else if (newdig >= NBASE)
+ 			{
+-				carry = newdig / NBASE_SQR;
+-				newdig -= carry * NBASE_SQR;
++				carry = newdig / NBASE;
++				newdig -= carry * NBASE;
+ 			}
+ 			else
+ 				carry = 0;
+@@ -9291,12 +9264,12 @@ div_var(const NumericVar *var1, const NumericVar *var2, NumericVar *result,
+ 			{
+ 				/* Add the divisor to the remainder */
+ 				carry = 0;
+-				for (i = var2ndigitpairs - 1; i > 0; i--)
++				for (i = var2ndigits - 1; i > 0; i--)
+ 				{
+ 					newdig = remainder[i] + divisor[i] + carry;
+-					if (newdig >= NBASE_SQR)
++					if (newdig >= NBASE)
+ 					{
+-						remainder[i] = newdig - NBASE_SQR;
++						remainder[i] = newdig - NBASE;
+ 						carry = 1;
+ 					}
+ 					else
+@@ -9325,7 +9298,7 @@ div_var(const NumericVar *var1, const NumericVar *var2, NumericVar *result,
+ 				bool		less = false;
+ 
+ 				/* Is remainder < divisor? */
+-				for (i = 0; i < var2ndigitpairs; i++)
++				for (i = 0; i < var2ndigits; i++)
+ 				{
+ 					if (remainder[i] < divisor[i])
+ 					{
+@@ -9340,12 +9313,12 @@ div_var(const NumericVar *var1, const NumericVar *var2, NumericVar *result,
+ 
+ 				/* Subtract the divisor from the remainder */
+ 				carry = 0;
+-				for (i = var2ndigitpairs - 1; i > 0; i--)
++				for (i = var2ndigits - 1; i > 0; i--)
+ 				{
+ 					newdig = remainder[i] - divisor[i] + carry;
+ 					if (newdig < 0)
+ 					{
+-						remainder[i] = newdig + NBASE_SQR;
++						remainder[i] = newdig + NBASE;
+ 						carry = -1;
+ 					}
+ 					else
+@@ -9366,30 +9339,29 @@ div_var(const NumericVar *var1, const NumericVar *var2, NumericVar *result,
+ 	 * Because the quotient digits were estimates that might have been off by
+ 	 * one (and we didn't bother propagating carries when adjusting the
+ 	 * quotient above), some quotient digits might be out of range, so do a
+-	 * final carry propagation pass to normalize back to base NBASE^2, and
+-	 * construct the base-NBASE result digits.  Note that this is still done
+-	 * at full precision w/guard digits.
++	 * final carry propagation pass to normalize back to base NBASE, and
++	 * construct the result digits.  Note that this is still done at full
++	 * precision w/guard digits.
+ 	 */
+ 	alloc_var(result, res_ndigits);
+ 	res_digits = result->digits;
+ 	carry = 0;
+-	for (i = res_ndigitpairs - 1; i >= 0; i--)
++	for (i = res_ndigits - 1; i >= 0; i--)
+ 	{
+ 		newdig = dividend[i] + carry;
+ 		if (newdig < 0)
+ 		{
+-			carry = -((-newdig - 1) / NBASE_SQR) - 1;
+-			newdig -= carry * NBASE_SQR;
++			carry = -((-newdig - 1) / NBASE) - 1;
++			newdig -= carry * NBASE;
+ 		}
+-		else if (newdig >= NBASE_SQR)
++		else if (newdig >= NBASE)
+ 		{
+-			carry = newdig / NBASE_SQR;
+-			newdig -= carry * NBASE_SQR;
++			carry = newdig / NBASE;
++			newdig -= carry * NBASE;
+ 		}
+ 		else
+ 			carry = 0;
+-		res_digits[2 * i + 1] = (NumericDigit) ((uint32) newdig % NBASE);
+-		res_digits[2 * i] = (NumericDigit) ((uint32) newdig / NBASE);
++		res_digits[i] = (NumericDigit) newdig;
+ 	}
+ 	Assert(carry == 0);
+ 
+@@ -9941,16 +9913,24 @@ sqrt_var(const NumericVar *arg, NumericVar *result, int rscale)
+ 	int			step;
+ 	int			ndigits[32];
+ 	int			blen;
+-	int64		arg_int64;
+ 	int			src_idx;
+-	int64		s_int64;
+-	int64		r_int64;
+ 	NumericVar	s_var;
+ 	NumericVar	r_var;
+ 	NumericVar	a0_var;
+ 	NumericVar	a1_var;
+ 	NumericVar	q_var;
+ 	NumericVar	u_var;
++#ifdef HAVE_INT128
++	int128		arg_int128;
++	int128		s_int128;
++	int128		r_int128;
++#else
++	NumericVar	arg_var;
++	double		arg_dbl;
++	int64		s_int64;
++	NumericVar	digit_var;
++	NumericVar	tmp_var;
++#endif
+ 
+ 	stat = cmp_var(arg, &const_zero);
+ 	if (stat == 0)
+@@ -9975,6 +9955,11 @@ sqrt_var(const NumericVar *arg, NumericVar *result, int rscale)
+ 	init_var(&a1_var);
+ 	init_var(&q_var);
+ 	init_var(&u_var);
++#ifndef HAVE_INT128
++	init_var(&arg_var);
++	init_var(&digit_var);
++	init_var(&tmp_var);
++#endif
+ 
+ 	/*
+ 	 * The result weight is half the input weight, rounded towards minus
+@@ -10089,21 +10074,69 @@ sqrt_var(const NumericVar *arg, NumericVar *result, int rscale)
+ 	/*
+ 	 * First iteration (innermost square root and remainder):
+ 	 *
+-	 * Here src_ndigits <= 4, and the input fits in an int64.  Its square root
+-	 * has at most 9 decimal digits, so estimate it using double precision
+-	 * arithmetic, which will in fact almost certainly return the correct
+-	 * result with no further correction required.
++	 * Here src_ndigits <= 4, and the input fits in an int128.  Its square root
++	 * has at most 19 decimal digits, so estimate it using double precision
++	 * arithmetic, which will often return the correct result with no further
++	 * correction required.
+ 	 */
+-	arg_int64 = arg->digits[0];
++#ifdef HAVE_INT128
++	/*
++	 * Store the input in an int128 variable.
++	 */
++	arg_int128 = (int128) arg->digits[0];
++	for (src_idx = 1; src_idx < src_ndigits; src_idx++)
++	{
++		arg_int128 *= (int128) NBASE;
++		if (src_idx < arg->ndigits)
++			arg_int128 += (int128) arg->digits[src_idx];
++	}
++#else
++	/*
++	 * Store the input in a NumericVar and an approximation in a double.
++	 *
++	 * The double is only used to compute the first initial guess
++	 * of the square root, estimated using double precision arithmetic.
++	 *
++	 * The exact square root is then computed using Newton's method,
++	 * which will usually require very few steps, thanks to the almost
++	 * correct initial guess.
++	 */
++
++	/* Initialize NumericVar with first digit */
++	alloc_var(&arg_var, 1);
++	arg_var.digits[0] = arg->digits[0];
++	arg_var.sign = NUMERIC_POS;
++	arg_var.dscale = 0;
++	alloc_var(&digit_var, 1);
++	digit_var.sign = NUMERIC_POS;
++	digit_var.dscale = 0;
++
++	/* Initialize double with first digit */
++	arg_dbl = (double) arg->digits[0];
++
++	/* Add following digits to NumericVar and double */
+ 	for (src_idx = 1; src_idx < src_ndigits; src_idx++)
+ 	{
+-		arg_int64 *= NBASE;
++		arg_var.weight += 1;
++		arg_dbl *= (double) NBASE;
+ 		if (src_idx < arg->ndigits)
+-			arg_int64 += arg->digits[src_idx];
++		{
++			digit_var.digits[0] = arg->digits[src_idx];
++			add_var(&arg_var, &digit_var, &arg_var);
++			arg_dbl += (double) arg->digits[src_idx];
++		}
+ 	}
++#endif
+ 
+-	s_int64 = (int64) sqrt((double) arg_int64);
+-	r_int64 = arg_int64 - s_int64 * s_int64;
++#ifdef HAVE_INT128
++	s_int128 = (int128) sqrt((double) arg_int128);
++	r_int128 = arg_int128 - s_int128 * s_int128;
++#else
++	s_int64 = (int64) sqrt(arg_dbl);
++	int64_to_numericvar(s_int64, &s_var);
++	mul_var(&s_var, &s_var, &tmp_var, 0);
++	sub_var(&arg_var, &tmp_var, &r_var);
++#endif
+ 
+ 	/*
+ 	 * Use Newton's method to correct the result, if necessary.
+@@ -10115,107 +10148,40 @@ sqrt_var(const NumericVar *arg, NumericVar *result, int rscale)
+ 	 * values isqrt(n) and isqrt(n)+1, so we can be assured of convergence by
+ 	 * checking the remainder.
+ 	 */
+-	while (r_int64 < 0 || r_int64 > 2 * s_int64)
++#ifdef HAVE_INT128
++	while (r_int128 < 0 || r_int128 > 2 * s_int128)
+ 	{
+-		s_int64 = (s_int64 + arg_int64 / s_int64) / 2;
+-		r_int64 = arg_int64 - s_int64 * s_int64;
++		s_int128 = (s_int128 + arg_int128 / s_int128) / 2;
++		r_int128 = arg_int128 - s_int128 * s_int128;
+ 	}
++#else
++	for (;;)
++	{
++		mul_var(&s_var, &const_two, &tmp_var, 0);
++		if (!(cmp_var(&r_var, &const_zero) < 0 || cmp_var(&r_var, &tmp_var) > 0))
++			break;
++		div_var(&arg_var, &s_var, &tmp_var, 0, false, false);
++		add_var(&s_var, &tmp_var, &tmp_var);
++		div_var(&tmp_var, &const_two, &s_var, 0, false, false);
++		mul_var(&s_var, &s_var, &tmp_var, 0);
++		sub_var(&arg_var, &tmp_var, &r_var);
++	}
++#endif
+ 
+ 	/*
+ 	 * Iterations with src_ndigits <= 8:
+ 	 *
+-	 * The next 1 or 2 iterations compute larger (outer) square roots with
+-	 * src_ndigits <= 8, so the result still fits in an int64 (even though the
+-	 * input no longer does) and we can continue to compute using int64
+-	 * variables to avoid more expensive numeric computations.
+-	 *
+-	 * It is fairly easy to see that there is no risk of the intermediate
+-	 * values below overflowing 64-bit integers.  In the worst case, the
+-	 * previous iteration will have computed a 3-digit square root (of a
+-	 * 6-digit input less than NBASE^6 / 4), so at the start of this
+-	 * iteration, s will be less than NBASE^3 / 2 = 10^12 / 2, and r will be
+-	 * less than 10^12.  In this case, blen will be 1, so numer will be less
+-	 * than 10^17, and denom will be less than 10^12 (and hence u will also be
+-	 * less than 10^12).  Finally, since q^2 = u*b + a0 - r, we can also be
+-	 * sure that q^2 < 10^17.  Therefore all these quantities fit comfortably
+-	 * in 64-bit integers.
+-	 */
+-	step--;
+-	while (step >= 0 && (src_ndigits = ndigits[step]) <= 8)
+-	{
+-		int			b;
+-		int			a0;
+-		int			a1;
+-		int			i;
+-		int64		numer;
+-		int64		denom;
+-		int64		q;
+-		int64		u;
+-
+-		blen = (src_ndigits - src_idx) / 2;
+-
+-		/* Extract a1 and a0, and compute b */
+-		a0 = 0;
+-		a1 = 0;
+-		b = 1;
+-
+-		for (i = 0; i < blen; i++, src_idx++)
+-		{
+-			b *= NBASE;
+-			a1 *= NBASE;
+-			if (src_idx < arg->ndigits)
+-				a1 += arg->digits[src_idx];
+-		}
+-
+-		for (i = 0; i < blen; i++, src_idx++)
+-		{
+-			a0 *= NBASE;
+-			if (src_idx < arg->ndigits)
+-				a0 += arg->digits[src_idx];
+-		}
+-
+-		/* Compute (q,u) = DivRem(r*b + a1, 2*s) */
+-		numer = r_int64 * b + a1;
+-		denom = 2 * s_int64;
+-		q = numer / denom;
+-		u = numer - q * denom;
+-
+-		/* Compute s = s*b + q and r = u*b + a0 - q^2 */
+-		s_int64 = s_int64 * b + q;
+-		r_int64 = u * b + a0 - q * q;
+-
+-		if (r_int64 < 0)
+-		{
+-			/* s is too large by 1; set r += s, s--, r += s */
+-			r_int64 += s_int64;
+-			s_int64--;
+-			r_int64 += s_int64;
+-		}
+-
+-		Assert(src_idx == src_ndigits); /* All input digits consumed */
+-		step--;
+-	}
+-
+-	/*
+ 	 * On platforms with 128-bit integer support, we can further delay the
+ 	 * need to use numeric variables.
++	 *
++	 * The result fits in an int128 (even though the input doesn't) so we
++	 * use int128 variables to avoid more expensive numeric computations.
+ 	 */
++	step--;
+ #ifdef HAVE_INT128
+ 	if (step >= 0)
+ 	{
+-		int128		s_int128;
+-		int128		r_int128;
+-
+-		s_int128 = s_int64;
+-		r_int128 = r_int64;
+-
+-		/*
+-		 * Iterations with src_ndigits <= 16:
+-		 *
+-		 * The result fits in an int128 (even though the input doesn't) so we
+-		 * use int128 variables to avoid more expensive numeric computations.
+-		 */
+-		while (step >= 0 && (src_ndigits = ndigits[step]) <= 16)
++		while (step >= 0 && (src_ndigits = ndigits[step]) <= 8)
+ 		{
+ 			int64		b;
+ 			int64		a0;
+@@ -10282,18 +10248,13 @@ sqrt_var(const NumericVar *arg, NumericVar *result, int rscale)
+ 	}
+ 	else
+ 	{
+-		int64_to_numericvar(s_int64, &s_var);
++		int128_to_numericvar(s_int128, &s_var);
+ 		/* step < 0, so we certainly don't need r */
+ 	}
+-#else							/* !HAVE_INT128 */
+-	int64_to_numericvar(s_int64, &s_var);
+-	if (step >= 0)
+-		int64_to_numericvar(r_int64, &r_var);
+-#endif							/* HAVE_INT128 */
++#endif
+ 
+ 	/*
+-	 * The remaining iterations with src_ndigits > 8 (or 16, if have int128)
+-	 * use numeric variables.
++	 * The remaining iterations with src_ndigits > 8 use numeric variables.
+ 	 */
+ 	while (step >= 0)
+ 	{
+@@ -10403,6 +10364,11 @@ sqrt_var(const NumericVar *arg, NumericVar *result, int rscale)
+ 	free_var(&a1_var);
+ 	free_var(&q_var);
+ 	free_var(&u_var);
++#ifndef HAVE_INT128
++	free_var(&arg_var);
++	free_var(&digit_var);
++	free_var(&tmp_var);
++#endif
+ }
+ 
+ 
+@@ -10585,16 +10551,16 @@ estimate_ln_dweight(const NumericVar *var)
+ 		 */
+ 		if (var->ndigits > 0)
+ 		{
+-			int			digits;
++			int64		digits;
+ 			int			dweight;
+ 			double		ln_var;
+ 
+-			digits = var->digits[0];
++			digits = (int64) var->digits[0];
+ 			dweight = var->weight * DEC_DIGITS;
+ 
+ 			if (var->ndigits > 1)
+ 			{
+-				digits = digits * NBASE + var->digits[1];
++				digits = digits * NBASE + (int64) var->digits[1];
+ 				dweight -= DEC_DIGITS;
+ 			}
+ 
+@@ -11245,29 +11211,34 @@ random_var(pg_prng_state *state, const NumericVar *rmin,
+ 	/*
+ 	 * To choose a random value uniformly from the range [0, rlen], we choose
+ 	 * from the slightly larger range [0, rlen2], where rlen2 is formed from
+-	 * rlen by copying the first 4 NBASE digits, and setting all remaining
+-	 * decimal digits to "9".
++	 * rlen by copying the first few NBASE digits (as many as fit in a uint64),
++	 * and setting all remaining decimal digits to "9".
+ 	 *
+ 	 * Without loss of generality, we can ignore the weight of rlen2 and treat
+ 	 * it as a pure integer for the purposes of this discussion.  The process
+ 	 * above gives rlen2 + 1 = rlen64 * 10^N, for some integer N, where rlen64
+-	 * is a 64-bit integer formed from the first 4 NBASE digits copied from
+-	 * rlen.  Since this trivially factors into smaller pieces that fit in
+-	 * 64-bit integers, the task of choosing a random value uniformly from the
+-	 * rlen2 + 1 possible values in [0, rlen2] is much simpler.
++	 * is a 64-bit integer formed from the first RLEN64_NDIGITS NBASE digits
++	 * copied from rlen.  Since this trivially factors into smaller pieces
++	 * that fit in 64-bit integers, the task of choosing a random value
++	 * uniformly from the rlen2 + 1 possible values in [0, rlen2] is simpler.
+ 	 *
+ 	 * If the random value selected is too large, it is rejected, and we try
+ 	 * again until we get a result <= rlen, ensuring that the overall result
+ 	 * is uniform (no particular value is any more likely than any other).
+ 	 *
+-	 * Since rlen64 holds 4 NBASE digits from rlen, it contains at least
+-	 * DEC_DIGITS * 3 + 1 decimal digits (i.e., at least 13 decimal digits,
+-	 * when DEC_DIGITS is 4). Therefore the probability of needing to reject
+-	 * the value chosen and retry is less than 1e-13.
++	 * Since rlen64 holds RLEN64_NDIGITS NBASE digits from rlen, it contains
++	 * at least DEC_DIGITS * (RLEN64_NDIGITS - 1) + 1 decimal digits.
++	 * Therefore the probability of needing to reject the value chosen and
++	 * retry is less than 1e-9 (for DEC_DIGITS=8) or 1e-13 (for DEC_DIGITS=4).
+ 	 */
++#if DEC_DIGITS == 8
++#define RLEN64_NDIGITS 2		/* 2 digits of NBASE 1e8 fit in uint64 */
++#else
++#define RLEN64_NDIGITS 4		/* 4 digits of NBASE 1e4 fit in uint64 */
++#endif
+ 	rlen64 = (uint64) rlen.digits[0];
+ 	rlen64_ndigits = 1;
+-	while (rlen64_ndigits < res_ndigits && rlen64_ndigits < 4)
++	while (rlen64_ndigits < res_ndigits && rlen64_ndigits < RLEN64_NDIGITS)
+ 	{
+ 		rlen64 *= NBASE;
+ 		if (rlen64_ndigits < rlen.ndigits)
+@@ -11314,8 +11285,22 @@ random_var(pg_prng_state *state, const NumericVar *rmin,
+ 		if (pow10 != 1)
+ 			whole_ndigits--;
+ 
+-		/* Set whole digits in groups of 4 for best performance */
++		/*
++		 * Set whole digits in groups for best performance.  With NBASE=1e4,
++		 * we process 4 digits at a time (NBASE^4 fits in uint64).  With
++		 * NBASE=1e8, we process 2 digits at a time (NBASE^2 fits in uint64).
++		 */
+ 		i = rlen64_ndigits;
++#if DEC_DIGITS == 8
++		while (i < whole_ndigits - 1)
++		{
++			rand = pg_prng_uint64_range(state, 0,
++										(uint64) NBASE * NBASE - 1);
++			res_digits[i++] = (NumericDigit) (rand % NBASE);
++			rand = rand / NBASE;
++			res_digits[i++] = (NumericDigit) rand;
++		}
++#else
+ 		while (i < whole_ndigits - 3)
+ 		{
+ 			rand = pg_prng_uint64_range(state, 0,
+@@ -11328,6 +11313,7 @@ random_var(pg_prng_state *state, const NumericVar *rmin,
+ 			rand = rand / NBASE;
+ 			res_digits[i++] = (NumericDigit) rand;
+ 		}
++#endif
+ 
+ 		/* Remaining whole digits */
+ 		while (i < whole_ndigits)
+@@ -11417,7 +11403,7 @@ cmp_abs_common(const NumericDigit *var1digits, int var1ndigits, int var1weight,
+ 	{
+ 		while (i1 < var1ndigits && i2 < var2ndigits)
+ 		{
+-			int			stat = var1digits[i1++] - var2digits[i2++];
++			int64		stat = (int64) var1digits[i1++] - (int64) var2digits[i2++];
+ 
+ 			if (stat)
+ 			{
+@@ -11467,7 +11453,7 @@ add_abs(const NumericVar *var1, const NumericVar *var2, NumericVar *result)
+ 	int			i,
+ 				i1,
+ 				i2;
+-	int			carry = 0;
++	int64		carry = 0;
+ 
+ 	/* copy these values into local vars for speed in inner loop */
+ 	int			var1ndigits = var1->ndigits;
+@@ -11499,18 +11485,18 @@ add_abs(const NumericVar *var1, const NumericVar *var2, NumericVar *result)
+ 		i1--;
+ 		i2--;
+ 		if (i1 >= 0 && i1 < var1ndigits)
+-			carry += var1digits[i1];
++			carry += (int64) var1digits[i1];
+ 		if (i2 >= 0 && i2 < var2ndigits)
+-			carry += var2digits[i2];
++			carry += (int64) var2digits[i2];
+ 
+ 		if (carry >= NBASE)
+ 		{
+-			res_digits[i] = carry - NBASE;
++			res_digits[i] = (NumericDigit) (carry - NBASE);
+ 			carry = 1;
+ 		}
+ 		else
+ 		{
+-			res_digits[i] = carry;
++			res_digits[i] = (NumericDigit) carry;
+ 			carry = 0;
+ 		}
+ 	}
+@@ -11552,7 +11538,7 @@ sub_abs(const NumericVar *var1, const NumericVar *var2, NumericVar *result)
+ 	int			i,
+ 				i1,
+ 				i2;
+-	int			borrow = 0;
++	int64		borrow = 0;
+ 
+ 	/* copy these values into local vars for speed in inner loop */
+ 	int			var1ndigits = var1->ndigits;
+@@ -11584,18 +11570,18 @@ sub_abs(const NumericVar *var1, const NumericVar *var2, NumericVar *result)
+ 		i1--;
+ 		i2--;
+ 		if (i1 >= 0 && i1 < var1ndigits)
+-			borrow += var1digits[i1];
++			borrow += (int64) var1digits[i1];
+ 		if (i2 >= 0 && i2 < var2ndigits)
+-			borrow -= var2digits[i2];
++			borrow -= (int64) var2digits[i2];
+ 
+ 		if (borrow < 0)
+ 		{
+-			res_digits[i] = borrow + NBASE;
++			res_digits[i] = (NumericDigit) (borrow + NBASE);
+ 			borrow = -1;
+ 		}
+ 		else
+ 		{
+-			res_digits[i] = borrow;
++			res_digits[i] = (NumericDigit) borrow;
+ 			borrow = 0;
+ 		}
+ 	}
+@@ -11668,7 +11654,9 @@ round_var(NumericVar *var, int rscale)
+ 				int			extra,
+ 							pow10;
+ 
+-#if DEC_DIGITS == 4
++#if DEC_DIGITS == 8
++				pow10 = round_powers[di];
++#elif DEC_DIGITS == 4
+ 				pow10 = round_powers[di];
+ #elif DEC_DIGITS == 2
+ 				pow10 = 10;
+@@ -11768,7 +11756,9 @@ trunc_var(NumericVar *var, int rscale)
+ 				int			extra,
+ 							pow10;
+ 
+-#if DEC_DIGITS == 4
++#if DEC_DIGITS == 8
++				pow10 = round_powers[di];
++#elif DEC_DIGITS == 4
+ 				pow10 = round_powers[di];
+ #elif DEC_DIGITS == 2
+ 				pow10 = 10;
+@@ -11848,7 +11838,7 @@ accum_sum_reset(NumericSumAccum *accum)
+ static void
+ accum_sum_add(NumericSumAccum *accum, const NumericVar *val)
+ {
+-	int32	   *accum_digits;
++	int64	   *accum_digits;
+ 	int			i,
+ 				val_i;
+ 	int			val_ndigits;
+@@ -11883,7 +11873,7 @@ accum_sum_add(NumericSumAccum *accum, const NumericVar *val)
+ 	i = accum->weight - val->weight;
+ 	for (val_i = 0; val_i < val_ndigits; val_i++)
+ 	{
+-		accum_digits[i] += (int32) val_digits[val_i];
++		accum_digits[i] += (int64) val_digits[val_i];
+ 		i++;
+ 	}
+ 
+@@ -11898,9 +11888,9 @@ accum_sum_carry(NumericSumAccum *accum)
+ {
+ 	int			i;
+ 	int			ndigits;
+-	int32	   *dig;
+-	int32		carry;
+-	int32		newdig = 0;
++	int64	   *dig;
++	int64		carry;
++	int64		newdig = 0;
+ 
+ 	/*
+ 	 * If no new values have been added since last carry propagation, nothing
+@@ -12014,23 +12004,23 @@ accum_sum_rescale(NumericSumAccum *accum, const NumericVar *val)
+ 	if (accum_ndigits != old_ndigits ||
+ 		accum_weight != old_weight)
+ 	{
+-		int32	   *new_pos_digits;
+-		int32	   *new_neg_digits;
++		int64	   *new_pos_digits;
++		int64	   *new_neg_digits;
+ 		int			weightdiff;
+ 
+ 		weightdiff = accum_weight - old_weight;
+ 
+-		new_pos_digits = palloc0(accum_ndigits * sizeof(int32));
+-		new_neg_digits = palloc0(accum_ndigits * sizeof(int32));
++		new_pos_digits = palloc0(accum_ndigits * sizeof(int64));
++		new_neg_digits = palloc0(accum_ndigits * sizeof(int64));
+ 
+ 		if (accum->pos_digits)
+ 		{
+ 			memcpy(&new_pos_digits[weightdiff], accum->pos_digits,
+-				   old_ndigits * sizeof(int32));
++				   old_ndigits * sizeof(int64));
+ 			pfree(accum->pos_digits);
+ 
+ 			memcpy(&new_neg_digits[weightdiff], accum->neg_digits,
+-				   old_ndigits * sizeof(int32));
++				   old_ndigits * sizeof(int64));
+ 			pfree(accum->neg_digits);
+ 		}
+ 
+@@ -12109,11 +12099,11 @@ accum_sum_final(NumericSumAccum *accum, NumericVar *result)
+ static void
+ accum_sum_copy(NumericSumAccum *dst, NumericSumAccum *src)
+ {
+-	dst->pos_digits = palloc(src->ndigits * sizeof(int32));
+-	dst->neg_digits = palloc(src->ndigits * sizeof(int32));
++	dst->pos_digits = palloc(src->ndigits * sizeof(int64));
++	dst->neg_digits = palloc(src->ndigits * sizeof(int64));
+ 
+-	memcpy(dst->pos_digits, src->pos_digits, src->ndigits * sizeof(int32));
+-	memcpy(dst->neg_digits, src->neg_digits, src->ndigits * sizeof(int32));
++	memcpy(dst->pos_digits, src->pos_digits, src->ndigits * sizeof(int64));
++	memcpy(dst->neg_digits, src->neg_digits, src->ndigits * sizeof(int64));
+ 	dst->num_uncarried = src->num_uncarried;
+ 	dst->ndigits = src->ndigits;
+ 	dst->weight = src->weight;
+diff --git a/src/test/regress/expected/aggregates.out b/src/test/regress/expected/aggregates.out
+index cae8e7bca31..09ecd9f4b26 100644
+--- a/src/test/regress/expected/aggregates.out
++++ b/src/test/regress/expected/aggregates.out
+@@ -136,27 +136,27 @@ SELECT var_samp(b) FROM aggtest;
+ (1 row)
+ 
+ SELECT stddev_pop(b::numeric) FROM aggtest;
+-    stddev_pop    
+-------------------
+- 131.107032862199
++      stddev_pop      
++----------------------
++ 131.1070328621991535
+ (1 row)
+ 
+ SELECT stddev_samp(b::numeric) FROM aggtest;
+-   stddev_samp    
+-------------------
+- 151.389361431288
++     stddev_samp      
++----------------------
++ 151.3893614312875850
+ (1 row)
+ 
+ SELECT var_pop(b::numeric) FROM aggtest;
+-      var_pop       
+---------------------
+- 17189.054065929769
++        var_pop         
++------------------------
++ 17189.0540659297687500
+ (1 row)
+ 
+ SELECT var_samp(b::numeric) FROM aggtest;
+-      var_samp      
+---------------------
+- 22918.738754573025
++        var_samp        
++------------------------
++ 22918.7387545730250000
+ (1 row)
+ 
+ -- population variance is defined for a single tuple, sample variance
+@@ -3620,9 +3620,9 @@ FROM (SELECT * FROM tenk1
+       UNION ALL SELECT * FROM tenk1
+       UNION ALL SELECT * FROM tenk1
+       UNION ALL SELECT * FROM tenk1) u;
+-       variance       |    sum    | regr_count 
+-----------------------+-----------+------------
+- 8333541.588539713493 | 199980000 |      40000
++         variance         |    sum    | regr_count 
++--------------------------+-----------+------------
++ 8333541.5885397134928373 | 199980000 |      40000
+ (1 row)
+ 
+ -- variance(int8) covers numeric_combine
+@@ -3658,9 +3658,9 @@ FROM (SELECT * FROM tenk1
+       UNION ALL SELECT * FROM tenk1
+       UNION ALL SELECT * FROM tenk1
+       UNION ALL SELECT * FROM tenk1) u;
+-       variance       |          avg          
+-----------------------+-----------------------
+- 8333541.588539713493 | 4999.5000000000000000
++         variance         |          avg          
++--------------------------+-----------------------
++ 8333541.5885397134928373 | 4999.5000000000000000
+ (1 row)
+ 
+ ROLLBACK;
+diff --git a/src/test/regress/expected/jsonb_jsonpath.out b/src/test/regress/expected/jsonb_jsonpath.out
+index 4bcd4e91a29..042ad7e0a87 100644
+--- a/src/test/regress/expected/jsonb_jsonpath.out
++++ b/src/test/regress/expected/jsonb_jsonpath.out
+@@ -1473,7 +1473,7 @@ select jsonb_path_query('[{"a": 1, "b": [1, 2]}, {"c": {"a": "bbb"}}]', '$[*].ke
+ -----------------------------------------------
+  {"id": 12, "key": "a", "value": 1}
+  {"id": 12, "key": "b", "value": [1, 2]}
+- {"id": 72, "key": "c", "value": {"a": "bbb"}}
++ {"id": 84, "key": "c", "value": {"a": "bbb"}}
+ (3 rows)
+ 
+ select jsonb_path_query('[{"a": 1, "b": [1, 2]}, {"c": {"a": "bbb"}}]', 'strict $.keyvalue()');
+@@ -1483,7 +1483,7 @@ select jsonb_path_query('[{"a": 1, "b": [1, 2]}, {"c": {"a": "bbb"}}]', 'lax $.k
+ -----------------------------------------------
+  {"id": 12, "key": "a", "value": 1}
+  {"id": 12, "key": "b", "value": [1, 2]}
+- {"id": 72, "key": "c", "value": {"a": "bbb"}}
++ {"id": 84, "key": "c", "value": {"a": "bbb"}}
+ (3 rows)
+ 
+ select jsonb_path_query('[{"a": 1, "b": [1, 2]}, {"c": {"a": "bbb"}}]', 'strict $.keyvalue().a');
+diff --git a/src/test/regress/expected/memoize.out b/src/test/regress/expected/memoize.out
+index 00c30b91459..ac2ddcb1de8 100644
+--- a/src/test/regress/expected/memoize.out
++++ b/src/test/regress/expected/memoize.out
+@@ -130,9 +130,9 @@ LATERAL (
+ ) t2
+ ON t1.two = t2.two
+ WHERE t1.unique1 < 10;
+- count |          avg           
+--------+------------------------
+-    20 | 0.50000000000000000000
++ count |            avg             
++-------+----------------------------
++    20 | 0.500000000000000000000000
+ (1 row)
+ 
+ -- Try with LATERAL references within PlaceHolderVars
+diff --git a/src/test/regress/expected/numeric.out b/src/test/regress/expected/numeric.out
+index 45f913e7e59..2a12e1998d5 100644
+--- a/src/test/regress/expected/numeric.out
++++ b/src/test/regress/expected/numeric.out
+@@ -732,50 +732,50 @@ SELECT x1, x2,
+   x1 % x2 AS mod,
+   div(x1, x2) AS div
+ FROM v AS v1(x1), v AS v2(x2) WHERE x2 != 0;
+-    x1     |    x2     |          quot           | mod  |    div    
+------------+-----------+-------------------------+------+-----------
+-         0 |         1 |  0.00000000000000000000 |    0 |         0
+-         1 |         1 |  1.00000000000000000000 |    0 |         1
+-        -1 |         1 | -1.00000000000000000000 |    0 |        -1
+-       4.2 |         1 |      4.2000000000000000 |  0.2 |         4
+-  Infinity |         1 |                Infinity |  NaN |  Infinity
+- -Infinity |         1 |               -Infinity |  NaN | -Infinity
+-       NaN |         1 |                     NaN |  NaN |       NaN
+-         0 |        -1 |  0.00000000000000000000 |    0 |         0
+-         1 |        -1 | -1.00000000000000000000 |    0 |        -1
+-        -1 |        -1 |  1.00000000000000000000 |    0 |         1
+-       4.2 |        -1 |     -4.2000000000000000 |  0.2 |        -4
+-  Infinity |        -1 |               -Infinity |  NaN | -Infinity
+- -Infinity |        -1 |                Infinity |  NaN |  Infinity
+-       NaN |        -1 |                     NaN |  NaN |       NaN
+-         0 |       4.2 |  0.00000000000000000000 |  0.0 |         0
+-         1 |       4.2 |  0.23809523809523809524 |  1.0 |         0
+-        -1 |       4.2 | -0.23809523809523809524 | -1.0 |         0
+-       4.2 |       4.2 |  1.00000000000000000000 |  0.0 |         1
+-  Infinity |       4.2 |                Infinity |  NaN |  Infinity
+- -Infinity |       4.2 |               -Infinity |  NaN | -Infinity
+-       NaN |       4.2 |                     NaN |  NaN |       NaN
+-         0 |  Infinity |                       0 |    0 |         0
+-         1 |  Infinity |                       0 |    1 |         0
+-        -1 |  Infinity |                       0 |   -1 |         0
+-       4.2 |  Infinity |                       0 |  4.2 |         0
+-  Infinity |  Infinity |                     NaN |  NaN |       NaN
+- -Infinity |  Infinity |                     NaN |  NaN |       NaN
+-       NaN |  Infinity |                     NaN |  NaN |       NaN
+-         0 | -Infinity |                       0 |    0 |         0
+-         1 | -Infinity |                       0 |    1 |         0
+-        -1 | -Infinity |                       0 |   -1 |         0
+-       4.2 | -Infinity |                       0 |  4.2 |         0
+-  Infinity | -Infinity |                     NaN |  NaN |       NaN
+- -Infinity | -Infinity |                     NaN |  NaN |       NaN
+-       NaN | -Infinity |                     NaN |  NaN |       NaN
+-         0 |       NaN |                     NaN |  NaN |       NaN
+-         1 |       NaN |                     NaN |  NaN |       NaN
+-        -1 |       NaN |                     NaN |  NaN |       NaN
+-       4.2 |       NaN |                     NaN |  NaN |       NaN
+-  Infinity |       NaN |                     NaN |  NaN |       NaN
+- -Infinity |       NaN |                     NaN |  NaN |       NaN
+-       NaN |       NaN |                     NaN |  NaN |       NaN
++    x1     |    x2     |            quot             | mod  |    div    
++-----------+-----------+-----------------------------+------+-----------
++         0 |         1 |  0.000000000000000000000000 |    0 |         0
++         1 |         1 |  1.000000000000000000000000 |    0 |         1
++        -1 |         1 | -1.000000000000000000000000 |    0 |        -1
++       4.2 |         1 |          4.2000000000000000 |  0.2 |         4
++  Infinity |         1 |                    Infinity |  NaN |  Infinity
++ -Infinity |         1 |                   -Infinity |  NaN | -Infinity
++       NaN |         1 |                         NaN |  NaN |       NaN
++         0 |        -1 |  0.000000000000000000000000 |    0 |         0
++         1 |        -1 | -1.000000000000000000000000 |    0 |        -1
++        -1 |        -1 |  1.000000000000000000000000 |    0 |         1
++       4.2 |        -1 |         -4.2000000000000000 |  0.2 |        -4
++  Infinity |        -1 |                   -Infinity |  NaN | -Infinity
++ -Infinity |        -1 |                    Infinity |  NaN |  Infinity
++       NaN |        -1 |                         NaN |  NaN |       NaN
++         0 |       4.2 |  0.000000000000000000000000 |  0.0 |         0
++         1 |       4.2 |  0.238095238095238095238095 |  1.0 |         0
++        -1 |       4.2 | -0.238095238095238095238095 | -1.0 |         0
++       4.2 |       4.2 |  1.000000000000000000000000 |  0.0 |         1
++  Infinity |       4.2 |                    Infinity |  NaN |  Infinity
++ -Infinity |       4.2 |                   -Infinity |  NaN | -Infinity
++       NaN |       4.2 |                         NaN |  NaN |       NaN
++         0 |  Infinity |                           0 |    0 |         0
++         1 |  Infinity |                           0 |    1 |         0
++        -1 |  Infinity |                           0 |   -1 |         0
++       4.2 |  Infinity |                           0 |  4.2 |         0
++  Infinity |  Infinity |                         NaN |  NaN |       NaN
++ -Infinity |  Infinity |                         NaN |  NaN |       NaN
++       NaN |  Infinity |                         NaN |  NaN |       NaN
++         0 | -Infinity |                           0 |    0 |         0
++         1 | -Infinity |                           0 |    1 |         0
++        -1 | -Infinity |                           0 |   -1 |         0
++       4.2 | -Infinity |                           0 |  4.2 |         0
++  Infinity | -Infinity |                         NaN |  NaN |       NaN
++ -Infinity | -Infinity |                         NaN |  NaN |       NaN
++       NaN | -Infinity |                         NaN |  NaN |       NaN
++         0 |       NaN |                         NaN |  NaN |       NaN
++         1 |       NaN |                         NaN |  NaN |       NaN
++        -1 |       NaN |                         NaN |  NaN |       NaN
++       4.2 |       NaN |                         NaN |  NaN |       NaN
++  Infinity |       NaN |                         NaN |  NaN |       NaN
++ -Infinity |       NaN |                         NaN |  NaN |       NaN
++       NaN |       NaN |                         NaN |  NaN |       NaN
+ (42 rows)
+ 
+ SELECT 'inf'::numeric / '0';
+@@ -1091,9 +1091,9 @@ SELECT power('-inf'::numeric, '-inf');
+ -- ******************************
+ -- numeric AVG used to fail on some platforms
+ SELECT AVG(val) FROM num_data;
+-          avg           
+-------------------------
+- -13430913.592242320700
++            avg             
++----------------------------
++ -13430913.5922423207000000
+ (1 row)
+ 
+ SELECT MAX(val) FROM num_data;
+@@ -2791,9 +2791,9 @@ select trim_scale((0.1 - 2e-16383) * (0.1 - 3e-16383));
+ -- Test some corner cases for division
+ --
+ select 999999999999999999999::numeric/1000000000000000000000;
+-        ?column?        
+-------------------------
+- 1.00000000000000000000
++          ?column?          
++----------------------------
++ 0.999999999999999999999000
+ (1 row)
+ 
+ select div(999999999999999999999::numeric,1000000000000000000000);
+@@ -2839,9 +2839,9 @@ select div (70.0,70) ;
+ (1 row)
+ 
+ select 70.0 / 70 ;
+-        ?column?        
+-------------------------
+- 1.00000000000000000000
++          ?column?          
++----------------------------
++ 1.000000000000000000000000
+ (1 row)
+ 
+ select 12345678901234567890 % 123;
+@@ -3927,12 +3927,12 @@ SELECT regexp_replace(
+ -------------------------
+  0f 00 80 ff 00 00 00 0f+
+  00 80 00 01 00 00 0f 00+
+- 80 0f 27 00 00 1f 02 80+
+- ab 00 00 00 cd 00 00 00+
+- ef 00 00 00 0f 00 80 04+
+- 00 00 00 0f 00 80 05 00+
+- 00 00 0f 00 80 06 00 00+
+- 00 0f 00 80 07 00 00 00+
++ 80 0f 27 00 00 17 01 80+
++ ab 00 00 00 bf 48 1f 00+
++ 0f 00 80 04 00 00 00 0f+
++ 00 80 05 00 00 00 0f 00+
++ 80 06 00 00 00 0f 00 80+
++ 07 00 00 00 00 00 00 00+
+  
+ (1 row)
+ 
+diff --git a/src/test/regress/expected/random.out b/src/test/regress/expected/random.out
+index 7f17b2a1b12..57e8cdb6d5c 100644
+--- a/src/test/regress/expected/random.out
++++ b/src/test/regress/expected/random.out
+@@ -448,16 +448,16 @@ SELECT random(-9223372036854775808, 9223372036854775807) FROM generate_series(1,
+ SELECT random(-1e30, 1e30) FROM generate_series(1, 10);
+              random              
+ ---------------------------------
+- -732116469803315942112255539315
+-  794641423514877972798449289857
+- -576932746026123093304638334719
+-  420625067723533225139761854757
+- -339227806779403187811001078919
+-  -77667951539418104959241732636
+-  239810941795708162629328071599
+-  820784371155896967052141946697
+- -377084684544126871150439048352
+- -979773225250716295007225086726
++ -732116469803311122594293145554
++  794641423514877984797298574928
++ -576932746026123046309347183834
++  420625067723531397322547576185
++ -339227806779408110318789180108
++  -77667951539419592810426354174
++  239810941795706293816215992807
++  820784371155890521696766974194
++ -377084684544121504687183513905
++ -979773225250710072629567252509
+ (10 rows)
+ 
+ SELECT random(-0.4, 0.4) FROM generate_series(1, 10);
+@@ -478,75 +478,75 @@ SELECT random(-0.4, 0.4) FROM generate_series(1, 10);
+ SELECT random(0, 1 - 1e-30) FROM generate_series(1, 10);
+               random              
+ ----------------------------------
+- 0.676442053784930109917469287265
+- 0.221310454098356723569995592911
+- 0.060101338174419259555193956224
+- 0.509960354695248239243002172364
+- 0.248680813394555793693952296993
+- 0.353262552880008646603494668901
+- 0.760692600450339509843044233719
+- 0.554987655310094483449494782510
+- 0.330890988458592995280347745733
+- 0.665435298280470361228607881507
++ 0.676442053784930108125462478051
++ 0.315825065487367368320788128819
++ 0.259087482585009293679245707439
++ 0.651998311172963212498299034983
++ 0.654835281047779842548781612023
++ 0.349371796291289137995007966596
++ 0.431480342655738424598705110287
++ 0.905224364729837918528164599634
++ 0.434596460023939099830141190076
++ 0.353262552880008638180235931654
+ (10 rows)
+ 
+ SELECT n, random(0, trim_scale(abs(1 - 10.0^(-n)))) FROM generate_series(-20, 20) n;
+   n  |         random         
+ -----+------------------------
+- -20 |   94174615760837282445
+- -19 |    6692559888531296894
+- -18 |     801114552709125931
+- -17 |      44091460959939971
+- -16 |       2956109297383113
+- -15 |        783332278684523
+- -14 |         81534303241440
+- -13 |          2892623140500
+- -12 |           269397605141
+- -11 |            13027512296
+- -10 |             9178377775
+-  -9 |              323534150
+-  -8 |               91897803
+-  -7 |                6091383
+-  -6 |                  13174
+-  -5 |                  92714
+-  -4 |                   8079
+-  -3 |                    429
+-  -2 |                     30
+-  -1 |                      3
++ -20 |   82850595871428623123
++ -19 |    5611469268101166268
++ -18 |     725452995708066694
++ -17 |      19952125319148332
++ -16 |       2729709319727111
++ -15 |        655667906446821
++ -14 |         43358410571101
++ -13 |          8960324830292
++ -12 |           637151835788
++ -11 |            65643755719
++ -10 |             1431943289
++  -9 |              721762876
++  -8 |               24653299
++  -7 |                9757510
++  -6 |                  22214
++  -5 |                  59658
++  -4 |                   4232
++  -3 |                    378
++  -2 |                     47
++  -1 |                      8
+    0 |                      0
+-   1 |                    0.1
+-   2 |                   0.69
+-   3 |                  0.492
+-   4 |                 0.7380
+-   5 |                0.77078
+-   6 |               0.738142
+-   7 |              0.1808815
+-   8 |             0.14908933
+-   9 |            0.222654042
+-  10 |           0.2281295170
+-  11 |          0.73655782966
+-  12 |         0.056357256884
+-  13 |        0.8998407524375
+-  14 |       0.28198400530206
+-  15 |      0.713478222805230
+-  16 |     0.0415046850936909
+-  17 |    0.45946350291315119
+-  18 |   0.310966980367873753
+-  19 |  0.4967623661709676512
+-  20 | 0.60795101234744211935
++   1 |                    0.8
++   2 |                   0.07
++   3 |                  0.628
++   4 |                 0.8565
++   5 |                0.19566
++   6 |               0.623293
++   7 |              0.7059872
++   8 |             0.76400237
++   9 |            0.388737802
++  10 |           0.4305806734
++  11 |          0.83648046618
++  12 |         0.791414497615
++  13 |        0.2886825485725
++  14 |       0.97916534835565
++  15 |      0.652274425931523
++  16 |     0.2962046095872221
++  17 |    0.44138103626349051
++  18 |   0.962422665407042238
++  19 |  0.6540572724801382012
++  20 | 0.88838482726422796873
+ (41 rows)
+ 
+ -- random dates
+ SELECT random('1979-02-08'::date,'2025-07-03'::date) AS random_date_multiple_years;
+  random_date_multiple_years 
+ ----------------------------
+- 04-09-1986
++ 06-17-2000
+ (1 row)
+ 
+ SELECT random('4714-11-24 BC'::date,'5874897-12-31 AD'::date) AS random_date_maximum_range;
+  random_date_maximum_range 
+ ---------------------------
+- 10-02-2898131
++ 02-24-1331061
+ (1 row)
+ 
+ SELECT random('1979-02-08'::date,'1979-02-08'::date) AS random_date_empty_range;
+@@ -565,19 +565,19 @@ ERROR:  lower and upper bounds must be finite
+ SELECT random('1979-02-08'::timestamp,'2025-07-03'::timestamp) AS random_timestamp_multiple_years;
+  random_timestamp_multiple_years 
+ ---------------------------------
+- Fri Jan 27 18:52:05.366009 2017
++ Mon Sep 05 14:38:56.009661 1983
+ (1 row)
+ 
+ SELECT random('4714-11-24 BC'::timestamp,'294276-12-31 23:59:59.999999'::timestamp) AS random_timestamp_maximum_range;
+   random_timestamp_maximum_range   
+ -----------------------------------
+- Wed Mar 28 00:45:36.180395 226694
++ Tue Aug 24 23:22:51.072866 276376
+ (1 row)
+ 
+ SELECT random('2024-07-01 12:00:00.000001'::timestamp, '2024-07-01 12:00:00.999999'::timestamp) AS random_narrow_range;
+        random_narrow_range       
+ ---------------------------------
+- Mon Jul 01 12:00:00.999286 2024
++ Mon Jul 01 12:00:00.472356 2024
+ (1 row)
+ 
+ SELECT random('1979-02-08'::timestamp,'1979-02-08'::timestamp) AS random_timestamp_empty_range;
+@@ -596,19 +596,19 @@ ERROR:  lower and upper bounds must be finite
+ SELECT random('1979-02-08 +01'::timestamptz,'2025-07-03 +02'::timestamptz) AS random_timestamptz_multiple_years;
+   random_timestamptz_multiple_years  
+ -------------------------------------
+- Tue Jun 14 04:41:16.652896 2016 PDT
++ Sat Jan 23 22:45:55.247165 2021 PST
+ (1 row)
+ 
+ SELECT random('4714-11-24 BC +00'::timestamptz,'294276-12-31 23:59:59.999999 +00'::timestamptz) AS random_timestamptz_maximum_range;
+-   random_timestamptz_maximum_range   
+---------------------------------------
+- Wed Mar 26 14:07:16.980265 31603 PDT
++  random_timestamptz_maximum_range   
++-------------------------------------
++ Mon Nov 21 18:35:47.90577 58310 PST
+ (1 row)
+ 
+ SELECT random('2024-07-01 12:00:00.000001 +04'::timestamptz, '2024-07-01 12:00:00.999999 +04'::timestamptz) AS random_timestamptz_narrow_range;
+    random_timestamptz_narrow_range   
+ -------------------------------------
+- Mon Jul 01 01:00:00.835808 2024 PDT
++ Mon Jul 01 01:00:00.116477 2024 PDT
+ (1 row)
+ 
+ SELECT random('1979-02-08 +05'::timestamptz,'1979-02-08 +05'::timestamptz) AS random_timestamptz_empty_range;
+diff --git a/src/test/regress/expected/window.out b/src/test/regress/expected/window.out
+index 7a04d3a7a9f..7d727491216 100644
+--- a/src/test/regress/expected/window.out
++++ b/src/test/regress/expected/window.out
+@@ -51,28 +51,28 @@ SELECT depname, empno, salary, rank() OVER (PARTITION BY depname ORDER BY salary
+ -- with GROUP BY
+ SELECT four, ten, SUM(SUM(four)) OVER (PARTITION BY four), AVG(ten) FROM tenk1
+ GROUP BY four, ten ORDER BY four, ten;
+- four | ten | sum  |          avg           
+-------+-----+------+------------------------
+-    0 |   0 |    0 | 0.00000000000000000000
+-    0 |   2 |    0 |     2.0000000000000000
+-    0 |   4 |    0 |     4.0000000000000000
+-    0 |   6 |    0 |     6.0000000000000000
+-    0 |   8 |    0 |     8.0000000000000000
+-    1 |   1 | 2500 | 1.00000000000000000000
+-    1 |   3 | 2500 |     3.0000000000000000
+-    1 |   5 | 2500 |     5.0000000000000000
+-    1 |   7 | 2500 |     7.0000000000000000
+-    1 |   9 | 2500 |     9.0000000000000000
+-    2 |   0 | 5000 | 0.00000000000000000000
+-    2 |   2 | 5000 |     2.0000000000000000
+-    2 |   4 | 5000 |     4.0000000000000000
+-    2 |   6 | 5000 |     6.0000000000000000
+-    2 |   8 | 5000 |     8.0000000000000000
+-    3 |   1 | 7500 | 1.00000000000000000000
+-    3 |   3 | 7500 |     3.0000000000000000
+-    3 |   5 | 7500 |     5.0000000000000000
+-    3 |   7 | 7500 |     7.0000000000000000
+-    3 |   9 | 7500 |     9.0000000000000000
++ four | ten | sum  |            avg             
++------+-----+------+----------------------------
++    0 |   0 |    0 | 0.000000000000000000000000
++    0 |   2 |    0 |         2.0000000000000000
++    0 |   4 |    0 |         4.0000000000000000
++    0 |   6 |    0 |         6.0000000000000000
++    0 |   8 |    0 |         8.0000000000000000
++    1 |   1 | 2500 | 1.000000000000000000000000
++    1 |   3 | 2500 |         3.0000000000000000
++    1 |   5 | 2500 |         5.0000000000000000
++    1 |   7 | 2500 |         7.0000000000000000
++    1 |   9 | 2500 |         9.0000000000000000
++    2 |   0 | 5000 | 0.000000000000000000000000
++    2 |   2 | 5000 |         2.0000000000000000
++    2 |   4 | 5000 |         4.0000000000000000
++    2 |   6 | 5000 |         6.0000000000000000
++    2 |   8 | 5000 |         8.0000000000000000
++    3 |   1 | 7500 | 1.000000000000000000000000
++    3 |   3 | 7500 |         3.0000000000000000
++    3 |   5 | 7500 |         5.0000000000000000
++    3 |   7 | 7500 |         7.0000000000000000
++    3 |   9 | 7500 |         9.0000000000000000
+ (20 rows)
+ 
+ SELECT depname, empno, salary, sum(salary) OVER w FROM empsalary WINDOW w AS (PARTITION BY depname);
+@@ -497,18 +497,18 @@ WHERE total <> fourcount + twosum;
+ (0 rows)
+ 
+ SELECT avg(four) OVER (PARTITION BY four ORDER BY thousand / 100) FROM tenk1 WHERE unique2 < 10;
+-          avg           
+-------------------------
+- 0.00000000000000000000
+- 0.00000000000000000000
+- 0.00000000000000000000
+- 1.00000000000000000000
+- 1.00000000000000000000
+- 1.00000000000000000000
+- 1.00000000000000000000
+-     2.0000000000000000
+-     3.0000000000000000
+-     3.0000000000000000
++            avg             
++----------------------------
++ 0.000000000000000000000000
++ 0.000000000000000000000000
++ 0.000000000000000000000000
++ 1.000000000000000000000000
++ 1.000000000000000000000000
++ 1.000000000000000000000000
++ 1.000000000000000000000000
++         2.0000000000000000
++         3.0000000000000000
++         3.0000000000000000
+ (10 rows)
+ 
+ SELECT ten, two, sum(hundred) AS gsum, sum(sum(hundred)) OVER win AS wsum
+@@ -5004,278 +5004,278 @@ SELECT i,COUNT(*) OVER (ORDER BY i ROWS BETWEEN CURRENT ROW AND UNBOUNDED FOLLOW
+ 
+ SELECT VAR_POP(n::bigint) OVER (ORDER BY i ROWS BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING)
+   FROM (VALUES(1,600),(2,470),(3,170),(4,430),(5,300)) r(i,n);
+-        var_pop        
+------------------------
+-    21704.000000000000
+-    13868.750000000000
+-    11266.666666666667
+- 4225.0000000000000000
+-                     0
++        var_pop         
++------------------------
++ 21704.0000000000000000
++ 13868.7500000000000000
++ 11266.6666666666666667
++  4225.0000000000000000
++                      0
+ (5 rows)
+ 
+ SELECT VAR_POP(n::int) OVER (ORDER BY i ROWS BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING)
+   FROM (VALUES(1,600),(2,470),(3,170),(4,430),(5,300)) r(i,n);
+-        var_pop        
+------------------------
+-    21704.000000000000
+-    13868.750000000000
+-    11266.666666666667
+- 4225.0000000000000000
+-                     0
++        var_pop         
++------------------------
++ 21704.0000000000000000
++ 13868.7500000000000000
++ 11266.6666666666666667
++  4225.0000000000000000
++                      0
+ (5 rows)
+ 
+ SELECT VAR_POP(n::smallint) OVER (ORDER BY i ROWS BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING)
+   FROM (VALUES(1,600),(2,470),(3,170),(4,430),(5,300)) r(i,n);
+-        var_pop        
+------------------------
+-    21704.000000000000
+-    13868.750000000000
+-    11266.666666666667
+- 4225.0000000000000000
+-                     0
++        var_pop         
++------------------------
++ 21704.0000000000000000
++ 13868.7500000000000000
++ 11266.6666666666666667
++  4225.0000000000000000
++                      0
+ (5 rows)
+ 
+ SELECT VAR_POP(n::numeric) OVER (ORDER BY i ROWS BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING)
+   FROM (VALUES(1,600),(2,470),(3,170),(4,430),(5,300)) r(i,n);
+-        var_pop        
+------------------------
+-    21704.000000000000
+-    13868.750000000000
+-    11266.666666666667
+- 4225.0000000000000000
+-                     0
++        var_pop         
++------------------------
++ 21704.0000000000000000
++ 13868.7500000000000000
++ 11266.6666666666666667
++  4225.0000000000000000
++                      0
+ (5 rows)
+ 
+ SELECT VAR_SAMP(n::bigint) OVER (ORDER BY i ROWS BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING)
+   FROM (VALUES(1,600),(2,470),(3,170),(4,430),(5,300)) r(i,n);
+-       var_samp        
+------------------------
+-    27130.000000000000
+-    18491.666666666667
+-    16900.000000000000
+- 8450.0000000000000000
+-                      
++        var_samp        
++------------------------
++ 27130.0000000000000000
++ 18491.6666666666666667
++ 16900.0000000000000000
++  8450.0000000000000000
++                       
+ (5 rows)
+ 
+ SELECT VAR_SAMP(n::int) OVER (ORDER BY i ROWS BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING)
+   FROM (VALUES(1,600),(2,470),(3,170),(4,430),(5,300)) r(i,n);
+-       var_samp        
+------------------------
+-    27130.000000000000
+-    18491.666666666667
+-    16900.000000000000
+- 8450.0000000000000000
+-                      
++        var_samp        
++------------------------
++ 27130.0000000000000000
++ 18491.6666666666666667
++ 16900.0000000000000000
++  8450.0000000000000000
++                       
+ (5 rows)
+ 
+ SELECT VAR_SAMP(n::smallint) OVER (ORDER BY i ROWS BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING)
+   FROM (VALUES(1,600),(2,470),(3,170),(4,430),(5,300)) r(i,n);
+-       var_samp        
+------------------------
+-    27130.000000000000
+-    18491.666666666667
+-    16900.000000000000
+- 8450.0000000000000000
+-                      
++        var_samp        
++------------------------
++ 27130.0000000000000000
++ 18491.6666666666666667
++ 16900.0000000000000000
++  8450.0000000000000000
++                       
+ (5 rows)
+ 
+ SELECT VAR_SAMP(n::numeric) OVER (ORDER BY i ROWS BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING)
+   FROM (VALUES(1,600),(2,470),(3,170),(4,430),(5,300)) r(i,n);
+-       var_samp        
+------------------------
+-    27130.000000000000
+-    18491.666666666667
+-    16900.000000000000
+- 8450.0000000000000000
+-                      
++        var_samp        
++------------------------
++ 27130.0000000000000000
++ 18491.6666666666666667
++ 16900.0000000000000000
++  8450.0000000000000000
++                       
+ (5 rows)
+ 
+ SELECT VARIANCE(n::bigint) OVER (ORDER BY i ROWS BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING)
+   FROM (VALUES(1,600),(2,470),(3,170),(4,430),(5,300)) r(i,n);
+-       variance        
+------------------------
+-    27130.000000000000
+-    18491.666666666667
+-    16900.000000000000
+- 8450.0000000000000000
+-                      
++        variance        
++------------------------
++ 27130.0000000000000000
++ 18491.6666666666666667
++ 16900.0000000000000000
++  8450.0000000000000000
++                       
+ (5 rows)
+ 
+ SELECT VARIANCE(n::int) OVER (ORDER BY i ROWS BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING)
+   FROM (VALUES(1,600),(2,470),(3,170),(4,430),(5,300)) r(i,n);
+-       variance        
+------------------------
+-    27130.000000000000
+-    18491.666666666667
+-    16900.000000000000
+- 8450.0000000000000000
+-                      
++        variance        
++------------------------
++ 27130.0000000000000000
++ 18491.6666666666666667
++ 16900.0000000000000000
++  8450.0000000000000000
++                       
+ (5 rows)
+ 
+ SELECT VARIANCE(n::smallint) OVER (ORDER BY i ROWS BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING)
+   FROM (VALUES(1,600),(2,470),(3,170),(4,430),(5,300)) r(i,n);
+-       variance        
+------------------------
+-    27130.000000000000
+-    18491.666666666667
+-    16900.000000000000
+- 8450.0000000000000000
+-                      
++        variance        
++------------------------
++ 27130.0000000000000000
++ 18491.6666666666666667
++ 16900.0000000000000000
++  8450.0000000000000000
++                       
+ (5 rows)
+ 
+ SELECT VARIANCE(n::numeric) OVER (ORDER BY i ROWS BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING)
+   FROM (VALUES(1,600),(2,470),(3,170),(4,430),(5,300)) r(i,n);
+-       variance        
+------------------------
+-    27130.000000000000
+-    18491.666666666667
+-    16900.000000000000
+- 8450.0000000000000000
+-                      
++        variance        
++------------------------
++ 27130.0000000000000000
++ 18491.6666666666666667
++ 16900.0000000000000000
++  8450.0000000000000000
++                       
+ (5 rows)
+ 
+ SELECT STDDEV_POP(n::bigint) OVER (ORDER BY i ROWS BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING)
+   FROM (VALUES(1,NULL),(2,600),(3,470),(4,170),(5,430),(6,300)) r(i,n);
+-     stddev_pop      
+----------------------
+-    147.322774885623
+-    147.322774885623
+-    117.765657133139
+-    106.144555520604
+- 65.0000000000000000
+-                   0
++      stddev_pop      
++----------------------
++ 147.3227748856231665
++ 147.3227748856231665
++ 117.7656571331387765
++ 106.1445555206043843
++  65.0000000000000000
++                    0
+ (6 rows)
+ 
+ SELECT STDDEV_POP(n::int) OVER (ORDER BY i ROWS BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING)
+   FROM (VALUES(1,NULL),(2,600),(3,470),(4,170),(5,430),(6,300)) r(i,n);
+-     stddev_pop      
+----------------------
+-    147.322774885623
+-    147.322774885623
+-    117.765657133139
+-    106.144555520604
+- 65.0000000000000000
+-                   0
++      stddev_pop      
++----------------------
++ 147.3227748856231665
++ 147.3227748856231665
++ 117.7656571331387765
++ 106.1445555206043843
++  65.0000000000000000
++                    0
+ (6 rows)
+ 
+ SELECT STDDEV_POP(n::smallint) OVER (ORDER BY i ROWS BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING)
+   FROM (VALUES(1,NULL),(2,600),(3,470),(4,170),(5,430),(6,300)) r(i,n);
+-     stddev_pop      
+----------------------
+-    147.322774885623
+-    147.322774885623
+-    117.765657133139
+-    106.144555520604
+- 65.0000000000000000
+-                   0
++      stddev_pop      
++----------------------
++ 147.3227748856231665
++ 147.3227748856231665
++ 117.7656571331387765
++ 106.1445555206043843
++  65.0000000000000000
++                    0
+ (6 rows)
+ 
+ SELECT STDDEV_POP(n::numeric) OVER (ORDER BY i ROWS BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING)
+   FROM (VALUES(1,NULL),(2,600),(3,470),(4,170),(5,430),(6,300)) r(i,n);
+-     stddev_pop      
+----------------------
+-    147.322774885623
+-    147.322774885623
+-    117.765657133139
+-    106.144555520604
+- 65.0000000000000000
+-                   0
++      stddev_pop      
++----------------------
++ 147.3227748856231665
++ 147.3227748856231665
++ 117.7656571331387765
++ 106.1445555206043843
++  65.0000000000000000
++                    0
+ (6 rows)
+ 
+ SELECT STDDEV_SAMP(n::bigint) OVER (ORDER BY i ROWS BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING)
+   FROM (VALUES(1,NULL),(2,600),(3,470),(4,170),(5,430),(6,300)) r(i,n);
+-     stddev_samp     
+----------------------
+-    164.711869639076
+-    164.711869639076
+-    135.984067694222
+-    130.000000000000
+- 91.9238815542511782
+-                    
++     stddev_samp      
++----------------------
++ 164.7118696390761026
++ 164.7118696390761026
++ 135.9840676942216884
++ 130.0000000000000000
++  91.9238815542511782
++                     
+ (6 rows)
+ 
+ SELECT STDDEV_SAMP(n::int) OVER (ORDER BY i ROWS BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING)
+   FROM (VALUES(1,NULL),(2,600),(3,470),(4,170),(5,430),(6,300)) r(i,n);
+-     stddev_samp     
+----------------------
+-    164.711869639076
+-    164.711869639076
+-    135.984067694222
+-    130.000000000000
+- 91.9238815542511782
+-                    
++     stddev_samp      
++----------------------
++ 164.7118696390761026
++ 164.7118696390761026
++ 135.9840676942216884
++ 130.0000000000000000
++  91.9238815542511782
++                     
+ (6 rows)
+ 
+ SELECT STDDEV_SAMP(n::smallint) OVER (ORDER BY i ROWS BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING)
+   FROM (VALUES(1,NULL),(2,600),(3,470),(4,170),(5,430),(6,300)) r(i,n);
+-     stddev_samp     
+----------------------
+-    164.711869639076
+-    164.711869639076
+-    135.984067694222
+-    130.000000000000
+- 91.9238815542511782
+-                    
++     stddev_samp      
++----------------------
++ 164.7118696390761026
++ 164.7118696390761026
++ 135.9840676942216884
++ 130.0000000000000000
++  91.9238815542511782
++                     
+ (6 rows)
+ 
+ SELECT STDDEV_SAMP(n::numeric) OVER (ORDER BY i ROWS BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING)
+   FROM (VALUES(1,NULL),(2,600),(3,470),(4,170),(5,430),(6,300)) r(i,n);
+-     stddev_samp     
+----------------------
+-    164.711869639076
+-    164.711869639076
+-    135.984067694222
+-    130.000000000000
+- 91.9238815542511782
+-                    
++     stddev_samp      
++----------------------
++ 164.7118696390761026
++ 164.7118696390761026
++ 135.9840676942216884
++ 130.0000000000000000
++  91.9238815542511782
++                     
+ (6 rows)
+ 
+ SELECT STDDEV(n::bigint) OVER (ORDER BY i ROWS BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING)
+   FROM (VALUES(0,NULL),(1,600),(2,470),(3,170),(4,430),(5,300)) r(i,n);
+-       stddev        
+----------------------
+-    164.711869639076
+-    164.711869639076
+-    135.984067694222
+-    130.000000000000
+- 91.9238815542511782
+-                    
++        stddev        
++----------------------
++ 164.7118696390761026
++ 164.7118696390761026
++ 135.9840676942216884
++ 130.0000000000000000
++  91.9238815542511782
++                     
+ (6 rows)
+ 
+ SELECT STDDEV(n::int) OVER (ORDER BY i ROWS BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING)
+   FROM (VALUES(0,NULL),(1,600),(2,470),(3,170),(4,430),(5,300)) r(i,n);
+-       stddev        
+----------------------
+-    164.711869639076
+-    164.711869639076
+-    135.984067694222
+-    130.000000000000
+- 91.9238815542511782
+-                    
++        stddev        
++----------------------
++ 164.7118696390761026
++ 164.7118696390761026
++ 135.9840676942216884
++ 130.0000000000000000
++  91.9238815542511782
++                     
+ (6 rows)
+ 
+ SELECT STDDEV(n::smallint) OVER (ORDER BY i ROWS BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING)
+   FROM (VALUES(0,NULL),(1,600),(2,470),(3,170),(4,430),(5,300)) r(i,n);
+-       stddev        
+----------------------
+-    164.711869639076
+-    164.711869639076
+-    135.984067694222
+-    130.000000000000
+- 91.9238815542511782
+-                    
++        stddev        
++----------------------
++ 164.7118696390761026
++ 164.7118696390761026
++ 135.9840676942216884
++ 130.0000000000000000
++  91.9238815542511782
++                     
+ (6 rows)
+ 
+ SELECT STDDEV(n::numeric) OVER (ORDER BY i ROWS BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING)
+   FROM (VALUES(0,NULL),(1,600),(2,470),(3,170),(4,430),(5,300)) r(i,n);
+-       stddev        
+----------------------
+-    164.711869639076
+-    164.711869639076
+-    135.984067694222
+-    130.000000000000
+- 91.9238815542511782
+-                    
++        stddev        
++----------------------
++ 164.7118696390761026
++ 164.7118696390761026
++ 135.9840676942216884
++ 130.0000000000000000
++  91.9238815542511782
++                     
+ (6 rows)
+ 
+ -- test that inverse transition functions work with various frame options
+-- 
+2.50.1
+

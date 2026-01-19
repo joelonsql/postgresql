@@ -1,0 +1,599 @@
+From e47ed911962a26d9a50226c8e091479e07fac398 Mon Sep 17 00:00:00 2001
+From: Joel Jacobson <joel@compiler.org>
+Date: Sat, 17 Jan 2026 22:55:33 +0100
+Subject: [PATCH 2/3] Add backward compatibility for NBASE=1e8 numeric format
+
+Add support for reading both old NBASE=1e4 and new NBASE=1e8 numeric
+formats, enabling backward compatibility during the transition to the
+larger base. The format is detected using an odd/even byte count trick:
+
+- Old NBASE=1e4 format: ndigits * 2 bytes (always even)
+- New NBASE=1e8 format: ndigits * 4 + 1 bytes (always odd due to padding)
+
+When writing new data, a padding byte is appended to make the byte count
+odd, signaling the new format. When reading, the format is detected by
+checking if the remaining bytes after the header are odd or even.
+
+Key changes:
+- Add NUMERIC_IS_OLD_FORMAT, NUMERIC_NDIGITS_OLD, NUMERIC_NDIGITS_NEW macros
+- Make NUMERIC_NDIGITS format-aware to work with both formats
+- Add convert_from_nbase_compat() to convert old format digits to new
+- Update numeric_recv() to detect format and handle both
+- Update numeric_send() to add padding byte for new format
+- Update set_var_from_num() and init_var_from_num() to handle old format
+- Update make_result_safe() to write new format with padding byte
+- Update cmp_numerics(), hash_numeric(), hash_numeric_extended() to
+  handle old format data by converting through NumericVar first
+- Update expected test output for disk format changes
+---
+ src/backend/utils/adt/numeric.c       | 333 ++++++++++++++++++++++----
+ src/test/regress/expected/numeric.out |  16 +-
+ 2 files changed, 300 insertions(+), 49 deletions(-)
+
+diff --git a/src/backend/utils/adt/numeric.c b/src/backend/utils/adt/numeric.c
+index 6e9200b4bb2..71554a97546 100644
+--- a/src/backend/utils/adt/numeric.c
++++ b/src/backend/utils/adt/numeric.c
+@@ -500,8 +500,32 @@ static void dump_var(const char *str, NumericVar *var);
+ #define NUMERIC_DIGITS(num) (NUMERIC_HEADER_IS_SHORT(num) ? \
+ 	(num)->choice.n_short.n_data : (num)->choice.n_long.n_data)
+ #define NUMERIC_NBYTES(num) (VARSIZE(num) - NUMERIC_HEADER_SIZE(num))
++
++/*
++ * Detect old NBASE=1e4 format: even NBYTES (2 bytes per digit).
++ * New NBASE=1e8 format has odd NBYTES (4 bytes per digit + 1 padding byte).
++ */
++#define NUMERIC_IS_OLD_FORMAT(num) \
++	(!NUMERIC_IS_SPECIAL(num) && NUMERIC_NBYTES(num) > 0 && \
++	 (NUMERIC_NBYTES(num) % 2) == 0)
++
++/* Old format: 2 bytes per digit */
++#define NUMERIC_NDIGITS_OLD(num)  (NUMERIC_NBYTES(num) / 2)
++
++/* New format: 4 bytes per digit, plus 1 padding byte (when digits present) */
++#define NUMERIC_NDIGITS_NEW(num) \
++	(NUMERIC_NBYTES(num) == 0 ? 0 : ((NUMERIC_NBYTES(num) - 1) / sizeof(NumericDigit)))
++
++/*
++ * NUMERIC_NDIGITS - get the number of digits in a Numeric.
++ * Format-aware: works for both old NBASE=1e4 and new NBASE=1e8 formats.
++ */
+ #define NUMERIC_NDIGITS(num) \
+-	((NUMERIC_NBYTES(num) + sizeof(NumericDigit) - 1) / sizeof(NumericDigit))
++	(NUMERIC_IS_OLD_FORMAT(num) ? NUMERIC_NDIGITS_OLD(num) : NUMERIC_NDIGITS_NEW(num))
++
++/* Old/compatibility NBASE value (for reading legacy data) */
++#define NBASE_COMPAT  10000
++
+ #define NUMERIC_CAN_BE_SHORT(scale,weight) \
+ 	((scale) <= NUMERIC_SHORT_DSCALE_MAX && \
+ 	(weight) <= NUMERIC_SHORT_WEIGHT_MAX && \
+@@ -521,6 +545,10 @@ static bool set_var_from_non_decimal_integer_str(const char *str,
+ 												 Node *escontext);
+ static void set_var_from_num(Numeric num, NumericVar *dest);
+ static void init_var_from_num(Numeric num, NumericVar *dest);
++static void convert_from_nbase_compat(NumericVar *dest,
++									  int compat_ndigits,
++									  int compat_weight,
++									  const int16 *compat_digits);
+ static void set_var_from_var(const NumericVar *value, NumericVar *dest);
+ static char *get_str_from_var(const NumericVar *var);
+ static char *get_str_from_var_sci(const NumericVar *var, int rscale);
+@@ -1069,6 +1097,11 @@ numeric_normalize(Numeric num)
+  *
+  * External format is a sequence of int16's:
+  * ndigits, weight, sign, dscale, NumericDigits.
++ *
++ * We detect whether the data uses the old NBASE=1e4 format or the new
++ * NBASE=1e8 format by checking the byte count of the digit data:
++ * - Old format: ndigits * 2 bytes (even)
++ * - New format: ndigits * 4 + 1 bytes (odd, with padding byte)
+  */
+ Datum
+ numeric_recv(PG_FUNCTION_ARGS)
+@@ -1081,14 +1114,14 @@ numeric_recv(PG_FUNCTION_ARGS)
+ 	int32		typmod = PG_GETARG_INT32(2);
+ 	NumericVar	value;
+ 	Numeric		res;
+-	int			len,
+-				i;
++	int			ndigits;
++	int			remaining_bytes;
++	bool		is_new_format;
++	int			i;
+ 
+ 	init_var(&value);
+ 
+-	len = (uint16) pq_getmsgint(buf, sizeof(uint16));
+-
+-	alloc_var(&value, len);
++	ndigits = (uint16) pq_getmsgint(buf, sizeof(uint16));
+ 
+ 	value.weight = (int16) pq_getmsgint(buf, sizeof(int16));
+ 	/* we allow any int16 for weight --- OK? */
+@@ -1109,15 +1142,48 @@ numeric_recv(PG_FUNCTION_ARGS)
+ 				(errcode(ERRCODE_INVALID_BINARY_REPRESENTATION),
+ 				 errmsg("invalid scale in external \"numeric\" value")));
+ 
+-	for (i = 0; i < len; i++)
++	/* Detect format: odd byte count = NBASE=1e8, even = NBASE=1e4 */
++	remaining_bytes = buf->len - buf->cursor;
++	is_new_format = (remaining_bytes % 2 == 1);
++
++	if (is_new_format)
++	{
++		/* NBASE=1e8 format: read int32 digits directly */
++		alloc_var(&value, ndigits);
++		for (i = 0; i < ndigits; i++)
++		{
++			NumericDigit d = pq_getmsgint(buf, sizeof(int32));
++
++			if (d < 0 || d >= NBASE)
++				ereport(ERROR,
++						(errcode(ERRCODE_INVALID_BINARY_REPRESENTATION),
++						 errmsg("invalid digit in external \"numeric\" value")));
++			value.digits[i] = d;
++		}
++		/* Skip padding byte */
++		if (ndigits > 0)
++			(void) pq_getmsgint(buf, 1);
++	}
++	else
+ 	{
+-		NumericDigit d = pq_getmsgint(buf, sizeof(NumericDigit));
++		/* NBASE_COMPAT format: read int16 digits and convert */
++		int16	   *compat_digits = palloc(ndigits * sizeof(int16));
++		int			compat_weight = value.weight;
++
++		for (i = 0; i < ndigits; i++)
++		{
++			int16		d = (int16) pq_getmsgint(buf, sizeof(int16));
++
++			if (d < 0 || d >= NBASE_COMPAT)
++				ereport(ERROR,
++						(errcode(ERRCODE_INVALID_BINARY_REPRESENTATION),
++						 errmsg("invalid digit in external \"numeric\" value")));
++			compat_digits[i] = d;
++		}
+ 
+-		if (d < 0 || d >= NBASE)
+-			ereport(ERROR,
+-					(errcode(ERRCODE_INVALID_BINARY_REPRESENTATION),
+-					 errmsg("invalid digit in external \"numeric\" value")));
+-		value.digits[i] = d;
++		/* Convert from NBASE_COMPAT to NBASE */
++		convert_from_nbase_compat(&value, ndigits, compat_weight, compat_digits);
++		pfree(compat_digits);
+ 	}
+ 
+ 	/*
+@@ -1171,9 +1237,15 @@ numeric_send(PG_FUNCTION_ARGS)
+ 	pq_sendint16(&buf, x.weight);
+ 	pq_sendint16(&buf, x.sign);
+ 	pq_sendint16(&buf, x.dscale);
++
++	/* Send int32 digits (NBASE=1e8) */
+ 	for (i = 0; i < x.ndigits; i++)
+ 		pq_sendint32(&buf, x.digits[i]);
+ 
++	/* Add padding byte to make digit byte count odd (signals NBASE=1e8) */
++	if (x.ndigits > 0)
++		pq_sendint8(&buf, 0);
++
+ 	PG_RETURN_BYTEA_P(pq_endtypsend(&buf));
+ }
+ 
+@@ -2567,6 +2639,25 @@ cmp_numerics(Numeric num1, Numeric num2)
+ 		else
+ 			result = -1;		/* normal < NAN or PINF */
+ 	}
++	else if (NUMERIC_IS_OLD_FORMAT(num1) || NUMERIC_IS_OLD_FORMAT(num2))
++	{
++		/*
++		 * If either operand is in old NBASE=1e4 format, we need to convert
++		 * through NumericVar to properly compare the values.
++		 */
++		NumericVar	v1,
++					v2;
++
++		init_var_from_num(num1, &v1);
++		init_var_from_num(num2, &v2);
++		result = cmp_var(&v1, &v2);
++
++		/* init_var_from_num allocates for old format, so free if needed */
++		if (NUMERIC_IS_OLD_FORMAT(num1))
++			free_var(&v1);
++		if (NUMERIC_IS_OLD_FORMAT(num2))
++			free_var(&v2);
++	}
+ 	else
+ 	{
+ 		result = cmp_var_common((NumericDigit *) NUMERIC_DIGITS(num1), NUMERIC_NDIGITS(num1),
+@@ -2727,13 +2818,34 @@ hash_numeric(PG_FUNCTION_ARGS)
+ 	int			end_offset;
+ 	int			i;
+ 	int			hash_len;
++	int			ndigits;
+ 	NumericDigit *digits;
++	NumericVar	var;
++	bool		need_free = false;
+ 
+ 	/* If it's NaN or infinity, don't try to hash the rest of the fields */
+ 	if (NUMERIC_IS_SPECIAL(key))
+ 		PG_RETURN_UINT32(0);
+ 
+-	weight = NUMERIC_WEIGHT(key);
++	/*
++	 * For old format data, we need to convert through NumericVar to get
++	 * proper NBASE=1e8 digits.
++	 */
++	if (NUMERIC_IS_OLD_FORMAT(key))
++	{
++		init_var_from_num(key, &var);
++		digits = var.digits;
++		ndigits = var.ndigits;
++		weight = var.weight;
++		need_free = true;
++	}
++	else
++	{
++		digits = (NumericDigit *) NUMERIC_DIGITS(key);
++		ndigits = NUMERIC_NDIGITS(key);
++		weight = NUMERIC_WEIGHT(key);
++	}
++
+ 	start_offset = 0;
+ 	end_offset = 0;
+ 
+@@ -2743,8 +2855,7 @@ hash_numeric(PG_FUNCTION_ARGS)
+ 	 * zeros are suppressed, but we're paranoid. Note that we measure the
+ 	 * starting and ending offsets in units of NumericDigits, not bytes.
+ 	 */
+-	digits = (NumericDigit *) NUMERIC_DIGITS(key);
+-	for (i = 0; i < NUMERIC_NDIGITS(key); i++)
++	for (i = 0; i < ndigits; i++)
+ 	{
+ 		if (digits[i] != (NumericDigit) 0)
+ 			break;
+@@ -2762,10 +2873,14 @@ hash_numeric(PG_FUNCTION_ARGS)
+ 	 * If there are no non-zero digits, then the value of the number is zero,
+ 	 * regardless of any other fields.
+ 	 */
+-	if (NUMERIC_NDIGITS(key) == start_offset)
++	if (ndigits == start_offset)
++	{
++		if (need_free)
++			free_var(&var);
+ 		PG_RETURN_UINT32(-1);
++	}
+ 
+-	for (i = NUMERIC_NDIGITS(key) - 1; i >= 0; i--)
++	for (i = ndigits - 1; i >= 0; i--)
+ 	{
+ 		if (digits[i] != (NumericDigit) 0)
+ 			break;
+@@ -2774,7 +2889,7 @@ hash_numeric(PG_FUNCTION_ARGS)
+ 	}
+ 
+ 	/* If we get here, there should be at least one non-zero digit */
+-	Assert(start_offset + end_offset < NUMERIC_NDIGITS(key));
++	Assert(start_offset + end_offset < ndigits);
+ 
+ 	/*
+ 	 * Note that we don't hash on the Numeric's scale, since two numerics can
+@@ -2782,13 +2897,16 @@ hash_numeric(PG_FUNCTION_ARGS)
+ 	 * sign, although we could: since a sign difference implies inequality,
+ 	 * this shouldn't affect correctness.
+ 	 */
+-	hash_len = NUMERIC_NDIGITS(key) - start_offset - end_offset;
++	hash_len = ndigits - start_offset - end_offset;
+ 	digit_hash = hash_any((unsigned char *) (digits + start_offset),
+ 						  hash_len * sizeof(NumericDigit));
+ 
+ 	/* Mix in the weight, via XOR */
+ 	result = digit_hash ^ weight;
+ 
++	if (need_free)
++		free_var(&var);
++
+ 	PG_RETURN_DATUM(result);
+ }
+ 
+@@ -2808,19 +2926,38 @@ hash_numeric_extended(PG_FUNCTION_ARGS)
+ 	int			end_offset;
+ 	int			i;
+ 	int			hash_len;
++	int			ndigits;
+ 	NumericDigit *digits;
++	NumericVar	var;
++	bool		need_free = false;
+ 
+ 	/* If it's NaN or infinity, don't try to hash the rest of the fields */
+ 	if (NUMERIC_IS_SPECIAL(key))
+ 		PG_RETURN_UINT64(seed);
+ 
+-	weight = NUMERIC_WEIGHT(key);
++	/*
++	 * For old format data, we need to convert through NumericVar to get
++	 * proper NBASE=1e8 digits.
++	 */
++	if (NUMERIC_IS_OLD_FORMAT(key))
++	{
++		init_var_from_num(key, &var);
++		digits = var.digits;
++		ndigits = var.ndigits;
++		weight = var.weight;
++		need_free = true;
++	}
++	else
++	{
++		digits = (NumericDigit *) NUMERIC_DIGITS(key);
++		ndigits = NUMERIC_NDIGITS(key);
++		weight = NUMERIC_WEIGHT(key);
++	}
++
+ 	start_offset = 0;
+ 	end_offset = 0;
+ 
+-	digits = (NumericDigit *) NUMERIC_DIGITS(key);
+-
+-	for (i = 0; i < NUMERIC_NDIGITS(key); i++)
++	for (i = 0; i < ndigits; i++)
+ 	{
+ 		if (digits[i] != (NumericDigit) 0)
+ 			break;
+@@ -2830,10 +2967,14 @@ hash_numeric_extended(PG_FUNCTION_ARGS)
+ 		weight--;
+ 	}
+ 
+-	if (NUMERIC_NDIGITS(key) == start_offset)
++	if (ndigits == start_offset)
++	{
++		if (need_free)
++			free_var(&var);
+ 		PG_RETURN_UINT64(seed - 1);
++	}
+ 
+-	for (i = NUMERIC_NDIGITS(key) - 1; i >= 0; i--)
++	for (i = ndigits - 1; i >= 0; i--)
+ 	{
+ 		if (digits[i] != (NumericDigit) 0)
+ 			break;
+@@ -2841,15 +2982,18 @@ hash_numeric_extended(PG_FUNCTION_ARGS)
+ 		end_offset++;
+ 	}
+ 
+-	Assert(start_offset + end_offset < NUMERIC_NDIGITS(key));
++	Assert(start_offset + end_offset < ndigits);
+ 
+-	hash_len = NUMERIC_NDIGITS(key) - start_offset - end_offset;
++	hash_len = ndigits - start_offset - end_offset;
+ 	digit_hash = hash_any_extended((unsigned char *) (digits + start_offset),
+ 								   hash_len * sizeof(NumericDigit),
+ 								   seed);
+ 
+ 	result = UInt64GetDatum(DatumGetUInt64(digit_hash) ^ weight);
+ 
++	if (need_free)
++		free_var(&var);
++
+ 	PG_RETURN_DATUM(result);
+ }
+ 
+@@ -7155,25 +7299,113 @@ invalid_syntax:
+ }
+ 
+ 
++/*
++ * convert_from_nbase_compat() -
++ *
++ *	Convert from old NBASE=1e4 format to internal NBASE=1e8 format.
++ *	Used for reading legacy disk data and old binary protocol data.
++ *	Allocates digits in dest.
++ */
++static void
++convert_from_nbase_compat(NumericVar *dest,
++						  int compat_ndigits,
++						  int compat_weight,
++						  const int16 *compat_digits)
++{
++	int			internal_ndigits;
++	int			i,
++				j;
++
++	if (compat_ndigits == 0)
++	{
++		dest->ndigits = 0;
++		dest->weight = 0;
++		dest->digits = NULL;
++		return;
++	}
++
++	dest->weight = compat_weight / 2;
++
++	if (compat_weight % 2 == 1 || compat_weight % 2 == -1)
++	{
++		/*
++		 * Odd weight: compat digits pair directly.
++		 * Note: negative odd weights like -1, -3 also fall here.
++		 */
++		internal_ndigits = (compat_ndigits + 1) / 2;
++		alloc_var(dest, internal_ndigits);
++
++		for (i = 0, j = 0; i < compat_ndigits; i += 2, j++)
++		{
++			int16		high = compat_digits[i];
++			int16		low = (i + 1 < compat_ndigits) ? compat_digits[i + 1] : 0;
++
++			dest->digits[j] = (NumericDigit) high * NBASE_COMPAT + low;
++		}
++	}
++	else
++	{
++		/*
++		 * Even weight: first compat digit alone in lower half.
++		 */
++		internal_ndigits = (compat_ndigits + 2) / 2;
++		alloc_var(dest, internal_ndigits);
++
++		dest->digits[0] = compat_digits[0];
++		for (i = 1, j = 1; i < compat_ndigits; i += 2, j++)
++		{
++			int16		high = compat_digits[i];
++			int16		low = (i + 1 < compat_ndigits) ? compat_digits[i + 1] : 0;
++
++			dest->digits[j] = (NumericDigit) high * NBASE_COMPAT + low;
++		}
++	}
++
++	dest->ndigits = internal_ndigits;
++}
++
++
+ /*
+  * set_var_from_num() -
+  *
+- *	Convert the packed db format into a variable
++ *	Convert the packed db format into a variable.
++ *	Handles both old NBASE=1e4 format and new NBASE=1e8 format.
+  */
+ static void
+ set_var_from_num(Numeric num, NumericVar *dest)
+ {
+-	int			ndigits;
++	if (NUMERIC_IS_SPECIAL(num))
++	{
++		dest->ndigits = 0;
++		dest->weight = 0;
++		dest->sign = NUMERIC_SIGN(num);
++		dest->dscale = 0;
++		dest->buf = NULL;
++		dest->digits = NULL;
++		return;
++	}
+ 
+-	ndigits = NUMERIC_NDIGITS(num);
+-
+-	alloc_var(dest, ndigits);
+-
+-	dest->weight = NUMERIC_WEIGHT(num);
+ 	dest->sign = NUMERIC_SIGN(num);
+ 	dest->dscale = NUMERIC_DSCALE(num);
+ 
+-	memcpy(dest->digits, NUMERIC_DIGITS(num), ndigits * sizeof(NumericDigit));
++	if (NUMERIC_IS_OLD_FORMAT(num))
++	{
++		/* Old NBASE=1e4 format - convert to internal NBASE=1e8 */
++		int			old_ndigits = NUMERIC_NDIGITS_OLD(num);
++		int16	   *old_digits = (int16 *) NUMERIC_DIGITS(num);
++		int			old_weight = NUMERIC_WEIGHT(num);
++
++		convert_from_nbase_compat(dest, old_ndigits, old_weight, old_digits);
++	}
++	else
++	{
++		/* New NBASE=1e8 format */
++		int			ndigits = NUMERIC_NDIGITS_NEW(num);
++
++		alloc_var(dest, ndigits);
++		dest->weight = NUMERIC_WEIGHT(num);
++		memcpy(dest->digits, NUMERIC_DIGITS(num), ndigits * sizeof(NumericDigit));
++	}
+ }
+ 
+ 
+@@ -7190,11 +7422,23 @@ set_var_from_num(Numeric num, NumericVar *dest)
+  *	function, e.g by calling round_var() or trunc_var(), as the changes will
+  *	propagate to the original Numeric! It's OK to use it as the destination
+  *	argument of one of the calculational functions, though.
++ *
++ *	Note: For old NBASE=1e4 format data, we cannot use zero-copy since the
++ *	digits need to be converted. In that case, we fall back to set_var_from_num.
+  */
+ static void
+ init_var_from_num(Numeric num, NumericVar *dest)
+ {
+-	dest->ndigits = NUMERIC_NDIGITS(num);
++	if (NUMERIC_IS_OLD_FORMAT(num))
++	{
++		/* Old format requires conversion - can't use zero-copy */
++		init_var(dest);
++		set_var_from_num(num, dest);
++		return;
++	}
++
++	/* New format - use zero-copy */
++	dest->ndigits = NUMERIC_IS_SPECIAL(num) ? 0 : NUMERIC_NDIGITS_NEW(num);
+ 	dest->weight = NUMERIC_WEIGHT(num);
+ 	dest->sign = NUMERIC_SIGN(num);
+ 	dest->dscale = NUMERIC_DSCALE(num);
+@@ -7635,10 +7879,13 @@ make_result_safe(const NumericVar *var, Node *escontext)
+ 		sign = NUMERIC_POS;
+ 	}
+ 
+-	/* Build the result */
++	/*
++	 * Build the result.  Add 1 padding byte when n > 0 to make NBYTES odd,
++	 * which signals that this is NBASE=1e8 format data.
++	 */
+ 	if (NUMERIC_CAN_BE_SHORT(var->dscale, weight))
+ 	{
+-		len = NUMERIC_HDRSZ_SHORT + n * sizeof(NumericDigit);
++		len = NUMERIC_HDRSZ_SHORT + n * sizeof(NumericDigit) + (n > 0 ? 1 : 0);
+ 		result = (Numeric) palloc(len);
+ 		SET_VARSIZE(result, len);
+ 		result->choice.n_short.n_header =
+@@ -7650,7 +7897,7 @@ make_result_safe(const NumericVar *var, Node *escontext)
+ 	}
+ 	else
+ 	{
+-		len = NUMERIC_HDRSZ + n * sizeof(NumericDigit);
++		len = NUMERIC_HDRSZ + n * sizeof(NumericDigit) + (n > 0 ? 1 : 0);
+ 		result = (Numeric) palloc(len);
+ 		SET_VARSIZE(result, len);
+ 		result->choice.n_long.n_sign_dscale =
+@@ -7658,9 +7905,13 @@ make_result_safe(const NumericVar *var, Node *escontext)
+ 		result->choice.n_long.n_weight = weight;
+ 	}
+ 
+-	Assert(NUMERIC_NDIGITS(result) == n);
++	Assert(NUMERIC_NDIGITS_NEW(result) == n || n == 0);
+ 	if (n > 0)
++	{
+ 		memcpy(NUMERIC_DIGITS(result), digits, n * sizeof(NumericDigit));
++		/* Add padding byte to make NBYTES odd (signals new NBASE=1e8 format) */
++		((char *) result)[len - 1] = 0x00;
++	}
+ 
+ 	/* Check for overflow */
+ 	if (weight > NUMERIC_WEIGHT_MAX ||
+diff --git a/src/test/regress/expected/numeric.out b/src/test/regress/expected/numeric.out
+index 2a12e1998d5..33443015453 100644
+--- a/src/test/regress/expected/numeric.out
++++ b/src/test/regress/expected/numeric.out
+@@ -3925,14 +3925,14 @@ SELECT regexp_replace(
+ );
+      regexp_replace      
+ -------------------------
+- 0f 00 80 ff 00 00 00 0f+
+- 00 80 00 01 00 00 0f 00+
+- 80 0f 27 00 00 17 01 80+
+- ab 00 00 00 bf 48 1f 00+
+- 0f 00 80 04 00 00 00 0f+
+- 00 80 05 00 00 00 0f 00+
+- 80 06 00 00 00 0f 00 80+
+- 07 00 00 00 00 00 00 00+
++ 00 00 00 11 00 80 00 01+
++ 00 00 00 11 00 80 0f 27+
++ 00 00 00 19 01 80 ab 00+
++ 00 00 bf 48 1f 00 00 11+
++ 00 80 04 00 00 00 00 11+
++ 00 80 05 00 00 00 00 11+
++ 00 80 06 00 00 00 00 11+
++ 00 80 07 00 00 00 00 00+
+  
+ (1 row)
+ 
+-- 
+2.50.1
+

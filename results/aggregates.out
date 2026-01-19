@@ -14,11 +14,9 @@ CREATE TABLE aggtest (
 COPY aggtest FROM :'filename';
 ANALYZE aggtest;
 SELECT avg(four) AS avg_1 FROM onek;
-       avg_1        
---------------------
- 1.5000000000000000
-(1 row)
-
+ERROR:  relation "onek" does not exist
+LINE 1: SELECT avg(four) AS avg_1 FROM onek;
+                                       ^
 SELECT avg(a) AS avg_32 FROM aggtest WHERE a < 100;
        avg_32        
 ---------------------
@@ -58,17 +56,13 @@ SELECT avg(b)::numeric(10,3) AS avg_107_943 FROM aggtest;
 (1 row)
 
 SELECT avg(gpa) AS avg_3_4 FROM ONLY student;
- avg_3_4 
----------
-     3.4
-(1 row)
-
+ERROR:  relation "student" does not exist
+LINE 1: SELECT avg(gpa) AS avg_3_4 FROM ONLY student;
+                                             ^
 SELECT sum(four) AS sum_1500 FROM onek;
- sum_1500 
-----------
-     1500
-(1 row)
-
+ERROR:  relation "onek" does not exist
+LINE 1: SELECT sum(four) AS sum_1500 FROM onek;
+                                          ^
 SELECT sum(a) AS sum_198 FROM aggtest;
  sum_198 
 ---------
@@ -82,17 +76,13 @@ SELECT sum(b) AS avg_431_773 FROM aggtest;
 (1 row)
 
 SELECT sum(gpa) AS avg_6_8 FROM ONLY student;
- avg_6_8 
----------
-     6.8
-(1 row)
-
+ERROR:  relation "student" does not exist
+LINE 1: SELECT sum(gpa) AS avg_6_8 FROM ONLY student;
+                                             ^
 SELECT max(four) AS max_3 FROM onek;
- max_3 
--------
-     3
-(1 row)
-
+ERROR:  relation "onek" does not exist
+LINE 1: SELECT max(four) AS max_3 FROM onek;
+                                       ^
 SELECT max(a) AS max_100 FROM aggtest;
  max_100 
 ---------
@@ -106,11 +96,9 @@ SELECT max(aggtest.b) AS max_324_78 FROM aggtest;
 (1 row)
 
 SELECT max(student.gpa) AS max_3_7 FROM student;
- max_3_7 
----------
-     3.7
-(1 row)
-
+ERROR:  relation "student" does not exist
+LINE 1: SELECT max(student.gpa) AS max_3_7 FROM student;
+                                                ^
 SELECT stddev_pop(b) FROM aggtest;
    stddev_pop    
 -----------------
@@ -656,137 +644,85 @@ SELECT float8_regr_combine('{3,60,200,750,20000,2000,7,8}'::float8[],
 DROP TABLE regr_test;
 -- test count, distinct
 SELECT count(four) AS cnt_1000 FROM onek;
- cnt_1000 
-----------
-     1000
-(1 row)
-
+ERROR:  relation "onek" does not exist
+LINE 1: SELECT count(four) AS cnt_1000 FROM onek;
+                                            ^
 SELECT count(DISTINCT four) AS cnt_4 FROM onek;
- cnt_4 
--------
-     4
-(1 row)
-
+ERROR:  relation "onek" does not exist
+LINE 1: SELECT count(DISTINCT four) AS cnt_4 FROM onek;
+                                                  ^
 select ten, count(*), sum(four) from onek
 group by ten order by ten;
- ten | count | sum 
------+-------+-----
-   0 |   100 | 100
-   1 |   100 | 200
-   2 |   100 | 100
-   3 |   100 | 200
-   4 |   100 | 100
-   5 |   100 | 200
-   6 |   100 | 100
-   7 |   100 | 200
-   8 |   100 | 100
-   9 |   100 | 200
-(10 rows)
-
+ERROR:  relation "onek" does not exist
+LINE 1: select ten, count(*), sum(four) from onek
+                                             ^
 select ten, count(four), sum(DISTINCT four) from onek
 group by ten order by ten;
- ten | count | sum 
------+-------+-----
-   0 |   100 |   2
-   1 |   100 |   4
-   2 |   100 |   2
-   3 |   100 |   4
-   4 |   100 |   2
-   5 |   100 |   4
-   6 |   100 |   2
-   7 |   100 |   4
-   8 |   100 |   2
-   9 |   100 |   4
-(10 rows)
-
+ERROR:  relation "onek" does not exist
+LINE 1: select ten, count(four), sum(DISTINCT four) from onek
+                                                         ^
 -- user-defined aggregates
 SELECT newavg(four) AS avg_1 FROM onek;
-       avg_1        
---------------------
- 1.5000000000000000
-(1 row)
-
+ERROR:  relation "onek" does not exist
+LINE 1: SELECT newavg(four) AS avg_1 FROM onek;
+                                          ^
 SELECT newsum(four) AS sum_1500 FROM onek;
- sum_1500 
-----------
-     1500
-(1 row)
-
+ERROR:  relation "onek" does not exist
+LINE 1: SELECT newsum(four) AS sum_1500 FROM onek;
+                                             ^
 SELECT newcnt(four) AS cnt_1000 FROM onek;
- cnt_1000 
-----------
-     1000
-(1 row)
-
+ERROR:  relation "onek" does not exist
+LINE 1: SELECT newcnt(four) AS cnt_1000 FROM onek;
+                                             ^
 SELECT newcnt(*) AS cnt_1000 FROM onek;
- cnt_1000 
-----------
-     1000
-(1 row)
-
+ERROR:  relation "onek" does not exist
+LINE 1: SELECT newcnt(*) AS cnt_1000 FROM onek;
+                                          ^
 SELECT oldcnt(*) AS cnt_1000 FROM onek;
- cnt_1000 
-----------
-     1000
-(1 row)
-
+ERROR:  relation "onek" does not exist
+LINE 1: SELECT oldcnt(*) AS cnt_1000 FROM onek;
+                                          ^
 SELECT sum2(q1,q2) FROM int8_tbl;
-       sum2        
--------------------
- 18271560493827981
-(1 row)
-
+ERROR:  relation "int8_tbl" does not exist
+LINE 1: SELECT sum2(q1,q2) FROM int8_tbl;
+                                ^
 -- sanity checks
 SELECT sum(q1+q2), sum(q1)+sum(q2) FROM int8_tbl;
-        sum        |     ?column?      
--------------------+-------------------
- 18271560493827981 | 18271560493827981
-(1 row)
-
+ERROR:  relation "int8_tbl" does not exist
+LINE 1: SELECT sum(q1+q2), sum(q1)+sum(q2) FROM int8_tbl;
+                                                ^
 SELECT sum(q1-q2), sum(q2-q1), sum(q1)-sum(q2) FROM int8_tbl;
-       sum        |        sum        |     ?column?     
-------------------+-------------------+------------------
- 9135780246913245 | -9135780246913245 | 9135780246913245
-(1 row)
-
+ERROR:  relation "int8_tbl" does not exist
+LINE 1: ...ELECT sum(q1-q2), sum(q2-q1), sum(q1)-sum(q2) FROM int8_tbl;
+                                                              ^
 SELECT sum(q1*2000), sum(-q1*2000), 2000*sum(q1) FROM int8_tbl;
-         sum          |          sum          |       ?column?       
-----------------------+-----------------------+----------------------
- 27407340740741226000 | -27407340740741226000 | 27407340740741226000
-(1 row)
-
+ERROR:  relation "int8_tbl" does not exist
+LINE 1: ...ECT sum(q1*2000), sum(-q1*2000), 2000*sum(q1) FROM int8_tbl;
+                                                              ^
 -- test for outer-level aggregates
 -- this should work
 select ten, sum(distinct four) from onek a
 group by ten
 having exists (select 1 from onek b where sum(distinct a.four) = b.four);
- ten | sum 
------+-----
-   0 |   2
-   2 |   2
-   4 |   2
-   6 |   2
-   8 |   2
-(5 rows)
-
+ERROR:  relation "onek" does not exist
+LINE 1: select ten, sum(distinct four) from onek a
+                                            ^
 -- this should fail because subquery has an agg of its own in WHERE
 select ten, sum(distinct four) from onek a
 group by ten
 having exists (select 1 from onek b
                where sum(distinct a.four + b.four) = b.four);
-ERROR:  aggregate functions are not allowed in WHERE
-LINE 4:                where sum(distinct a.four + b.four) = b.four)...
-                             ^
+ERROR:  relation "onek" does not exist
+LINE 1: select ten, sum(distinct four) from onek a
+                                            ^
 -- Test handling of sublinks within outer-level aggregates.
 -- Per bug report from Daniel Grace.
 select
   (select max((select i.unique2 from tenk1 i where i.unique1 = o.unique1)))
 from tenk1 o;
- max  
-------
- 9999
-(1 row)
-
+ERROR:  relation "tenk1" does not exist
+LINE 3: from tenk1 o;
+             ^
 -- Test handling of Params within aggregate arguments in hashed aggregation.
 -- Per bug report from Jeevan Chalke.
 explain (verbose, costs off)
@@ -1012,76 +948,40 @@ FROM bool_test;
 -- Basic cases
 explain (costs off)
   select min(unique1) from tenk1;
-                         QUERY PLAN                         
-------------------------------------------------------------
- Result
-   Replaces: MinMaxAggregate
-   InitPlan minmax_1
-     ->  Limit
-           ->  Index Only Scan using tenk1_unique1 on tenk1
-                 Index Cond: (unique1 IS NOT NULL)
-(6 rows)
-
+ERROR:  relation "tenk1" does not exist
+LINE 2:   select min(unique1) from tenk1;
+                                   ^
 select min(unique1) from tenk1;
- min 
------
-   0
-(1 row)
-
+ERROR:  relation "tenk1" does not exist
+LINE 1: select min(unique1) from tenk1;
+                                 ^
 explain (costs off)
   select max(unique1) from tenk1;
-                             QUERY PLAN                              
----------------------------------------------------------------------
- Result
-   Replaces: MinMaxAggregate
-   InitPlan minmax_1
-     ->  Limit
-           ->  Index Only Scan Backward using tenk1_unique1 on tenk1
-                 Index Cond: (unique1 IS NOT NULL)
-(6 rows)
-
+ERROR:  relation "tenk1" does not exist
+LINE 2:   select max(unique1) from tenk1;
+                                   ^
 select max(unique1) from tenk1;
- max  
-------
- 9999
-(1 row)
-
+ERROR:  relation "tenk1" does not exist
+LINE 1: select max(unique1) from tenk1;
+                                 ^
 explain (costs off)
   select max(unique1) from tenk1 where unique1 < 42;
-                               QUERY PLAN                               
-------------------------------------------------------------------------
- Result
-   Replaces: MinMaxAggregate
-   InitPlan minmax_1
-     ->  Limit
-           ->  Index Only Scan Backward using tenk1_unique1 on tenk1
-                 Index Cond: ((unique1 IS NOT NULL) AND (unique1 < 42))
-(6 rows)
-
+ERROR:  relation "tenk1" does not exist
+LINE 2:   select max(unique1) from tenk1 where unique1 < 42;
+                                   ^
 select max(unique1) from tenk1 where unique1 < 42;
- max 
------
-  41
-(1 row)
-
+ERROR:  relation "tenk1" does not exist
+LINE 1: select max(unique1) from tenk1 where unique1 < 42;
+                                 ^
 explain (costs off)
   select max(unique1) from tenk1 where unique1 > 42;
-                               QUERY PLAN                               
-------------------------------------------------------------------------
- Result
-   Replaces: MinMaxAggregate
-   InitPlan minmax_1
-     ->  Limit
-           ->  Index Only Scan Backward using tenk1_unique1 on tenk1
-                 Index Cond: ((unique1 IS NOT NULL) AND (unique1 > 42))
-(6 rows)
-
+ERROR:  relation "tenk1" does not exist
+LINE 2:   select max(unique1) from tenk1 where unique1 > 42;
+                                   ^
 select max(unique1) from tenk1 where unique1 > 42;
- max  
-------
- 9999
-(1 row)
-
+ERROR:  relation "tenk1" does not exist
+LINE 1: select max(unique1) from tenk1 where unique1 > 42;
+                                 ^
 -- the planner may choose a generic aggregate here if parallel query is
 -- enabled, since that plan will be parallel safe and the "optimized"
 -- plan, which has almost identical cost, will not be.  we want to test
@@ -1090,229 +990,109 @@ begin;
 set local max_parallel_workers_per_gather = 0;
 explain (costs off)
   select max(unique1) from tenk1 where unique1 > 42000;
-                                QUERY PLAN                                 
----------------------------------------------------------------------------
- Result
-   Replaces: MinMaxAggregate
-   InitPlan minmax_1
-     ->  Limit
-           ->  Index Only Scan Backward using tenk1_unique1 on tenk1
-                 Index Cond: ((unique1 IS NOT NULL) AND (unique1 > 42000))
-(6 rows)
-
+ERROR:  relation "tenk1" does not exist
+LINE 2:   select max(unique1) from tenk1 where unique1 > 42000;
+                                   ^
 select max(unique1) from tenk1 where unique1 > 42000;
- max 
------
-    
-(1 row)
-
+ERROR:  current transaction is aborted, commands ignored until end of transaction block
 rollback;
 -- multi-column index (uses tenk1_thous_tenthous)
 explain (costs off)
   select max(tenthous) from tenk1 where thousand = 33;
-                                 QUERY PLAN                                 
-----------------------------------------------------------------------------
- Result
-   Replaces: MinMaxAggregate
-   InitPlan minmax_1
-     ->  Limit
-           ->  Index Only Scan Backward using tenk1_thous_tenthous on tenk1
-                 Index Cond: ((thousand = 33) AND (tenthous IS NOT NULL))
-(6 rows)
-
+ERROR:  relation "tenk1" does not exist
+LINE 2:   select max(tenthous) from tenk1 where thousand = 33;
+                                    ^
 select max(tenthous) from tenk1 where thousand = 33;
- max  
-------
- 9033
-(1 row)
-
+ERROR:  relation "tenk1" does not exist
+LINE 1: select max(tenthous) from tenk1 where thousand = 33;
+                                  ^
 explain (costs off)
   select min(tenthous) from tenk1 where thousand = 33;
-                                QUERY PLAN                                
---------------------------------------------------------------------------
- Result
-   Replaces: MinMaxAggregate
-   InitPlan minmax_1
-     ->  Limit
-           ->  Index Only Scan using tenk1_thous_tenthous on tenk1
-                 Index Cond: ((thousand = 33) AND (tenthous IS NOT NULL))
-(6 rows)
-
+ERROR:  relation "tenk1" does not exist
+LINE 2:   select min(tenthous) from tenk1 where thousand = 33;
+                                    ^
 select min(tenthous) from tenk1 where thousand = 33;
- min 
------
-  33
-(1 row)
-
+ERROR:  relation "tenk1" does not exist
+LINE 1: select min(tenthous) from tenk1 where thousand = 33;
+                                  ^
 -- check parameter propagation into an indexscan subquery
 explain (costs off)
   select f1, (select min(unique1) from tenk1 where unique1 > f1) AS gt
     from int4_tbl;
-                                       QUERY PLAN                                        
------------------------------------------------------------------------------------------
- Seq Scan on int4_tbl
-   SubPlan expr_1
-     ->  Result
-           Replaces: MinMaxAggregate
-           InitPlan minmax_1
-             ->  Limit
-                   ->  Index Only Scan using tenk1_unique1 on tenk1
-                         Index Cond: ((unique1 IS NOT NULL) AND (unique1 > int4_tbl.f1))
-(8 rows)
-
+ERROR:  relation "int4_tbl" does not exist
+LINE 3:     from int4_tbl;
+                 ^
 select f1, (select min(unique1) from tenk1 where unique1 > f1) AS gt
   from int4_tbl;
-     f1      | gt 
--------------+----
-           0 |  1
-      123456 |   
-     -123456 |  0
-  2147483647 |   
- -2147483647 |  0
-(5 rows)
-
+ERROR:  relation "int4_tbl" does not exist
+LINE 2:   from int4_tbl;
+               ^
 -- check some cases that were handled incorrectly in 8.3.0
 explain (costs off)
   select distinct max(unique2) from tenk1;
-                             QUERY PLAN                              
----------------------------------------------------------------------
- HashAggregate
-   Group Key: (InitPlan minmax_1).col1
-   InitPlan minmax_1
-     ->  Limit
-           ->  Index Only Scan Backward using tenk1_unique2 on tenk1
-                 Index Cond: (unique2 IS NOT NULL)
-   ->  Result
-         Replaces: MinMaxAggregate
-(8 rows)
-
+ERROR:  relation "tenk1" does not exist
+LINE 2:   select distinct max(unique2) from tenk1;
+                                            ^
 select distinct max(unique2) from tenk1;
- max  
-------
- 9999
-(1 row)
-
+ERROR:  relation "tenk1" does not exist
+LINE 1: select distinct max(unique2) from tenk1;
+                                          ^
 explain (costs off)
   select max(unique2) from tenk1 order by 1;
-                             QUERY PLAN                              
----------------------------------------------------------------------
- Sort
-   Sort Key: ((InitPlan minmax_1).col1)
-   InitPlan minmax_1
-     ->  Limit
-           ->  Index Only Scan Backward using tenk1_unique2 on tenk1
-                 Index Cond: (unique2 IS NOT NULL)
-   ->  Result
-         Replaces: MinMaxAggregate
-(8 rows)
-
+ERROR:  relation "tenk1" does not exist
+LINE 2:   select max(unique2) from tenk1 order by 1;
+                                   ^
 select max(unique2) from tenk1 order by 1;
- max  
-------
- 9999
-(1 row)
-
+ERROR:  relation "tenk1" does not exist
+LINE 1: select max(unique2) from tenk1 order by 1;
+                                 ^
 explain (costs off)
   select max(unique2) from tenk1 order by max(unique2);
-                             QUERY PLAN                              
----------------------------------------------------------------------
- Sort
-   Sort Key: ((InitPlan minmax_1).col1)
-   InitPlan minmax_1
-     ->  Limit
-           ->  Index Only Scan Backward using tenk1_unique2 on tenk1
-                 Index Cond: (unique2 IS NOT NULL)
-   ->  Result
-         Replaces: MinMaxAggregate
-(8 rows)
-
+ERROR:  relation "tenk1" does not exist
+LINE 2:   select max(unique2) from tenk1 order by max(unique2);
+                                   ^
 select max(unique2) from tenk1 order by max(unique2);
- max  
-------
- 9999
-(1 row)
-
+ERROR:  relation "tenk1" does not exist
+LINE 1: select max(unique2) from tenk1 order by max(unique2);
+                                 ^
 explain (costs off)
   select max(unique2) from tenk1 order by max(unique2)+1;
-                             QUERY PLAN                              
----------------------------------------------------------------------
- Sort
-   Sort Key: (((InitPlan minmax_1).col1 + 1))
-   InitPlan minmax_1
-     ->  Limit
-           ->  Index Only Scan Backward using tenk1_unique2 on tenk1
-                 Index Cond: (unique2 IS NOT NULL)
-   ->  Result
-         Replaces: MinMaxAggregate
-(8 rows)
-
+ERROR:  relation "tenk1" does not exist
+LINE 2:   select max(unique2) from tenk1 order by max(unique2)+1;
+                                   ^
 select max(unique2) from tenk1 order by max(unique2)+1;
- max  
-------
- 9999
-(1 row)
-
+ERROR:  relation "tenk1" does not exist
+LINE 1: select max(unique2) from tenk1 order by max(unique2)+1;
+                                 ^
 explain (costs off)
   select max(unique2), generate_series(1,3) as g from tenk1 order by g desc;
-                             QUERY PLAN                              
----------------------------------------------------------------------
- Sort
-   Sort Key: (generate_series(1, 3)) DESC
-   InitPlan minmax_1
-     ->  Limit
-           ->  Index Only Scan Backward using tenk1_unique2 on tenk1
-                 Index Cond: (unique2 IS NOT NULL)
-   ->  ProjectSet
-         ->  Result
-               Replaces: MinMaxAggregate
-(9 rows)
-
+ERROR:  relation "tenk1" does not exist
+LINE 2: ...lect max(unique2), generate_series(1,3) as g from tenk1 orde...
+                                                             ^
 select max(unique2), generate_series(1,3) as g from tenk1 order by g desc;
- max  | g 
-------+---
- 9999 | 3
- 9999 | 2
- 9999 | 1
-(3 rows)
-
+ERROR:  relation "tenk1" does not exist
+LINE 1: ...lect max(unique2), generate_series(1,3) as g from tenk1 orde...
+                                                             ^
 -- two interesting corner cases: both non-null and null constant gets
 -- optimized into a seqscan
 explain (costs off)
   select max(100) from tenk1;
-           QUERY PLAN            
----------------------------------
- Result
-   Replaces: MinMaxAggregate
-   InitPlan minmax_1
-     ->  Limit
-           ->  Seq Scan on tenk1
-(5 rows)
-
+ERROR:  relation "tenk1" does not exist
+LINE 2:   select max(100) from tenk1;
+                               ^
 select max(100) from tenk1;
- max 
------
- 100
-(1 row)
-
+ERROR:  relation "tenk1" does not exist
+LINE 1: select max(100) from tenk1;
+                             ^
 explain (costs off)
   select max(null) from tenk1;
-                        QUERY PLAN                         
------------------------------------------------------------
- Result
-   Replaces: MinMaxAggregate
-   InitPlan minmax_1
-     ->  Limit
-           ->  Result
-                 One-Time Filter: (NULL::text IS NOT NULL)
-                 ->  Seq Scan on tenk1
-(7 rows)
-
+ERROR:  relation "tenk1" does not exist
+LINE 2:   select max(null) from tenk1;
+                                ^
 select max(null) from tenk1;
- max 
------
- 
-(1 row)
-
+ERROR:  relation "tenk1" does not exist
+LINE 1: select max(null) from tenk1;
+                              ^
 -- try it on an inheritance tree
 create table minmaxtest(f1 int);
 create table minmaxtest1() inherits (minmaxtest);
@@ -1413,47 +1193,28 @@ set local enable_sort = off;
 explain (costs off)
   select f1, (select distinct min(t1.f1) from int4_tbl t1 where t1.f1 = t0.f1)
   from int4_tbl t0;
-                             QUERY PLAN                              
----------------------------------------------------------------------
- Seq Scan on int4_tbl t0
-   SubPlan expr_1
-     ->  HashAggregate
-           Group Key: (InitPlan minmax_1).col1
-           InitPlan minmax_1
-             ->  Limit
-                   ->  Seq Scan on int4_tbl t1
-                         Filter: ((f1 IS NOT NULL) AND (f1 = t0.f1))
-           ->  Result
-                 Replaces: MinMaxAggregate
-(10 rows)
-
+ERROR:  relation "int4_tbl" does not exist
+LINE 3:   from int4_tbl t0;
+               ^
 select f1, (select distinct min(t1.f1) from int4_tbl t1 where t1.f1 = t0.f1)
 from int4_tbl t0;
-     f1      |     min     
--------------+-------------
-           0 |           0
-      123456 |      123456
-     -123456 |     -123456
-  2147483647 |  2147483647
- -2147483647 | -2147483647
-(5 rows)
-
+ERROR:  current transaction is aborted, commands ignored until end of transaction block
 rollback;
 -- check for correct detection of nested-aggregate errors
 select max(min(unique1)) from tenk1;
-ERROR:  aggregate function calls cannot be nested
+ERROR:  relation "tenk1" does not exist
 LINE 1: select max(min(unique1)) from tenk1;
-                   ^
+                                      ^
 select (select max(min(unique1)) from int8_tbl) from tenk1;
-ERROR:  aggregate function calls cannot be nested
+ERROR:  relation "tenk1" does not exist
 LINE 1: select (select max(min(unique1)) from int8_tbl) from tenk1;
-                           ^
+                                                             ^
 select avg((select avg(a1.col1 order by (select avg(a2.col2) from tenk1 a3))
             from tenk1 a1(col1)))
 from tenk1 a2(col2);
-ERROR:  aggregate function calls cannot be nested
-LINE 1: select avg((select avg(a1.col1 order by (select avg(a2.col2)...
-                                                        ^
+ERROR:  relation "tenk1" does not exist
+LINE 3: from tenk1 a2(col2);
+             ^
 --
 -- Test removal of redundant GROUP BY columns
 --
@@ -1802,14 +1563,9 @@ drop table t1, t2;
 explain (costs off)
 select sum(two order by two),max(four order by four), min(four order by four)
 from tenk1;
-          QUERY PLAN           
--------------------------------
- Aggregate
-   ->  Sort
-         Sort Key: four
-         ->  Seq Scan on tenk1
-(4 rows)
-
+ERROR:  relation "tenk1" does not exist
+LINE 3: from tenk1;
+             ^
 -- Ensure we order by two.  It's a tie between ordering by two and four but
 -- we tiebreak on the aggregate's position.
 explain (costs off)
@@ -1817,28 +1573,18 @@ select
   sum(two order by two), max(four order by four),
   min(four order by four), max(two order by two)
 from tenk1;
-          QUERY PLAN           
--------------------------------
- Aggregate
-   ->  Sort
-         Sort Key: two
-         ->  Seq Scan on tenk1
-(4 rows)
-
+ERROR:  relation "tenk1" does not exist
+LINE 5: from tenk1;
+             ^
 -- Similar to above, but tiebreak on ordering by four
 explain (costs off)
 select
   max(four order by four), sum(two order by two),
   min(four order by four), max(two order by two)
 from tenk1;
-          QUERY PLAN           
--------------------------------
- Aggregate
-   ->  Sort
-         Sort Key: four
-         ->  Seq Scan on tenk1
-(4 rows)
-
+ERROR:  relation "tenk1" does not exist
+LINE 5: from tenk1;
+             ^
 -- Ensure this one orders by ten since there are 3 aggregates that require ten
 -- vs two that suit two and four.
 explain (costs off)
@@ -1847,14 +1593,9 @@ select
   min(four order by four), max(two order by two),
   sum(ten order by ten), min(ten order by ten), max(ten order by ten)
 from tenk1;
-          QUERY PLAN           
--------------------------------
- Aggregate
-   ->  Sort
-         Sort Key: ten
-         ->  Seq Scan on tenk1
-(4 rows)
-
+ERROR:  relation "tenk1" does not exist
+LINE 6: from tenk1;
+             ^
 -- Try a case involving a GROUP BY clause where the GROUP BY column is also
 -- part of an aggregate's ORDER BY clause.  We want a sort order that works
 -- for the GROUP BY along with the first and the last aggregate.
@@ -1864,15 +1605,9 @@ select
   sum(unique1 order by two, four)
 from tenk1
 group by ten;
-            QUERY PLAN            
-----------------------------------
- GroupAggregate
-   Group Key: ten
-   ->  Sort
-         Sort Key: ten, two, four
-         ->  Seq Scan on tenk1
-(5 rows)
-
+ERROR:  relation "tenk1" does not exist
+LINE 5: from tenk1
+             ^
 -- Ensure that we never choose to provide presorted input to an Aggref with
 -- a volatile function in the ORDER BY / DISTINCT clause.  We want to ensure
 -- these sorts are performed individually rather than at the query level.
@@ -1883,15 +1618,9 @@ select
   sum(unique1 order by two, random(), random() + 1)
 from tenk1
 group by ten;
-            QUERY PLAN            
-----------------------------------
- GroupAggregate
-   Group Key: ten
-   ->  Sort
-         Sort Key: ten, four, two
-         ->  Seq Scan on tenk1
-(5 rows)
-
+ERROR:  relation "tenk1" does not exist
+LINE 6: from tenk1
+             ^
 -- Ensure consecutive NULLs are properly treated as distinct from each other
 select array_agg(distinct val)
 from (select null as val from generate_series(1, 2));
@@ -1904,12 +1633,9 @@ from (select null as val from generate_series(1, 2));
 set enable_presorted_aggregate to off;
 explain (costs off)
 select sum(two order by two) from tenk1;
-       QUERY PLAN        
--------------------------
- Aggregate
-   ->  Seq Scan on tenk1
-(2 rows)
-
+ERROR:  relation "tenk1" does not exist
+LINE 2: select sum(two order by two) from tenk1;
+                                          ^
 reset enable_presorted_aggregate;
 --
 -- Test cases with FILTER clause
@@ -1917,37 +1643,24 @@ reset enable_presorted_aggregate;
 -- Ensure we presort when the aggregate contains plain Vars
 explain (costs off)
 select sum(two order by two) filter (where two > 1) from tenk1;
-          QUERY PLAN           
--------------------------------
- Aggregate
-   ->  Sort
-         Sort Key: two
-         ->  Seq Scan on tenk1
-(4 rows)
-
+ERROR:  relation "tenk1" does not exist
+LINE 2: ...ect sum(two order by two) filter (where two > 1) from tenk1;
+                                                                 ^
 -- Ensure we presort for RelabelType'd Vars
 explain (costs off)
 select string_agg(distinct f1, ',') filter (where length(f1) > 1)
 from varchar_tbl;
-             QUERY PLAN              
--------------------------------------
- Aggregate
-   ->  Sort
-         Sort Key: f1
-         ->  Seq Scan on varchar_tbl
-(4 rows)
-
+ERROR:  relation "varchar_tbl" does not exist
+LINE 3: from varchar_tbl;
+             ^
 -- Ensure we don't presort when the aggregate's argument contains an
 -- explicit cast.
 explain (costs off)
 select string_agg(distinct f1::varchar(2), ',') filter (where length(f1) > 1)
 from varchar_tbl;
-          QUERY PLAN           
--------------------------------
- Aggregate
-   ->  Seq Scan on varchar_tbl
-(2 rows)
-
+ERROR:  relation "varchar_tbl" does not exist
+LINE 3: from varchar_tbl;
+             ^
 --
 -- Test combinations of DISTINCT and/or ORDER BY
 --
@@ -2010,83 +1723,75 @@ select array_agg(distinct a order by a desc nulls last)
 -- multi-arg aggs, strict/nonstrict, distinct/order by
 select aggfstr(a,b,c)
   from (values (1,3,'foo'),(0,null,null),(2,2,'bar'),(3,1,'baz')) v(a,b,c);
-                aggfstr                
----------------------------------------
- {"(1,3,foo)","(2,2,bar)","(3,1,baz)"}
-(1 row)
-
+ERROR:  function aggfstr(integer, integer, text) does not exist
+LINE 1: select aggfstr(a,b,c)
+               ^
+DETAIL:  There is no function of that name.
 select aggfns(a,b,c)
   from (values (1,3,'foo'),(0,null,null),(2,2,'bar'),(3,1,'baz')) v(a,b,c);
-                    aggfns                     
------------------------------------------------
- {"(1,3,foo)","(0,,)","(2,2,bar)","(3,1,baz)"}
-(1 row)
-
+ERROR:  function aggfns(integer, integer, text) does not exist
+LINE 1: select aggfns(a,b,c)
+               ^
+DETAIL:  There is no function of that name.
 select aggfstr(distinct a,b,c)
   from (values (1,3,'foo'),(0,null,null),(2,2,'bar'),(3,1,'baz')) v(a,b,c),
        generate_series(1,3) i;
-                aggfstr                
----------------------------------------
- {"(1,3,foo)","(2,2,bar)","(3,1,baz)"}
-(1 row)
-
+ERROR:  function aggfstr(integer, integer, text) does not exist
+LINE 1: select aggfstr(distinct a,b,c)
+               ^
+DETAIL:  There is no function of that name.
 select aggfns(distinct a,b,c)
   from (values (1,3,'foo'),(0,null,null),(2,2,'bar'),(3,1,'baz')) v(a,b,c),
        generate_series(1,3) i;
-                    aggfns                     
------------------------------------------------
- {"(0,,)","(1,3,foo)","(2,2,bar)","(3,1,baz)"}
-(1 row)
-
+ERROR:  function aggfns(integer, integer, text) does not exist
+LINE 1: select aggfns(distinct a,b,c)
+               ^
+DETAIL:  There is no function of that name.
 select aggfstr(distinct a,b,c order by b)
   from (values (1,3,'foo'),(0,null,null),(2,2,'bar'),(3,1,'baz')) v(a,b,c),
        generate_series(1,3) i;
-                aggfstr                
----------------------------------------
- {"(3,1,baz)","(2,2,bar)","(1,3,foo)"}
-(1 row)
-
+ERROR:  function aggfstr(integer, integer, text) does not exist
+LINE 1: select aggfstr(distinct a,b,c order by b)
+               ^
+DETAIL:  There is no function of that name.
 select aggfns(distinct a,b,c order by b)
   from (values (1,3,'foo'),(0,null,null),(2,2,'bar'),(3,1,'baz')) v(a,b,c),
        generate_series(1,3) i;
-                    aggfns                     
------------------------------------------------
- {"(3,1,baz)","(2,2,bar)","(1,3,foo)","(0,,)"}
-(1 row)
-
+ERROR:  function aggfns(integer, integer, text) does not exist
+LINE 1: select aggfns(distinct a,b,c order by b)
+               ^
+DETAIL:  There is no function of that name.
 -- test specific code paths
 select aggfns(distinct a,a,c order by c using ~<~,a)
   from (values (1,3,'foo'),(0,null,null),(2,2,'bar'),(3,1,'baz')) v(a,b,c),
        generate_series(1,2) i;
-                     aggfns                     
-------------------------------------------------
- {"(2,2,bar)","(3,3,baz)","(1,1,foo)","(0,0,)"}
-(1 row)
-
+ERROR:  function aggfns(integer, integer, text) does not exist
+LINE 1: select aggfns(distinct a,a,c order by c using ~<~,a)
+               ^
+DETAIL:  No aggregate function matches the given name and argument types.
+HINT:  Perhaps you misplaced ORDER BY; ORDER BY must appear after all regular arguments of the aggregate.
 select aggfns(distinct a,a,c order by c using ~<~)
   from (values (1,3,'foo'),(0,null,null),(2,2,'bar'),(3,1,'baz')) v(a,b,c),
        generate_series(1,2) i;
-                     aggfns                     
-------------------------------------------------
- {"(2,2,bar)","(3,3,baz)","(1,1,foo)","(0,0,)"}
-(1 row)
-
+ERROR:  function aggfns(integer, integer, text) does not exist
+LINE 1: select aggfns(distinct a,a,c order by c using ~<~)
+               ^
+DETAIL:  There is no function of that name.
 select aggfns(distinct a,a,c order by a)
   from (values (1,3,'foo'),(0,null,null),(2,2,'bar'),(3,1,'baz')) v(a,b,c),
        generate_series(1,2) i;
-                     aggfns                     
-------------------------------------------------
- {"(0,0,)","(1,1,foo)","(2,2,bar)","(3,3,baz)"}
-(1 row)
-
+ERROR:  function aggfns(integer, integer, text) does not exist
+LINE 1: select aggfns(distinct a,a,c order by a)
+               ^
+DETAIL:  There is no function of that name.
 select aggfns(distinct a,b,c order by a,c using ~<~,b)
   from (values (1,3,'foo'),(0,null,null),(2,2,'bar'),(3,1,'baz')) v(a,b,c),
        generate_series(1,2) i;
-                    aggfns                     
------------------------------------------------
- {"(0,,)","(1,3,foo)","(2,2,bar)","(3,1,baz)"}
-(1 row)
-
+ERROR:  function aggfns(integer, integer, text) does not exist
+LINE 1: select aggfns(distinct a,b,c order by a,c using ~<~,b)
+               ^
+DETAIL:  No aggregate function matches the given name and argument types.
+HINT:  Perhaps you misplaced ORDER BY; ORDER BY must appear after all regular arguments of the aggregate.
 -- test a more complex permutation that has previous caused issues
 select
     string_agg(distinct 'a', ','),
@@ -2104,143 +1809,142 @@ select
 create view agg_view1 as
   select aggfns(a,b,c)
     from (values (1,3,'foo'),(0,null,null),(2,2,'bar'),(3,1,'baz')) v(a,b,c);
+ERROR:  function aggfns(integer, integer, text) does not exist
+LINE 2:   select aggfns(a,b,c)
+                 ^
+DETAIL:  There is no function of that name.
 select * from agg_view1;
-                    aggfns                     
------------------------------------------------
- {"(1,3,foo)","(0,,)","(2,2,bar)","(3,1,baz)"}
-(1 row)
-
+ERROR:  relation "agg_view1" does not exist
+LINE 1: select * from agg_view1;
+                      ^
 select pg_get_viewdef('agg_view1'::regclass);
-                                                   pg_get_viewdef                                                    
----------------------------------------------------------------------------------------------------------------------
-  SELECT aggfns(a, b, c) AS aggfns                                                                                  +
-    FROM ( VALUES (1,3,'foo'::text), (0,NULL::integer,NULL::text), (2,2,'bar'::text), (3,1,'baz'::text)) v(a, b, c);
-(1 row)
-
+ERROR:  relation "agg_view1" does not exist
+LINE 1: select pg_get_viewdef('agg_view1'::regclass);
+                              ^
 create or replace view agg_view1 as
   select aggfns(distinct a,b,c)
     from (values (1,3,'foo'),(0,null,null),(2,2,'bar'),(3,1,'baz')) v(a,b,c),
          generate_series(1,3) i;
+ERROR:  function aggfns(integer, integer, text) does not exist
+LINE 2:   select aggfns(distinct a,b,c)
+                 ^
+DETAIL:  There is no function of that name.
 select * from agg_view1;
-                    aggfns                     
------------------------------------------------
- {"(0,,)","(1,3,foo)","(2,2,bar)","(3,1,baz)"}
-(1 row)
-
+ERROR:  relation "agg_view1" does not exist
+LINE 1: select * from agg_view1;
+                      ^
 select pg_get_viewdef('agg_view1'::regclass);
-                                                   pg_get_viewdef                                                    
----------------------------------------------------------------------------------------------------------------------
-  SELECT aggfns(DISTINCT v.a, v.b, v.c) AS aggfns                                                                   +
-    FROM ( VALUES (1,3,'foo'::text), (0,NULL::integer,NULL::text), (2,2,'bar'::text), (3,1,'baz'::text)) v(a, b, c),+
-     generate_series(1, 3) i(i);
-(1 row)
-
+ERROR:  relation "agg_view1" does not exist
+LINE 1: select pg_get_viewdef('agg_view1'::regclass);
+                              ^
 create or replace view agg_view1 as
   select aggfns(distinct a,b,c order by b)
     from (values (1,3,'foo'),(0,null,null),(2,2,'bar'),(3,1,'baz')) v(a,b,c),
          generate_series(1,3) i;
+ERROR:  function aggfns(integer, integer, text) does not exist
+LINE 2:   select aggfns(distinct a,b,c order by b)
+                 ^
+DETAIL:  There is no function of that name.
 select * from agg_view1;
-                    aggfns                     
------------------------------------------------
- {"(3,1,baz)","(2,2,bar)","(1,3,foo)","(0,,)"}
-(1 row)
-
+ERROR:  relation "agg_view1" does not exist
+LINE 1: select * from agg_view1;
+                      ^
 select pg_get_viewdef('agg_view1'::regclass);
-                                                   pg_get_viewdef                                                    
----------------------------------------------------------------------------------------------------------------------
-  SELECT aggfns(DISTINCT v.a, v.b, v.c ORDER BY v.b) AS aggfns                                                      +
-    FROM ( VALUES (1,3,'foo'::text), (0,NULL::integer,NULL::text), (2,2,'bar'::text), (3,1,'baz'::text)) v(a, b, c),+
-     generate_series(1, 3) i(i);
-(1 row)
-
+ERROR:  relation "agg_view1" does not exist
+LINE 1: select pg_get_viewdef('agg_view1'::regclass);
+                              ^
 create or replace view agg_view1 as
   select aggfns(a,b,c order by b+1)
     from (values (1,3,'foo'),(0,null,null),(2,2,'bar'),(3,1,'baz')) v(a,b,c);
+ERROR:  function aggfns(integer, integer, text) does not exist
+LINE 2:   select aggfns(a,b,c order by b+1)
+                 ^
+DETAIL:  There is no function of that name.
 select * from agg_view1;
-                    aggfns                     
------------------------------------------------
- {"(3,1,baz)","(2,2,bar)","(1,3,foo)","(0,,)"}
-(1 row)
-
+ERROR:  relation "agg_view1" does not exist
+LINE 1: select * from agg_view1;
+                      ^
 select pg_get_viewdef('agg_view1'::regclass);
-                                                   pg_get_viewdef                                                    
----------------------------------------------------------------------------------------------------------------------
-  SELECT aggfns(a, b, c ORDER BY (b + 1)) AS aggfns                                                                 +
-    FROM ( VALUES (1,3,'foo'::text), (0,NULL::integer,NULL::text), (2,2,'bar'::text), (3,1,'baz'::text)) v(a, b, c);
-(1 row)
-
+ERROR:  relation "agg_view1" does not exist
+LINE 1: select pg_get_viewdef('agg_view1'::regclass);
+                              ^
 create or replace view agg_view1 as
   select aggfns(a,a,c order by b)
     from (values (1,3,'foo'),(0,null,null),(2,2,'bar'),(3,1,'baz')) v(a,b,c);
+ERROR:  function aggfns(integer, integer, text) does not exist
+LINE 2:   select aggfns(a,a,c order by b)
+                 ^
+DETAIL:  There is no function of that name.
 select * from agg_view1;
-                     aggfns                     
-------------------------------------------------
- {"(3,3,baz)","(2,2,bar)","(1,1,foo)","(0,0,)"}
-(1 row)
-
+ERROR:  relation "agg_view1" does not exist
+LINE 1: select * from agg_view1;
+                      ^
 select pg_get_viewdef('agg_view1'::regclass);
-                                                   pg_get_viewdef                                                    
----------------------------------------------------------------------------------------------------------------------
-  SELECT aggfns(a, a, c ORDER BY b) AS aggfns                                                                       +
-    FROM ( VALUES (1,3,'foo'::text), (0,NULL::integer,NULL::text), (2,2,'bar'::text), (3,1,'baz'::text)) v(a, b, c);
-(1 row)
-
+ERROR:  relation "agg_view1" does not exist
+LINE 1: select pg_get_viewdef('agg_view1'::regclass);
+                              ^
 create or replace view agg_view1 as
   select aggfns(a,b,c order by c using ~<~)
     from (values (1,3,'foo'),(0,null,null),(2,2,'bar'),(3,1,'baz')) v(a,b,c);
+ERROR:  function aggfns(integer, integer, text) does not exist
+LINE 2:   select aggfns(a,b,c order by c using ~<~)
+                 ^
+DETAIL:  There is no function of that name.
 select * from agg_view1;
-                    aggfns                     
------------------------------------------------
- {"(2,2,bar)","(3,1,baz)","(1,3,foo)","(0,,)"}
-(1 row)
-
+ERROR:  relation "agg_view1" does not exist
+LINE 1: select * from agg_view1;
+                      ^
 select pg_get_viewdef('agg_view1'::regclass);
-                                                   pg_get_viewdef                                                    
----------------------------------------------------------------------------------------------------------------------
-  SELECT aggfns(a, b, c ORDER BY c USING ~<~ NULLS LAST) AS aggfns                                                  +
-    FROM ( VALUES (1,3,'foo'::text), (0,NULL::integer,NULL::text), (2,2,'bar'::text), (3,1,'baz'::text)) v(a, b, c);
-(1 row)
-
+ERROR:  relation "agg_view1" does not exist
+LINE 1: select pg_get_viewdef('agg_view1'::regclass);
+                              ^
 create or replace view agg_view1 as
   select aggfns(distinct a,b,c order by a,c using ~<~,b)
     from (values (1,3,'foo'),(0,null,null),(2,2,'bar'),(3,1,'baz')) v(a,b,c),
          generate_series(1,2) i;
+ERROR:  function aggfns(integer, integer, text) does not exist
+LINE 2:   select aggfns(distinct a,b,c order by a,c using ~<~,b)
+                 ^
+DETAIL:  No aggregate function matches the given name and argument types.
+HINT:  Perhaps you misplaced ORDER BY; ORDER BY must appear after all regular arguments of the aggregate.
 select * from agg_view1;
-                    aggfns                     
------------------------------------------------
- {"(0,,)","(1,3,foo)","(2,2,bar)","(3,1,baz)"}
-(1 row)
-
+ERROR:  relation "agg_view1" does not exist
+LINE 1: select * from agg_view1;
+                      ^
 select pg_get_viewdef('agg_view1'::regclass);
-                                                   pg_get_viewdef                                                    
----------------------------------------------------------------------------------------------------------------------
-  SELECT aggfns(DISTINCT v.a, v.b, v.c ORDER BY v.a, v.c USING ~<~ NULLS LAST, v.b) AS aggfns                       +
-    FROM ( VALUES (1,3,'foo'::text), (0,NULL::integer,NULL::text), (2,2,'bar'::text), (3,1,'baz'::text)) v(a, b, c),+
-     generate_series(1, 2) i(i);
-(1 row)
-
+ERROR:  relation "agg_view1" does not exist
+LINE 1: select pg_get_viewdef('agg_view1'::regclass);
+                              ^
 drop view agg_view1;
+ERROR:  view "agg_view1" does not exist
 -- incorrect DISTINCT usage errors
 select aggfns(distinct a,b,c order by i)
   from (values (1,1,'foo')) v(a,b,c), generate_series(1,2) i;
-ERROR:  in an aggregate with DISTINCT, ORDER BY expressions must appear in argument list
+ERROR:  function aggfns(integer, integer, text) does not exist
 LINE 1: select aggfns(distinct a,b,c order by i)
-                                              ^
+               ^
+DETAIL:  There is no function of that name.
 select aggfns(distinct a,b,c order by a,b+1)
   from (values (1,1,'foo')) v(a,b,c), generate_series(1,2) i;
-ERROR:  in an aggregate with DISTINCT, ORDER BY expressions must appear in argument list
+ERROR:  function aggfns(integer, integer, text) does not exist
 LINE 1: select aggfns(distinct a,b,c order by a,b+1)
-                                                ^
+               ^
+DETAIL:  No aggregate function matches the given name and argument types.
+HINT:  Perhaps you misplaced ORDER BY; ORDER BY must appear after all regular arguments of the aggregate.
 select aggfns(distinct a,b,c order by a,b,i,c)
   from (values (1,1,'foo')) v(a,b,c), generate_series(1,2) i;
-ERROR:  in an aggregate with DISTINCT, ORDER BY expressions must appear in argument list
+ERROR:  function aggfns(integer, integer, text) does not exist
 LINE 1: select aggfns(distinct a,b,c order by a,b,i,c)
-                                                  ^
+               ^
+DETAIL:  No aggregate function matches the given name and argument types.
+HINT:  Perhaps you misplaced ORDER BY; ORDER BY must appear after all regular arguments of the aggregate.
 select aggfns(distinct a,a,c order by a,b)
   from (values (1,1,'foo')) v(a,b,c), generate_series(1,2) i;
-ERROR:  in an aggregate with DISTINCT, ORDER BY expressions must appear in argument list
+ERROR:  function aggfns(integer, integer, text) does not exist
 LINE 1: select aggfns(distinct a,a,c order by a,b)
-                                                ^
+               ^
+DETAIL:  No aggregate function matches the given name and argument types.
+HINT:  Perhaps you misplaced ORDER BY; ORDER BY must appear after all regular arguments of the aggregate.
 -- string_agg tests
 select string_agg(a,',') from (values('aaaa'),('bbbb'),('cccc')) g(a);
    string_agg   
@@ -2268,25 +1972,21 @@ select string_agg(a,',') from (values(null),(null)) g(a);
 
 -- check some implicit casting cases, as per bug #5564
 select string_agg(distinct f1, ',' order by f1) from varchar_tbl;  -- ok
- string_agg 
-------------
- a,ab,abcd
-(1 row)
-
+ERROR:  relation "varchar_tbl" does not exist
+LINE 1: ...ect string_agg(distinct f1, ',' order by f1) from varchar_tb...
+                                                             ^
 select string_agg(distinct f1::text, ',' order by f1) from varchar_tbl;  -- not ok
-ERROR:  in an aggregate with DISTINCT, ORDER BY expressions must appear in argument list
-LINE 1: select string_agg(distinct f1::text, ',' order by f1) from v...
-                                                          ^
+ERROR:  relation "varchar_tbl" does not exist
+LINE 1: ...ring_agg(distinct f1::text, ',' order by f1) from varchar_tb...
+                                                             ^
 select string_agg(distinct f1, ',' order by f1::text) from varchar_tbl;  -- not ok
-ERROR:  in an aggregate with DISTINCT, ORDER BY expressions must appear in argument list
-LINE 1: select string_agg(distinct f1, ',' order by f1::text) from v...
-                                                    ^
+ERROR:  relation "varchar_tbl" does not exist
+LINE 1: ...ring_agg(distinct f1, ',' order by f1::text) from varchar_tb...
+                                                             ^
 select string_agg(distinct f1::text, ',' order by f1::text) from varchar_tbl;  -- ok
- string_agg 
-------------
- a,ab,abcd
-(1 row)
-
+ERROR:  relation "varchar_tbl" does not exist
+LINE 1: ...gg(distinct f1::text, ',' order by f1::text) from varchar_tb...
+                                                             ^
 -- string_agg, min, max bytea tests
 create table bytea_test_table(v bytea);
 select string_agg(v, '') from bytea_test_table;
@@ -2467,45 +2167,24 @@ drop view v_pagg_test;
 drop table pagg_test;
 -- FILTER tests
 select min(unique1) filter (where unique1 > 100) from tenk1;
- min 
------
- 101
-(1 row)
-
+ERROR:  relation "tenk1" does not exist
+LINE 1: select min(unique1) filter (where unique1 > 100) from tenk1;
+                                                              ^
 select sum(1/ten) filter (where ten > 0) from tenk1;
- sum  
-------
- 1000
-(1 row)
-
+ERROR:  relation "tenk1" does not exist
+LINE 1: select sum(1/ten) filter (where ten > 0) from tenk1;
+                                                      ^
 select ten, sum(distinct four) filter (where four::text ~ '123') from onek a
 group by ten;
- ten | sum 
------+-----
-   0 |    
-   1 |    
-   2 |    
-   3 |    
-   4 |    
-   5 |    
-   6 |    
-   7 |    
-   8 |    
-   9 |    
-(10 rows)
-
+ERROR:  relation "onek" does not exist
+LINE 1: ...distinct four) filter (where four::text ~ '123') from onek a
+                                                                 ^
 select ten, sum(distinct four) filter (where four > 10) from onek a
 group by ten
 having exists (select 1 from onek b where sum(distinct a.four) = b.four);
- ten | sum 
------+-----
-   0 |    
-   2 |    
-   4 |    
-   6 |    
-   8 |    
-(5 rows)
-
+ERROR:  relation "onek" does not exist
+LINE 1: ...ten, sum(distinct four) filter (where four > 10) from onek a
+                                                                 ^
 select max(foo COLLATE "C") filter (where (bar collate "POSIX") > '0')
 from (values ('a', 'b')) AS v(foo,bar);
  max 
@@ -2550,28 +2229,24 @@ select
   (select max((select i.unique2 from tenk1 i where i.unique1 = o.unique1))
      filter (where o.unique1 < 10))
 from tenk1 o;					-- outer query is aggregation query
- max  
-------
- 9998
-(1 row)
-
+ERROR:  relation "tenk1" does not exist
+LINE 4: from tenk1 o;
+             ^
 -- subquery in FILTER clause (PostgreSQL extension)
 select sum(unique1) FILTER (WHERE
   unique1 IN (SELECT unique1 FROM onek where unique1 < 100)) FROM tenk1;
- sum  
-------
- 4950
-(1 row)
-
+ERROR:  relation "tenk1" does not exist
+LINE 2: ... (SELECT unique1 FROM onek where unique1 < 100)) FROM tenk1;
+                                                                 ^
 -- exercise lots of aggregate parts with FILTER
 select aggfns(distinct a,b,c order by a,c using ~<~,b) filter (where a > 1)
     from (values (1,3,'foo'),(0,null,null),(2,2,'bar'),(3,1,'baz')) v(a,b,c),
     generate_series(1,2) i;
-          aggfns           
----------------------------
- {"(2,2,bar)","(3,1,baz)"}
-(1 row)
-
+ERROR:  function aggfns(integer, integer, text) does not exist
+LINE 1: select aggfns(distinct a,b,c order by a,c using ~<~,b) filte...
+               ^
+DETAIL:  No aggregate function matches the given name and argument types.
+HINT:  Perhaps you misplaced ORDER BY; ORDER BY must appear after all regular arguments of the aggregate.
 -- check handling of bare boolean Var in FILTER
 select max(0) filter (where b1) from bool_test;
  max 
@@ -2587,21 +2262,21 @@ select (select max(0) filter (where b1)) from bool_test;
 
 -- check for correct detection of nested-aggregate errors in FILTER
 select max(unique1) filter (where sum(ten) > 0) from tenk1;
-ERROR:  aggregate functions are not allowed in FILTER
+ERROR:  relation "tenk1" does not exist
 LINE 1: select max(unique1) filter (where sum(ten) > 0) from tenk1;
-                                          ^
+                                                             ^
 select (select max(unique1) filter (where sum(ten) > 0) from int8_tbl) from tenk1;
-ERROR:  aggregate function calls cannot be nested
-LINE 1: select (select max(unique1) filter (where sum(ten) > 0) from...
-                                                  ^
+ERROR:  relation "tenk1" does not exist
+LINE 1: ...que1) filter (where sum(ten) > 0) from int8_tbl) from tenk1;
+                                                                 ^
 select max(unique1) filter (where bool_or(ten > 0)) from tenk1;
-ERROR:  aggregate functions are not allowed in FILTER
-LINE 1: select max(unique1) filter (where bool_or(ten > 0)) from ten...
-                                          ^
+ERROR:  relation "tenk1" does not exist
+LINE 1: ...ect max(unique1) filter (where bool_or(ten > 0)) from tenk1;
+                                                                 ^
 select (select max(unique1) filter (where bool_or(ten > 0)) from int8_tbl) from tenk1;
-ERROR:  aggregate function calls cannot be nested
-LINE 1: select (select max(unique1) filter (where bool_or(ten > 0)) ...
-                                                  ^
+ERROR:  relation "tenk1" does not exist
+LINE 1: ...) filter (where bool_or(ten > 0)) from int8_tbl) from tenk1;
+                                                                 ^
 -- ordered-set aggregates
 select p, percentile_cont(p) within group (order by x::float8)
 from generate_series(1,5) x,
@@ -2654,17 +2329,13 @@ select percentile_cont(0.5) within group (order by b), sum(b) from aggtest;
 (1 row)
 
 select percentile_cont(0.5) within group (order by thousand) from tenk1;
- percentile_cont 
------------------
-           499.5
-(1 row)
-
+ERROR:  relation "tenk1" does not exist
+LINE 1: ...ntile_cont(0.5) within group (order by thousand) from tenk1;
+                                                                 ^
 select percentile_disc(0.5) within group (order by thousand) from tenk1;
- percentile_disc 
------------------
-             499
-(1 row)
-
+ERROR:  relation "tenk1" does not exist
+LINE 1: ...ntile_disc(0.5) within group (order by thousand) from tenk1;
+                                                                 ^
 select rank(3) within group (order by x)
 from (values (1),(1),(2),(2),(3),(3),(4)) v(x);
  rank 
@@ -2695,25 +2366,19 @@ from (values (1),(1),(2),(2),(3),(3),(4)) v(x);
 
 select percentile_disc(array[0,0.1,0.25,0.5,0.75,0.9,1]) within group (order by thousand)
 from tenk1;
-      percentile_disc       
-----------------------------
- {0,99,249,499,749,899,999}
-(1 row)
-
+ERROR:  relation "tenk1" does not exist
+LINE 2: from tenk1;
+             ^
 select percentile_cont(array[0,0.25,0.5,0.75,1]) within group (order by thousand)
 from tenk1;
-       percentile_cont       
------------------------------
- {0,249.75,499.5,749.25,999}
-(1 row)
-
+ERROR:  relation "tenk1" does not exist
+LINE 2: from tenk1;
+             ^
 select percentile_disc(array[[null,1,0.5],[0.75,0.25,null]]) within group (order by thousand)
 from tenk1;
-         percentile_disc         
----------------------------------
- {{NULL,999,499},{749,249,NULL}}
-(1 row)
-
+ERROR:  relation "tenk1" does not exist
+LINE 2: from tenk1;
+             ^
 select percentile_cont(array[0,1,0.25,0.75,0.5,1,0.3,0.32,0.35,0.38,0.4]) within group (order by x)
 from generate_series(1,6) x;
              percentile_cont              
@@ -2722,20 +2387,9 @@ from generate_series(1,6) x;
 (1 row)
 
 select ten, mode() within group (order by string4) from tenk1 group by ten;
- ten |  mode  
------+--------
-   0 | HHHHxx
-   1 | OOOOxx
-   2 | VVVVxx
-   3 | OOOOxx
-   4 | HHHHxx
-   5 | HHHHxx
-   6 | OOOOxx
-   7 | AAAAxx
-   8 | VVVVxx
-   9 | VVVVxx
-(10 rows)
-
+ERROR:  relation "tenk1" does not exist
+LINE 1: ... ten, mode() within group (order by string4) from tenk1 grou...
+                                                             ^
 select percentile_disc(array[0.25,0.5,0.75]) within group (order by x)
 from unnest('{fred,jim,fred,jack,jill,fred,jill,jim,jim,sheila,jim,sheila}'::text[]) u(x);
  percentile_disc 
@@ -2754,17 +2408,14 @@ select pg_collation_for(percentile_disc(1) within group (order by x collate "POS
 -- ordered-set aggs created with CREATE AGGREGATE
 select test_rank(3) within group (order by x)
 from (values (1),(1),(2),(2),(3),(3),(4)) v(x);
- test_rank 
------------
-         5
-(1 row)
-
+ERROR:  function test_rank(integer, integer) does not exist
+LINE 1: select test_rank(3) within group (order by x)
+               ^
+DETAIL:  There is no function of that name.
 select test_percentile_disc(0.5) within group (order by thousand) from tenk1;
- test_percentile_disc 
-----------------------
-                  499
-(1 row)
-
+ERROR:  relation "tenk1" does not exist
+LINE 1: ...ntile_disc(0.5) within group (order by thousand) from tenk1;
+                                                                 ^
 -- ordered-set aggs can't use ungrouped vars in direct args:
 select rank(x) within group (order by x) from generate_series(1,5) x;
 ERROR:  column "x.x" must appear in the GROUP BY clause or be used in an aggregate function
@@ -2789,10 +2440,9 @@ ERROR:  WITHIN GROUP types text and integer cannot be matched
 LINE 1: select rank(3) within group (order by x) from (values ('fred...
                     ^
 select rank(3) within group (order by stringu1,stringu2) from tenk1;
-ERROR:  function rank(integer, name, name) does not exist
-LINE 1: select rank(3) within group (order by stringu1,stringu2) fro...
-               ^
-HINT:  To use the hypothetical-set aggregate rank, the number of hypothetical direct arguments (here 1) must match the number of ordering columns (here 2).
+ERROR:  relation "tenk1" does not exist
+LINE 1: ...ank(3) within group (order by stringu1,stringu2) from tenk1;
+                                                                 ^
 select rank('fred') within group (order by x) from generate_series(1,5) x;
 ERROR:  invalid input syntax for type integer: "fred"
 LINE 1: select rank('fred') within group (order by x) from generate_...
@@ -2830,71 +2480,42 @@ select ten,
        rank(5,'AZZZZ',50) within group (order by hundred, string4 desc, hundred)
   from tenk1
  group by ten order by ten;
+ERROR:  relation "tenk1" does not exist
+LINE 6:   from tenk1
+               ^
 select pg_get_viewdef('aggordview1');
-                                                  pg_get_viewdef                                                   
--------------------------------------------------------------------------------------------------------------------
-  SELECT ten,                                                                                                     +
-     percentile_disc((0.5)::double precision) WITHIN GROUP (ORDER BY thousand) AS p50,                            +
-     percentile_disc((0.5)::double precision) WITHIN GROUP (ORDER BY thousand) FILTER (WHERE (hundred = 1)) AS px,+
-     rank(5, 'AZZZZ'::name, 50) WITHIN GROUP (ORDER BY hundred, string4 DESC, hundred) AS rank                    +
-    FROM tenk1                                                                                                    +
-   GROUP BY ten                                                                                                   +
-   ORDER BY ten;
-(1 row)
-
+ERROR:  relation "aggordview1" does not exist
 select * from aggordview1 order by ten;
- ten | p50 | px  | rank 
------+-----+-----+------
-   0 | 490 |     |  101
-   1 | 491 | 401 |  101
-   2 | 492 |     |  101
-   3 | 493 |     |  101
-   4 | 494 |     |  101
-   5 | 495 |     |   67
-   6 | 496 |     |    1
-   7 | 497 |     |    1
-   8 | 498 |     |    1
-   9 | 499 |     |    1
-(10 rows)
-
+ERROR:  relation "aggordview1" does not exist
+LINE 1: select * from aggordview1 order by ten;
+                      ^
 drop view aggordview1;
+ERROR:  view "aggordview1" does not exist
 -- variadic aggregates
 select least_agg(q1,q2) from int8_tbl;
-     least_agg     
--------------------
- -4567890123456789
-(1 row)
-
+ERROR:  relation "int8_tbl" does not exist
+LINE 1: select least_agg(q1,q2) from int8_tbl;
+                                     ^
 select least_agg(variadic array[q1,q2]) from int8_tbl;
-     least_agg     
--------------------
- -4567890123456789
-(1 row)
-
+ERROR:  relation "int8_tbl" does not exist
+LINE 1: select least_agg(variadic array[q1,q2]) from int8_tbl;
+                                                     ^
 select cleast_agg(q1,q2) from int8_tbl;
-    cleast_agg     
--------------------
- -4567890123456789
-(1 row)
-
+ERROR:  relation "int8_tbl" does not exist
+LINE 1: select cleast_agg(q1,q2) from int8_tbl;
+                                      ^
 select cleast_agg(4.5,f1) from int4_tbl;
- cleast_agg  
--------------
- -2147483647
-(1 row)
-
+ERROR:  relation "int4_tbl" does not exist
+LINE 1: select cleast_agg(4.5,f1) from int4_tbl;
+                                       ^
 select cleast_agg(variadic array[4.5,f1]) from int4_tbl;
- cleast_agg  
--------------
- -2147483647
-(1 row)
-
+ERROR:  relation "int4_tbl" does not exist
+LINE 1: select cleast_agg(variadic array[4.5,f1]) from int4_tbl;
+                                                       ^
 select pg_typeof(cleast_agg(variadic array[4.5,f1])) from int4_tbl;
- pg_typeof 
------------
- numeric
-(1 row)
-
+ERROR:  relation "int4_tbl" does not exist
+LINE 1: ...pg_typeof(cleast_agg(variadic array[4.5,f1])) from int4_tbl;
+                                                              ^
 --
 -- Test SupportRequestSimplifyAggref code
 --
@@ -2976,19 +2597,9 @@ select count(not_null_col order by not_null_col) from agg_simplify;
 explain (costs off, verbose)
 select a from agg_simplify a group by a
 having exists (select 1 from onek b where count(a.not_null_col) = b.four);
-                     QUERY PLAN                      
------------------------------------------------------
- HashAggregate
-   Output: a.a
-   Group Key: a.a
-   Filter: EXISTS(SubPlan exists_1)
-   ->  Seq Scan on public.agg_simplify a
-         Output: a.a, a.not_null_col, a.nullable_col
-   SubPlan exists_1
-     ->  Seq Scan on public.onek b
-           Filter: (count(a.not_null_col) = b.four)
-(9 rows)
-
+ERROR:  relation "onek" does not exist
+LINE 3: having exists (select 1 from onek b where count(a.not_null_c...
+                                     ^
 rollback;
 -- test aggregates with common transition functions share the same states
 begin work;
@@ -3254,11 +2865,9 @@ CREATE AGGREGATE balk(int4)
     INITCOND = '0'
 );
 SELECT balk(hundred) FROM tenk1;
- balk 
-------
-     
-(1 row)
-
+ERROR:  relation "tenk1" does not exist
+LINE 1: SELECT balk(hundred) FROM tenk1;
+                                  ^
 ROLLBACK;
 -- GROUP BY optimization by reordering GROUP BY clauses
 CREATE TABLE btg AS SELECT
@@ -3522,24 +3131,15 @@ CREATE AGGREGATE balk(int4)
 );
 -- force use of parallelism
 ALTER TABLE tenk1 set (parallel_workers = 4);
+ERROR:  relation "tenk1" does not exist
 SET LOCAL parallel_setup_cost=0;
+ERROR:  current transaction is aborted, commands ignored until end of transaction block
 SET LOCAL max_parallel_workers_per_gather=4;
+ERROR:  current transaction is aborted, commands ignored until end of transaction block
 EXPLAIN (COSTS OFF) SELECT balk(hundred) FROM tenk1;
-                               QUERY PLAN                                
--------------------------------------------------------------------------
- Finalize Aggregate
-   ->  Gather
-         Workers Planned: 4
-         ->  Partial Aggregate
-               ->  Parallel Index Only Scan using tenk1_hundred on tenk1
-(5 rows)
-
+ERROR:  current transaction is aborted, commands ignored until end of transaction block
 SELECT balk(hundred) FROM tenk1;
- balk 
-------
-     
-(1 row)
-
+ERROR:  current transaction is aborted, commands ignored until end of transaction block
 ROLLBACK;
 -- test multiple usage of an aggregate whose finalfn returns a R/W datum
 BEGIN;
@@ -3595,36 +3195,15 @@ FROM (SELECT * FROM tenk1
       UNION ALL SELECT * FROM tenk1
       UNION ALL SELECT * FROM tenk1
       UNION ALL SELECT * FROM tenk1) u;
-                                                                                      QUERY PLAN                                                                                       
----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
- Finalize Aggregate
-   Output: variance(tenk1.unique1), sum((tenk1.unique1)::bigint), regr_count((tenk1.unique1)::double precision, (tenk1.unique1)::double precision)
-   ->  Gather
-         Output: (PARTIAL variance(tenk1.unique1)), (PARTIAL sum((tenk1.unique1)::bigint)), (PARTIAL regr_count((tenk1.unique1)::double precision, (tenk1.unique1)::double precision))
-         Workers Planned: 4
-         ->  Partial Aggregate
-               Output: PARTIAL variance(tenk1.unique1), PARTIAL sum((tenk1.unique1)::bigint), PARTIAL regr_count((tenk1.unique1)::double precision, (tenk1.unique1)::double precision)
-               ->  Parallel Append
-                     ->  Parallel Seq Scan on public.tenk1
-                           Output: tenk1.unique1
-                     ->  Parallel Seq Scan on public.tenk1 tenk1_1
-                           Output: tenk1_1.unique1
-                     ->  Parallel Seq Scan on public.tenk1 tenk1_2
-                           Output: tenk1_2.unique1
-                     ->  Parallel Seq Scan on public.tenk1 tenk1_3
-                           Output: tenk1_3.unique1
-(16 rows)
-
+ERROR:  relation "tenk1" does not exist
+LINE 3: FROM (SELECT * FROM tenk1
+                            ^
 SELECT variance(unique1::int4), sum(unique1::int8), regr_count(unique1::float8, unique1::float8)
 FROM (SELECT * FROM tenk1
       UNION ALL SELECT * FROM tenk1
       UNION ALL SELECT * FROM tenk1
       UNION ALL SELECT * FROM tenk1) u;
-         variance         |    sum    | regr_count 
---------------------------+-----------+------------
- 8333541.5885397134928373 | 199980000 |      40000
-(1 row)
-
+ERROR:  current transaction is aborted, commands ignored until end of transaction block
 -- variance(int8) covers numeric_combine
 -- avg(numeric) covers numeric_avg_combine
 EXPLAIN (COSTS OFF, VERBOSE)
@@ -3633,36 +3212,13 @@ FROM (SELECT * FROM tenk1
       UNION ALL SELECT * FROM tenk1
       UNION ALL SELECT * FROM tenk1
       UNION ALL SELECT * FROM tenk1) u;
-                                               QUERY PLAN                                               
---------------------------------------------------------------------------------------------------------
- Finalize Aggregate
-   Output: variance((tenk1.unique1)::bigint), avg((tenk1.unique1)::numeric)
-   ->  Gather
-         Output: (PARTIAL variance((tenk1.unique1)::bigint)), (PARTIAL avg((tenk1.unique1)::numeric))
-         Workers Planned: 4
-         ->  Partial Aggregate
-               Output: PARTIAL variance((tenk1.unique1)::bigint), PARTIAL avg((tenk1.unique1)::numeric)
-               ->  Parallel Append
-                     ->  Parallel Seq Scan on public.tenk1
-                           Output: tenk1.unique1
-                     ->  Parallel Seq Scan on public.tenk1 tenk1_1
-                           Output: tenk1_1.unique1
-                     ->  Parallel Seq Scan on public.tenk1 tenk1_2
-                           Output: tenk1_2.unique1
-                     ->  Parallel Seq Scan on public.tenk1 tenk1_3
-                           Output: tenk1_3.unique1
-(16 rows)
-
+ERROR:  current transaction is aborted, commands ignored until end of transaction block
 SELECT variance(unique1::int8), avg(unique1::numeric)
 FROM (SELECT * FROM tenk1
       UNION ALL SELECT * FROM tenk1
       UNION ALL SELECT * FROM tenk1
       UNION ALL SELECT * FROM tenk1) u;
-         variance         |          avg          
---------------------------+-----------------------
- 8333541.5885397134928373 | 4999.5000000000000000
-(1 row)
-
+ERROR:  current transaction is aborted, commands ignored until end of transaction block
 ROLLBACK;
 -- test coverage for dense_rank
 SELECT dense_rank(x) WITHIN GROUP (ORDER BY x) FROM (VALUES (1),(1),(2),(2),(3),(3)) v(x) GROUP BY (x) ORDER BY 1;
@@ -3716,58 +3272,9 @@ select unique1, count(*), sum(twothousand) from tenk1
 group by unique1
 having sum(fivethous) > 4975
 order by sum(twothousand);
- unique1 | count | sum  
----------+-------+------
-    4976 |     1 |  976
-    4977 |     1 |  977
-    4978 |     1 |  978
-    4979 |     1 |  979
-    4980 |     1 |  980
-    4981 |     1 |  981
-    4982 |     1 |  982
-    4983 |     1 |  983
-    4984 |     1 |  984
-    4985 |     1 |  985
-    4986 |     1 |  986
-    4987 |     1 |  987
-    4988 |     1 |  988
-    4989 |     1 |  989
-    4990 |     1 |  990
-    4991 |     1 |  991
-    4992 |     1 |  992
-    4993 |     1 |  993
-    4994 |     1 |  994
-    4995 |     1 |  995
-    4996 |     1 |  996
-    4997 |     1 |  997
-    4998 |     1 |  998
-    4999 |     1 |  999
-    9976 |     1 | 1976
-    9977 |     1 | 1977
-    9978 |     1 | 1978
-    9979 |     1 | 1979
-    9980 |     1 | 1980
-    9981 |     1 | 1981
-    9982 |     1 | 1982
-    9983 |     1 | 1983
-    9984 |     1 | 1984
-    9985 |     1 | 1985
-    9986 |     1 | 1986
-    9987 |     1 | 1987
-    9988 |     1 | 1988
-    9989 |     1 | 1989
-    9990 |     1 | 1990
-    9991 |     1 | 1991
-    9992 |     1 | 1992
-    9993 |     1 | 1993
-    9994 |     1 | 1994
-    9995 |     1 | 1995
-    9996 |     1 | 1996
-    9997 |     1 | 1997
-    9998 |     1 | 1998
-    9999 |     1 | 1999
-(48 rows)
-
+ERROR:  relation "tenk1" does not exist
+LINE 1: select unique1, count(*), sum(twothousand) from tenk1
+                                                        ^
 set work_mem to default;
 set enable_sort to default;
 --

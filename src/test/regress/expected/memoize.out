@@ -130,9 +130,9 @@ LATERAL (
 ) t2
 ON t1.two = t2.two
 WHERE t1.unique1 < 10;
- count |          avg           
--------+------------------------
-    20 | 0.50000000000000000000
+ count |            avg             
+-------+----------------------------
+    20 | 0.500000000000000000000000
 (1 row)
 
 -- Try with LATERAL references within PlaceHolderVars

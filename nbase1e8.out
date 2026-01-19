@@ -1,0 +1,1188 @@
+-- psql -q -f /Users/joel/numeric-test/init.sql > nbase1e8.out  0.01s user 0.01s system 0% cpu 2:08.91 total
+ setseed 
+---------
+ 
+(1 row)
+
+Time: 0.228 ms
+ndigits=1
+Time: 536.335 ms
+Time: 576.332 ms
+Time: 557.429 ms
+ndigits=2
+Time: 595.535 ms
+Time: 798.675 ms
+Time: 604.380 ms
+ndigits=3
+Time: 493.442 ms
+Time: 1053.034 ms (00:01.053)
+Time: 551.576 ms
+ndigits=4
+Time: 493.891 ms
+Time: 551.144 ms
+Time: 549.918 ms
+ndigits=5
+Time: 520.305 ms
+Time: 585.198 ms
+Time: 633.460 ms
+ndigits=6
+Time: 519.823 ms
+Time: 627.084 ms
+Time: 596.526 ms
+ndigits=7
+Time: 530.625 ms
+Time: 612.036 ms
+Time: 600.293 ms
+ndigits=8
+Time: 557.743 ms
+Time: 655.213 ms
+Time: 963.943 ms
+ndigits=9
+Time: 643.098 ms
+Time: 714.110 ms
+Time: 663.237 ms
+ndigits=10
+Time: 599.870 ms
+Time: 966.276 ms
+Time: 613.163 ms
+ndigits=100
+Time: 751.439 ms
+Time: 944.219 ms
+Time: 777.081 ms
+ndigits=1000
+Time: 346.424 ms
+Time: 439.639 ms
+Time: 392.538 ms
+ndigits=10000
+Time: 432.724 ms
+Time: 475.056 ms
+Time: 434.029 ms
+ndigits=100000
+Time: 451.130 ms
+Time: 408.584 ms
+Time: 374.816 ms
+ndigits=mixed
+Time: 4113.764 ms (00:04.114)
+Time: 4128.154 ms (00:04.128)
+Time: 4129.587 ms (00:04.130)
+add ndigits=1
+ hash_numeric 
+--------------
+   2029065326
+(1 row)
+
+Time: 85.412 ms
+ hash_numeric 
+--------------
+   2029065326
+(1 row)
+
+Time: 84.015 ms
+ hash_numeric 
+--------------
+   2029065326
+(1 row)
+
+Time: 84.613 ms
+add ndigits=2
+ hash_numeric 
+--------------
+   2029065326
+(1 row)
+
+Time: 85.678 ms
+ hash_numeric 
+--------------
+   2029065326
+(1 row)
+
+Time: 85.558 ms
+ hash_numeric 
+--------------
+   2029065326
+(1 row)
+
+Time: 85.692 ms
+add ndigits=3
+ hash_numeric 
+--------------
+   2029065326
+(1 row)
+
+Time: 82.243 ms
+ hash_numeric 
+--------------
+   2029065326
+(1 row)
+
+Time: 82.377 ms
+ hash_numeric 
+--------------
+   2029065326
+(1 row)
+
+Time: 82.797 ms
+add ndigits=4
+ hash_numeric 
+--------------
+   2029065326
+(1 row)
+
+Time: 86.063 ms
+ hash_numeric 
+--------------
+   2029065326
+(1 row)
+
+Time: 85.741 ms
+ hash_numeric 
+--------------
+   2029065326
+(1 row)
+
+Time: 85.419 ms
+add ndigits=5
+ hash_numeric 
+--------------
+   2029065326
+(1 row)
+
+Time: 87.894 ms
+ hash_numeric 
+--------------
+   2029065326
+(1 row)
+
+Time: 86.690 ms
+ hash_numeric 
+--------------
+   2029065326
+(1 row)
+
+Time: 87.858 ms
+add ndigits=6
+ hash_numeric 
+--------------
+   2029065326
+(1 row)
+
+Time: 100.709 ms
+ hash_numeric 
+--------------
+   2029065326
+(1 row)
+
+Time: 91.314 ms
+ hash_numeric 
+--------------
+   2029065326
+(1 row)
+
+Time: 91.636 ms
+add ndigits=7
+ hash_numeric 
+--------------
+   2029065326
+(1 row)
+
+Time: 889.829 ms
+ hash_numeric 
+--------------
+   2029065326
+(1 row)
+
+Time: 90.793 ms
+ hash_numeric 
+--------------
+   2029065326
+(1 row)
+
+Time: 89.871 ms
+add ndigits=8
+ hash_numeric 
+--------------
+   2029065326
+(1 row)
+
+Time: 448.224 ms
+ hash_numeric 
+--------------
+   2029065326
+(1 row)
+
+Time: 93.981 ms
+ hash_numeric 
+--------------
+   2029065326
+(1 row)
+
+Time: 94.319 ms
+add ndigits=9
+ hash_numeric 
+--------------
+   2029065326
+(1 row)
+
+Time: 507.267 ms
+ hash_numeric 
+--------------
+   2029065326
+(1 row)
+
+Time: 94.075 ms
+ hash_numeric 
+--------------
+   2029065326
+(1 row)
+
+Time: 96.730 ms
+add ndigits=10
+ hash_numeric 
+--------------
+   2029065326
+(1 row)
+
+Time: 567.496 ms
+ hash_numeric 
+--------------
+   2029065326
+(1 row)
+
+Time: 97.176 ms
+ hash_numeric 
+--------------
+   2029065326
+(1 row)
+
+Time: 97.896 ms
+add ndigits=100
+ hash_numeric 
+--------------
+   2029065326
+(1 row)
+
+Time: 1240.118 ms (00:01.240)
+ hash_numeric 
+--------------
+   2029065326
+(1 row)
+
+Time: 109.325 ms
+ hash_numeric 
+--------------
+   2029065326
+(1 row)
+
+Time: 109.344 ms
+add ndigits=1000
+ hash_numeric 
+--------------
+  -1163636014
+(1 row)
+
+Time: 990.006 ms
+ hash_numeric 
+--------------
+  -1163636014
+(1 row)
+
+Time: 33.667 ms
+ hash_numeric 
+--------------
+  -1163636014
+(1 row)
+
+Time: 33.756 ms
+add ndigits=10000
+ hash_numeric 
+--------------
+    545243654
+(1 row)
+
+Time: 306.812 ms
+ hash_numeric 
+--------------
+    545243654
+(1 row)
+
+Time: 67.754 ms
+ hash_numeric 
+--------------
+    545243654
+(1 row)
+
+Time: 57.806 ms
+add ndigits=100000
+ hash_numeric 
+--------------
+   -133393505
+(1 row)
+
+Time: 142.942 ms
+ hash_numeric 
+--------------
+   -133393505
+(1 row)
+
+Time: 183.225 ms
+ hash_numeric 
+--------------
+   -133393505
+(1 row)
+
+Time: 184.197 ms
+add ndigits=mixed
+ hash_numeric 
+--------------
+    545243654
+(1 row)
+
+Time: 181.709 ms
+ hash_numeric 
+--------------
+    545243654
+(1 row)
+
+Time: 154.627 ms
+ hash_numeric 
+--------------
+    545243654
+(1 row)
+
+Time: 154.138 ms
+sub ndigits=1
+ hash_numeric 
+--------------
+   2029065326
+(1 row)
+
+Time: 88.631 ms
+ hash_numeric 
+--------------
+   2029065326
+(1 row)
+
+Time: 86.572 ms
+ hash_numeric 
+--------------
+   2029065326
+(1 row)
+
+Time: 86.844 ms
+sub ndigits=2
+ hash_numeric 
+--------------
+   2029065326
+(1 row)
+
+Time: 87.102 ms
+ hash_numeric 
+--------------
+   2029065326
+(1 row)
+
+Time: 88.137 ms
+ hash_numeric 
+--------------
+   2029065326
+(1 row)
+
+Time: 87.038 ms
+sub ndigits=3
+ hash_numeric 
+--------------
+   2029065326
+(1 row)
+
+Time: 86.714 ms
+ hash_numeric 
+--------------
+   2029065326
+(1 row)
+
+Time: 86.073 ms
+ hash_numeric 
+--------------
+   2029065326
+(1 row)
+
+Time: 85.478 ms
+sub ndigits=4
+ hash_numeric 
+--------------
+   2029065326
+(1 row)
+
+Time: 85.551 ms
+ hash_numeric 
+--------------
+   2029065326
+(1 row)
+
+Time: 86.087 ms
+ hash_numeric 
+--------------
+   2029065326
+(1 row)
+
+Time: 86.201 ms
+sub ndigits=5
+ hash_numeric 
+--------------
+   2029065326
+(1 row)
+
+Time: 92.205 ms
+ hash_numeric 
+--------------
+   2029065326
+(1 row)
+
+Time: 91.250 ms
+ hash_numeric 
+--------------
+   2029065326
+(1 row)
+
+Time: 90.438 ms
+sub ndigits=6
+ hash_numeric 
+--------------
+   2029065326
+(1 row)
+
+Time: 90.213 ms
+ hash_numeric 
+--------------
+   2029065326
+(1 row)
+
+Time: 90.854 ms
+ hash_numeric 
+--------------
+   2029065326
+(1 row)
+
+Time: 91.885 ms
+sub ndigits=7
+ hash_numeric 
+--------------
+   2029065326
+(1 row)
+
+Time: 90.633 ms
+ hash_numeric 
+--------------
+   2029065326
+(1 row)
+
+Time: 90.787 ms
+ hash_numeric 
+--------------
+   2029065326
+(1 row)
+
+Time: 91.830 ms
+sub ndigits=8
+ hash_numeric 
+--------------
+   2029065326
+(1 row)
+
+Time: 93.940 ms
+ hash_numeric 
+--------------
+   2029065326
+(1 row)
+
+Time: 94.564 ms
+ hash_numeric 
+--------------
+   2029065326
+(1 row)
+
+Time: 93.850 ms
+sub ndigits=9
+ hash_numeric 
+--------------
+   2029065326
+(1 row)
+
+Time: 97.816 ms
+ hash_numeric 
+--------------
+   2029065326
+(1 row)
+
+Time: 98.057 ms
+ hash_numeric 
+--------------
+   2029065326
+(1 row)
+
+Time: 98.971 ms
+sub ndigits=10
+ hash_numeric 
+--------------
+   2029065326
+(1 row)
+
+Time: 96.972 ms
+ hash_numeric 
+--------------
+   2029065326
+(1 row)
+
+Time: 96.312 ms
+ hash_numeric 
+--------------
+   2029065326
+(1 row)
+
+Time: 96.326 ms
+sub ndigits=100
+ hash_numeric 
+--------------
+   2029065326
+(1 row)
+
+Time: 111.916 ms
+ hash_numeric 
+--------------
+   2029065326
+(1 row)
+
+Time: 109.359 ms
+ hash_numeric 
+--------------
+   2029065326
+(1 row)
+
+Time: 110.691 ms
+sub ndigits=1000
+ hash_numeric 
+--------------
+  -1163636014
+(1 row)
+
+Time: 29.676 ms
+ hash_numeric 
+--------------
+  -1163636014
+(1 row)
+
+Time: 31.168 ms
+ hash_numeric 
+--------------
+  -1163636014
+(1 row)
+
+Time: 29.578 ms
+sub ndigits=10000
+ hash_numeric 
+--------------
+    545243654
+(1 row)
+
+Time: 56.622 ms
+ hash_numeric 
+--------------
+    545243654
+(1 row)
+
+Time: 53.452 ms
+ hash_numeric 
+--------------
+    545243654
+(1 row)
+
+Time: 54.406 ms
+sub ndigits=100000
+ hash_numeric 
+--------------
+   -133393505
+(1 row)
+
+Time: 130.873 ms
+ hash_numeric 
+--------------
+   -133393505
+(1 row)
+
+Time: 159.023 ms
+ hash_numeric 
+--------------
+   -133393505
+(1 row)
+
+Time: 130.999 ms
+sub ndigits=mixed
+ hash_numeric 
+--------------
+    545243654
+(1 row)
+
+Time: 153.823 ms
+ hash_numeric 
+--------------
+    545243654
+(1 row)
+
+Time: 155.986 ms
+ hash_numeric 
+--------------
+    545243654
+(1 row)
+
+Time: 153.536 ms
+mul ndigits=1
+ hash_numeric 
+--------------
+   2029065326
+(1 row)
+
+Time: 81.349 ms
+ hash_numeric 
+--------------
+   2029065326
+(1 row)
+
+Time: 83.911 ms
+ hash_numeric 
+--------------
+   2029065326
+(1 row)
+
+Time: 81.773 ms
+mul ndigits=2
+ hash_numeric 
+--------------
+   2029065326
+(1 row)
+
+Time: 82.889 ms
+ hash_numeric 
+--------------
+   2029065326
+(1 row)
+
+Time: 81.652 ms
+ hash_numeric 
+--------------
+   2029065326
+(1 row)
+
+Time: 80.628 ms
+mul ndigits=3
+ hash_numeric 
+--------------
+   2029065326
+(1 row)
+
+Time: 80.330 ms
+ hash_numeric 
+--------------
+   2029065326
+(1 row)
+
+Time: 80.015 ms
+ hash_numeric 
+--------------
+   2029065326
+(1 row)
+
+Time: 79.512 ms
+mul ndigits=4
+ hash_numeric 
+--------------
+   2029065326
+(1 row)
+
+Time: 79.987 ms
+ hash_numeric 
+--------------
+   2029065326
+(1 row)
+
+Time: 81.516 ms
+ hash_numeric 
+--------------
+   2029065326
+(1 row)
+
+Time: 79.266 ms
+mul ndigits=5
+ hash_numeric 
+--------------
+   2029065326
+(1 row)
+
+Time: 85.837 ms
+ hash_numeric 
+--------------
+   2029065326
+(1 row)
+
+Time: 85.244 ms
+ hash_numeric 
+--------------
+   2029065326
+(1 row)
+
+Time: 85.330 ms
+mul ndigits=6
+ hash_numeric 
+--------------
+   2029065326
+(1 row)
+
+Time: 84.831 ms
+ hash_numeric 
+--------------
+   2029065326
+(1 row)
+
+Time: 84.561 ms
+ hash_numeric 
+--------------
+   2029065326
+(1 row)
+
+Time: 84.013 ms
+mul ndigits=7
+ hash_numeric 
+--------------
+   2029065326
+(1 row)
+
+Time: 87.988 ms
+ hash_numeric 
+--------------
+   2029065326
+(1 row)
+
+Time: 87.890 ms
+ hash_numeric 
+--------------
+   2029065326
+(1 row)
+
+Time: 87.915 ms
+mul ndigits=8
+ hash_numeric 
+--------------
+   2029065326
+(1 row)
+
+Time: 89.438 ms
+ hash_numeric 
+--------------
+   2029065326
+(1 row)
+
+Time: 88.046 ms
+ hash_numeric 
+--------------
+   2029065326
+(1 row)
+
+Time: 87.328 ms
+mul ndigits=9
+ hash_numeric 
+--------------
+   2029065326
+(1 row)
+
+Time: 98.816 ms
+ hash_numeric 
+--------------
+   2029065326
+(1 row)
+
+Time: 98.766 ms
+ hash_numeric 
+--------------
+   2029065326
+(1 row)
+
+Time: 100.241 ms
+mul ndigits=10
+ hash_numeric 
+--------------
+   2029065326
+(1 row)
+
+Time: 99.429 ms
+ hash_numeric 
+--------------
+   2029065326
+(1 row)
+
+Time: 97.062 ms
+ hash_numeric 
+--------------
+   2029065326
+(1 row)
+
+Time: 97.543 ms
+mul ndigits=100
+ hash_numeric 
+--------------
+   2029065326
+(1 row)
+
+Time: 180.942 ms
+ hash_numeric 
+--------------
+   2029065326
+(1 row)
+
+Time: 182.657 ms
+ hash_numeric 
+--------------
+   2029065326
+(1 row)
+
+Time: 181.188 ms
+mul ndigits=1000
+ hash_numeric 
+--------------
+  -1163636014
+(1 row)
+
+Time: 257.752 ms
+ hash_numeric 
+--------------
+  -1163636014
+(1 row)
+
+Time: 256.774 ms
+ hash_numeric 
+--------------
+  -1163636014
+(1 row)
+
+Time: 257.999 ms
+mul ndigits=10000
+ hash_numeric 
+--------------
+    545243654
+(1 row)
+
+Time: 2246.714 ms (00:02.247)
+ hash_numeric 
+--------------
+    545243654
+(1 row)
+
+Time: 2252.209 ms (00:02.252)
+ hash_numeric 
+--------------
+    545243654
+(1 row)
+
+Time: 2240.534 ms (00:02.241)
+mul ndigits=mixed
+ hash_numeric 
+--------------
+    545243654
+(1 row)
+
+Time: 14351.141 ms (00:14.351)
+ hash_numeric 
+--------------
+    545243654
+(1 row)
+
+Time: 14392.934 ms (00:14.393)
+ hash_numeric 
+--------------
+    545243654
+(1 row)
+
+Time: 14435.403 ms (00:14.435)
+div ndigits=1
+ hash_numeric 
+--------------
+   2029065326
+(1 row)
+
+Time: 107.270 ms
+ hash_numeric 
+--------------
+   2029065326
+(1 row)
+
+Time: 106.180 ms
+ hash_numeric 
+--------------
+   2029065326
+(1 row)
+
+Time: 104.623 ms
+div ndigits=2
+ hash_numeric 
+--------------
+   2029065326
+(1 row)
+
+Time: 105.408 ms
+ hash_numeric 
+--------------
+   2029065326
+(1 row)
+
+Time: 104.050 ms
+ hash_numeric 
+--------------
+   2029065326
+(1 row)
+
+Time: 103.041 ms
+div ndigits=3
+ hash_numeric 
+--------------
+   2029065326
+(1 row)
+
+Time: 123.953 ms
+ hash_numeric 
+--------------
+   2029065326
+(1 row)
+
+Time: 122.812 ms
+ hash_numeric 
+--------------
+   2029065326
+(1 row)
+
+Time: 124.174 ms
+div ndigits=4
+ hash_numeric 
+--------------
+   2029065326
+(1 row)
+
+Time: 124.770 ms
+ hash_numeric 
+--------------
+   2029065326
+(1 row)
+
+Time: 124.936 ms
+ hash_numeric 
+--------------
+   2029065326
+(1 row)
+
+Time: 124.519 ms
+div ndigits=5
+ hash_numeric 
+--------------
+   2029065326
+(1 row)
+
+Time: 145.388 ms
+ hash_numeric 
+--------------
+   2029065326
+(1 row)
+
+Time: 143.133 ms
+ hash_numeric 
+--------------
+   2029065326
+(1 row)
+
+Time: 142.419 ms
+div ndigits=6
+ hash_numeric 
+--------------
+   2029065326
+(1 row)
+
+Time: 143.507 ms
+ hash_numeric 
+--------------
+   2029065326
+(1 row)
+
+Time: 142.648 ms
+ hash_numeric 
+--------------
+   2029065326
+(1 row)
+
+Time: 142.526 ms
+div ndigits=7
+ hash_numeric 
+--------------
+   2029065326
+(1 row)
+
+Time: 146.297 ms
+ hash_numeric 
+--------------
+   2029065326
+(1 row)
+
+Time: 146.644 ms
+ hash_numeric 
+--------------
+   2029065326
+(1 row)
+
+Time: 144.868 ms
+div ndigits=8
+ hash_numeric 
+--------------
+   2029065326
+(1 row)
+
+Time: 145.312 ms
+ hash_numeric 
+--------------
+   2029065326
+(1 row)
+
+Time: 145.940 ms
+ hash_numeric 
+--------------
+   2029065326
+(1 row)
+
+Time: 145.785 ms
+div ndigits=9
+ hash_numeric 
+--------------
+   2029065326
+(1 row)
+
+Time: 151.412 ms
+ hash_numeric 
+--------------
+   2029065326
+(1 row)
+
+Time: 150.536 ms
+ hash_numeric 
+--------------
+   2029065326
+(1 row)
+
+Time: 151.910 ms
+div ndigits=10
+ hash_numeric 
+--------------
+   2029065326
+(1 row)
+
+Time: 150.311 ms
+ hash_numeric 
+--------------
+   2029065326
+(1 row)
+
+Time: 149.374 ms
+ hash_numeric 
+--------------
+   2029065326
+(1 row)
+
+Time: 150.707 ms
+div ndigits=100
+ hash_numeric 
+--------------
+   2029065326
+(1 row)
+
+Time: 180.008 ms
+ hash_numeric 
+--------------
+   2029065326
+(1 row)
+
+Time: 177.891 ms
+ hash_numeric 
+--------------
+   2029065326
+(1 row)
+
+Time: 180.461 ms
+div ndigits=1000
+ hash_numeric 
+--------------
+  -1163636014
+(1 row)
+
+Time: 71.998 ms
+ hash_numeric 
+--------------
+  -1163636014
+(1 row)
+
+Time: 74.560 ms
+ hash_numeric 
+--------------
+  -1163636014
+(1 row)
+
+Time: 72.924 ms
+div ndigits=10000
+ hash_numeric 
+--------------
+    545243654
+(1 row)
+
+Time: 90.718 ms
+ hash_numeric 
+--------------
+    545243654
+(1 row)
+
+Time: 89.462 ms
+ hash_numeric 
+--------------
+    545243654
+(1 row)
+
+Time: 92.153 ms
+div ndigits=100000
+ hash_numeric 
+--------------
+   -133393505
+(1 row)
+
+Time: 247.378 ms
+ hash_numeric 
+--------------
+   -133393505
+(1 row)
+
+Time: 248.309 ms
+ hash_numeric 
+--------------
+   -133393505
+(1 row)
+
+Time: 233.177 ms
+div ndigits=mixed
+ hash_numeric 
+--------------
+   1159696028
+(1 row)
+
+Time: 6267.404 ms (00:06.267)
+ hash_numeric 
+--------------
+   1159696028
+(1 row)
+
+Time: 6281.532 ms (00:06.282)
+ hash_numeric 
+--------------
+   1159696028
+(1 row)
+
+Time: 6285.712 ms (00:06.286)

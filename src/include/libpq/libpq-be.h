@@ -153,6 +153,11 @@ typedef struct Port
 	List	   *guc_options;
 
 	/*
+	 * Protocol options from _pq_.* startup packet parameters.
+	 */
+	bool		numeric_nbase_1e8;	/* Client supports NBASE=1e8 numeric format */
+
+	/*
 	 * The startup packet application name, only used here for the "connection
 	 * authorized" log message. We shouldn't use this post-startup, instead
 	 * the GUC should be used as application can change it afterward.

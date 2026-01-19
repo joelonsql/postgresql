@@ -1,0 +1,325 @@
+From 8bad5a95d8a42a05b8d0a261b4ea493bac2508cc Mon Sep 17 00:00:00 2001
+From: Joel Jacobson <joel@compiler.org>
+Date: Sun, 18 Jan 2026 07:07:53 +0100
+Subject: [PATCH 3/3] Add protocol negotiation for NBASE=1e8 numeric binary
+ format
+
+This commit implements capability negotiation for the new NBASE=1e8
+numeric binary format, allowing PG19 servers to maintain backward
+compatibility with older clients while enabling new clients to use
+the more efficient format.
+
+The solution uses the _pq_.* protocol option mechanism:
+
+- libpq now sends _pq_.numeric_nbase=1e8 in the startup packet
+- Server recognizes this option and sets port->numeric_nbase_1e8
+- numeric_send() checks this flag and sends the appropriate format:
+  - New clients (PG19+): NBASE=1e8 with int32 digits + padding byte
+  - Old clients: Converts to NBASE=1e4 with int16 digits
+
+When a PG19 libpq connects to an older server, the server returns
+NegotiateProtocolVersion listing _pq_.numeric_nbase as unrecognized.
+The client handles this gracefully and receives NBASE=1e4 format.
+
+Also fixes floor division for negative weights in the NBASE=1e4
+compatibility conversion code.
+---
+ src/backend/tcop/backend_startup.c  |  17 +++-
+ src/backend/utils/adt/numeric.c     | 153 ++++++++++++++++++++++++++--
+ src/include/libpq/libpq-be.h        |   5 +
+ src/interfaces/libpq/fe-protocol3.c |  25 ++++-
+ 4 files changed, 183 insertions(+), 17 deletions(-)
+
+diff --git a/src/backend/tcop/backend_startup.c b/src/backend/tcop/backend_startup.c
+index 94a7b839563..ed7c4678d91 100644
+--- a/src/backend/tcop/backend_startup.c
++++ b/src/backend/tcop/backend_startup.c
+@@ -779,11 +779,20 @@ ProcessStartupPacket(Port *port, bool ssl_done, bool gss_done)
+ 			{
+ 				/*
+ 				 * Any option beginning with _pq_. is reserved for use as a
+-				 * protocol-level option, but at present no such options are
+-				 * defined.
++				 * protocol-level option.
+ 				 */
+-				unrecognized_protocol_options =
+-					lappend(unrecognized_protocol_options, pstrdup(nameptr));
++				if (strcmp(nameptr, "_pq_.numeric_nbase") == 0)
++				{
++					if (strcmp(valptr, "1e8") == 0)
++						port->numeric_nbase_1e8 = true;
++					/* Silently ignore other values for forward compatibility */
++				}
++				else
++				{
++					/* Unrecognized _pq_. option */
++					unrecognized_protocol_options =
++						lappend(unrecognized_protocol_options, pstrdup(nameptr));
++				}
+ 			}
+ 			else
+ 			{
+diff --git a/src/backend/utils/adt/numeric.c b/src/backend/utils/adt/numeric.c
+index 71554a97546..ff0f35c27f7 100644
+--- a/src/backend/utils/adt/numeric.c
++++ b/src/backend/utils/adt/numeric.c
+@@ -31,6 +31,7 @@
+ #include "common/int128.h"
+ #include "funcapi.h"
+ #include "lib/hyperloglog.h"
++#include "libpq/libpq-be.h"
+ #include "libpq/pqformat.h"
+ #include "miscadmin.h"
+ #include "nodes/nodeFuncs.h"
+@@ -1218,8 +1219,113 @@ numeric_recv(PG_FUNCTION_ARGS)
+ 	PG_RETURN_NUMERIC(res);
+ }
+ 
++/*
++ * send_numeric_compat - send numeric in NBASE=1e4 format for old clients
++ *
++ * Convert internal NBASE=1e8 format to wire NBASE=1e4 format.
++ * Each internal digit (0-99999999) becomes 2 wire digits (0-9999 each).
++ */
++static void
++send_numeric_compat(StringInfo buf, const NumericVar *var)
++{
++#define COMPAT_NBASE 10000
++
++	int16	   *compat_digits;
++	int			compat_ndigits;
++	int			compat_weight;
++	int			i;
++	int			j;
++
++	/*
++	 * Handle special values (NaN, Inf) - they have no digits
++	 */
++	if (var->ndigits == 0)
++	{
++		pq_sendint16(buf, 0);	/* ndigits */
++		pq_sendint16(buf, var->weight);
++		pq_sendint16(buf, var->sign);
++		pq_sendint16(buf, var->dscale);
++		return;
++	}
++
++	/*
++	 * Allocate space for converted digits.  Each internal digit can produce
++	 * at most 2 wire digits.
++	 */
++	compat_digits = (int16 *) palloc(var->ndigits * 2 * sizeof(int16));
++
++	/*
++	 * Convert each NBASE=1e8 digit to two NBASE=1e4 digits.
++	 * For internal digit d at position i (weight W - i):
++	 *   high = d / 10000, low = d % 10000
++	 * These map to wire positions with weights (2*(W-i)+1) and (2*(W-i)).
++	 */
++	j = 0;
++	for (i = 0; i < var->ndigits; i++)
++	{
++		int32		digit = var->digits[i];
++		int16		high = digit / COMPAT_NBASE;
++		int16		low = digit % COMPAT_NBASE;
++
++		/*
++		 * Skip leading zeros, but only for the first internal digit.
++		 * After that, we must preserve the structure.
++		 */
++		if (i == 0 && high == 0)
++		{
++			/* First digit's high part is zero, skip it */
++			compat_digits[j++] = low;
++		}
++		else
++		{
++			compat_digits[j++] = high;
++			compat_digits[j++] = low;
++		}
++	}
++	compat_ndigits = j;
++
++	/*
++	 * Strip trailing zeros, but only if they don't carry significant
++	 * fractional precision (indicated by dscale).  The number of fractional
++	 * digits in NBASE=1e4 format is (weight + 1 - ndigits) * 4 from the end.
++	 * We just strip actual trailing zero digits here.
++	 */
++	while (compat_ndigits > 0 && compat_digits[compat_ndigits - 1] == 0)
++		compat_ndigits--;
++
++	/*
++	 * Calculate the weight in NBASE=1e4 terms.
++	 * If the first internal digit's high part was non-zero:
++	 *   compat_weight = 2 * var->weight + 1
++	 * If the first internal digit's high part was zero:
++	 *   compat_weight = 2 * var->weight
++	 */
++	if (var->ndigits > 0 && var->digits[0] >= COMPAT_NBASE)
++		compat_weight = 2 * var->weight + 1;
++	else
++		compat_weight = 2 * var->weight;
++
++	/* Send the header */
++	pq_sendint16(buf, compat_ndigits);
++	pq_sendint16(buf, compat_weight);
++	pq_sendint16(buf, var->sign);
++	pq_sendint16(buf, var->dscale);
++
++	/* Send int16 digits (NBASE=1e4 format) */
++	for (i = 0; i < compat_ndigits; i++)
++		pq_sendint16(buf, compat_digits[i]);
++
++	pfree(compat_digits);
++
++#undef COMPAT_NBASE
++}
++
+ /*
+  *		numeric_send			- converts numeric to binary format
++ *
++ * By default, sends NBASE=1e4 format for backward compatibility with
++ * older clients.  If the client indicated support for NBASE=1e8 via
++ * the _pq_.numeric_nbase startup parameter, sends the new format.
+  */
+ Datum
+ numeric_send(PG_FUNCTION_ARGS)
+@@ -1227,24 +1333,40 @@ numeric_send(PG_FUNCTION_ARGS)
+ 	Numeric		num = PG_GETARG_NUMERIC(0);
+ 	NumericVar	x;
+ 	StringInfoData buf;
++	bool		use_new_format;
+ 	int			i;
+ 
++	/*
++	 * Check if client supports NBASE=1e8 format.  Default to old format
++	 * for backward compatibility.  MyProcPort may be NULL in some contexts
++	 * (e.g., during bootstrap or in background workers without a client).
++	 */
++	use_new_format = (MyProcPort != NULL && MyProcPort->numeric_nbase_1e8);
++
+ 	init_var_from_num(num, &x);
+ 
+ 	pq_begintypsend(&buf);
+ 
+-	pq_sendint16(&buf, x.ndigits);
+-	pq_sendint16(&buf, x.weight);
+-	pq_sendint16(&buf, x.sign);
+-	pq_sendint16(&buf, x.dscale);
++	if (use_new_format)
++	{
++		/* Send NBASE=1e8 format with int32 digits */
++		pq_sendint16(&buf, x.ndigits);
++		pq_sendint16(&buf, x.weight);
++		pq_sendint16(&buf, x.sign);
++		pq_sendint16(&buf, x.dscale);
+ 
+-	/* Send int32 digits (NBASE=1e8) */
+-	for (i = 0; i < x.ndigits; i++)
+-		pq_sendint32(&buf, x.digits[i]);
++		for (i = 0; i < x.ndigits; i++)
++			pq_sendint32(&buf, x.digits[i]);
+ 
+-	/* Add padding byte to make digit byte count odd (signals NBASE=1e8) */
+-	if (x.ndigits > 0)
+-		pq_sendint8(&buf, 0);
++		/* Add padding byte to make digit byte count odd (signals NBASE=1e8) */
++		if (x.ndigits > 0)
++			pq_sendint8(&buf, 0);
++	}
++	else
++	{
++		/* Send NBASE=1e4 format for backward compatibility */
++		send_numeric_compat(&buf, &x);
++	}
+ 
+ 	PG_RETURN_BYTEA_P(pq_endtypsend(&buf));
+ }
+@@ -7324,7 +7446,16 @@ convert_from_nbase_compat(NumericVar *dest,
+ 		return;
+ 	}
+ 
+-	dest->weight = compat_weight / 2;
++	/*
++	 * Calculate internal weight using floor division.  C's integer division
++	 * truncates toward zero, but we need floor division for correct handling
++	 * of negative weights.  For example, compat_weight=-1 should give
++	 * internal weight=-1, not 0.
++	 */
++	if (compat_weight >= 0)
++		dest->weight = compat_weight / 2;
++	else
++		dest->weight = (compat_weight - 1) / 2;
+ 
+ 	if (compat_weight % 2 == 1 || compat_weight % 2 == -1)
+ 	{
+diff --git a/src/include/libpq/libpq-be.h b/src/include/libpq/libpq-be.h
+index 921b2daa4ff..49caf0f7aca 100644
+--- a/src/include/libpq/libpq-be.h
++++ b/src/include/libpq/libpq-be.h
+@@ -152,6 +152,11 @@ typedef struct Port
+ 	char	   *cmdline_options;
+ 	List	   *guc_options;
+ 
++	/*
++	 * Protocol options from _pq_.* startup packet parameters.
++	 */
++	bool		numeric_nbase_1e8;	/* Client supports NBASE=1e8 numeric format */
++
+ 	/*
+ 	 * The startup packet application name, only used here for the "connection
+ 	 * authorized" log message. We shouldn't use this post-startup, instead
+diff --git a/src/interfaces/libpq/fe-protocol3.c b/src/interfaces/libpq/fe-protocol3.c
+index 34518bbe6ea..ad0ec257908 100644
+--- a/src/interfaces/libpq/fe-protocol3.c
++++ b/src/interfaces/libpq/fe-protocol3.c
+@@ -1499,8 +1499,9 @@ pqGetNegotiateProtocolVersion3(PGconn *conn)
+ 	conn->pversion = their_version;
+ 
+ 	/*
+-	 * We don't currently request any protocol extensions, so we don't expect
+-	 * the server to reply with any either.
++	 * Process any protocol options that the server doesn't recognize.
++	 * We currently request _pq_.numeric_nbase, which older servers won't
++	 * understand - that's fine, they'll just send the old format.
+ 	 */
+ 	for (int i = 0; i < num; i++)
+ 	{
+@@ -1513,6 +1514,19 @@ pqGetNegotiateProtocolVersion3(PGconn *conn)
+ 			libpq_append_conn_error(conn, "received invalid protocol negotiation message: server reported unsupported parameter name without a \"%s\" prefix (\"%s\")", "_pq_.", conn->workBuffer.data);
+ 			goto failure;
+ 		}
++
++		/*
++		 * Check if this is an option we actually requested.  Currently
++		 * we only request _pq_.numeric_nbase, which older servers won't
++		 * understand.  That's okay - we'll just receive the old format.
++		 */
++		if (strcmp(conn->workBuffer.data, "_pq_.numeric_nbase") == 0)
++		{
++			/* Server doesn't support NBASE=1e8, will send NBASE=1e4 */
++			continue;
++		}
++
++		/* Unknown option that we didn't request - this is an error */
+ 		libpq_append_conn_error(conn, "received invalid protocol negotiation message: server reported an unsupported parameter that was not requested (\"%s\")", conn->workBuffer.data);
+ 		goto failure;
+ 	}
+@@ -2464,6 +2478,13 @@ build_startup_packet(const PGconn *conn, char *packet,
+ 	if (conn->client_encoding_initial && conn->client_encoding_initial[0])
+ 		ADD_STARTUP_OPTION("client_encoding", conn->client_encoding_initial);
+ 
++	/*
++	 * Request NBASE=1e8 numeric binary format.  If the server doesn't
++	 * recognize this option, it will return NegotiateProtocolVersion
++	 * listing it as unrecognized, and will send NBASE=1e4 format.
++	 */
++	ADD_STARTUP_OPTION("_pq_.numeric_nbase", "1e8");
++
+ 	/* Add any environment-driven GUC settings needed */
+ 	for (next_eo = options; next_eo->envName; next_eo++)
+ 	{
+-- 
+2.50.1
+
