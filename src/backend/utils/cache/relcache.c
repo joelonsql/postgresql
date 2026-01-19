@@ -59,6 +59,7 @@
 #include "catalog/pg_shseclabel.h"
 #include "catalog/pg_statistic_ext.h"
 #include "catalog/pg_subscription.h"
+#include "catalog/pg_role_pubkeys.h"
 #include "catalog/pg_tablespace.h"
 #include "catalog/pg_trigger.h"
 #include "catalog/pg_type.h"
@@ -118,6 +119,7 @@ static const FormData_pg_attribute Desc_pg_auth_members[Natts_pg_auth_members] =
 static const FormData_pg_attribute Desc_pg_index[Natts_pg_index] = {Schema_pg_index};
 static const FormData_pg_attribute Desc_pg_shseclabel[Natts_pg_shseclabel] = {Schema_pg_shseclabel};
 static const FormData_pg_attribute Desc_pg_subscription[Natts_pg_subscription] = {Schema_pg_subscription};
+static const FormData_pg_attribute Desc_pg_role_pubkeys[Natts_pg_role_pubkeys] = {Schema_pg_role_pubkeys};
 
 /*
  *		Hash tables that index the relation cache
@@ -4077,8 +4079,10 @@ RelationCacheInitializePhase2(void)
 				  Natts_pg_shseclabel, Desc_pg_shseclabel);
 		formrdesc("pg_subscription", SubscriptionRelation_Rowtype_Id, true,
 				  Natts_pg_subscription, Desc_pg_subscription);
+		formrdesc("pg_role_pubkeys", RolePubkeysRelation_Rowtype_Id, true,
+				  Natts_pg_role_pubkeys, Desc_pg_role_pubkeys);
 
-#define NUM_CRITICAL_SHARED_RELS	5	/* fix if you change list above */
+#define NUM_CRITICAL_SHARED_RELS	6	/* fix if you change list above */
 	}
 
 	MemoryContextSwitchTo(oldcxt);
@@ -4217,8 +4221,10 @@ RelationCacheInitializePhase3(void)
 							AuthMemRelationId);
 		load_critical_index(SharedSecLabelObjectIndexId,
 							SharedSecLabelRelationId);
+		load_critical_index(RolePubkeysRoleidIndexId,
+							RolePubkeysRelationId);
 
-#define NUM_CRITICAL_SHARED_INDEXES 6	/* fix if you change list above */
+#define NUM_CRITICAL_SHARED_INDEXES 7	/* fix if you change list above */
 
 		criticalSharedRelcachesBuilt = true;
 	}

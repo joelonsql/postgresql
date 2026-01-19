@@ -27,6 +27,7 @@
 #include "common/ip.h"
 #include "common/md5.h"
 #include "libpq/auth.h"
+#include "libpq/auth-fido2.h"
 #include "libpq/crypt.h"
 #include "libpq/libpq.h"
 #include "libpq/oauth.h"
@@ -300,6 +301,9 @@ auth_failed(Port *port, int status, const char *logdetail)
 			break;
 		case uaOAuth:
 			errstr = gettext_noop("OAuth bearer authentication failed for user \"%s\"");
+			break;
+		case uaFIDO2:
+			errstr = gettext_noop("FIDO2 authentication failed for user \"%s\"");
 			break;
 		default:
 			errstr = gettext_noop("authentication failed for user \"%s\": invalid authentication method");
@@ -626,6 +630,9 @@ ClientAuthentication(Port *port)
 			break;
 		case uaOAuth:
 			status = CheckSASLAuth(&pg_be_oauth_mech, port, NULL, NULL);
+			break;
+		case uaFIDO2:
+			status = CheckSASLAuth(&pg_be_fido2_mech, port, NULL, &logdetail);
 			break;
 	}
 

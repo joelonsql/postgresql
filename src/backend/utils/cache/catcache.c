@@ -1324,6 +1324,8 @@ IndexScanOK(CatCache *cache)
 		case AUTHOID:
 		case AUTHMEMMEMROLE:
 		case DATABASEOID:
+		case ROLEPUBKEYSOID:
+		case ROLEPUBKEYSROLEID:
 
 			/*
 			 * Protect authentication lookups occurring before relcache has

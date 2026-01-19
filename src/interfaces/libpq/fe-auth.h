@@ -33,4 +33,7 @@ extern char *pg_fe_scram_build_secret(const char *password,
 									  int iterations,
 									  const char **errstr);
 
+/* Mechanisms in fe-auth-fido2.c */
+extern const pg_fe_sasl_mech pg_fido2_mech;
+
 #endif							/* FE_AUTH_H */

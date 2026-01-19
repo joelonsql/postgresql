@@ -274,6 +274,13 @@ Section: Class 28 - Invalid Authorization Specification
 28000    E    ERRCODE_INVALID_AUTHORIZATION_SPECIFICATION                    invalid_authorization_specification
 28P01    E    ERRCODE_INVALID_PASSWORD                                       invalid_password
 
+# FIDO2/WebAuthn authentication errors
+28F00    E    ERRCODE_FIDO2_ERROR                                            fido2_error
+28F01    E    ERRCODE_FIDO2_NO_DEVICE                                        fido2_no_device
+28F02    E    ERRCODE_FIDO2_TIMEOUT                                          fido2_timeout
+28F03    E    ERRCODE_FIDO2_NO_CREDENTIALS                                   fido2_no_credentials
+28F04    E    ERRCODE_FIDO2_SIGN_COUNT_INVALID                               fido2_sign_count_invalid
+
 Section: Class 2B - Dependent Privilege Descriptors Still Exist
 
 2B000    E    ERRCODE_DEPENDENT_PRIVILEGE_DESCRIPTORS_STILL_EXIST            dependent_privilege_descriptors_still_exist
