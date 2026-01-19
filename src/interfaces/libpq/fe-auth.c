@@ -46,6 +46,7 @@
 #include "fe-auth-sasl.h"
 #include "fe-auth-oauth.h"
 #include "libpq-fe.h"
+#include "libpq/skauth.h"
 
 #ifdef ENABLE_GSS
 /*
@@ -542,6 +543,13 @@ pg_SASL_init(PGconn *conn, int payloadlen, bool *async)
 		{
 			selected_mechanism = OAUTHBEARER_NAME;
 			conn->sasl = &pg_oauth_mech;
+			conn->password_needed = false;
+		}
+		else if (strcmp(mechanism_buf.data, SKAUTH_MECHANISM_NAME) == 0 &&
+				 !selected_mechanism)
+		{
+			selected_mechanism = SKAUTH_MECHANISM_NAME;
+			conn->sasl = &pg_skauth_mech;
 			conn->password_needed = false;
 		}
 	}

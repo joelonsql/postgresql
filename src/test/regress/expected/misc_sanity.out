@@ -67,7 +67,9 @@ ORDER BY 1, 2;
  pg_largeobject          | data          | bytea
  pg_largeobject_metadata | lomacl        | aclitem[]
  pg_replication_origin   | roname        | text
-(11 rows)
+ pg_role_pubkeys         | credential_id | bytea
+ pg_role_pubkeys         | public_key    | bytea
+(13 rows)
 
 -- system catalogs without primary keys
 --

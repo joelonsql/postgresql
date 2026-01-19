@@ -27,6 +27,9 @@
 #include "common/ip.h"
 #include "common/md5.h"
 #include "libpq/auth.h"
+#ifdef USE_OPENSSL
+#include "libpq/auth-skauth.h"
+#endif
 #include "libpq/crypt.h"
 #include "libpq/libpq.h"
 #include "libpq/oauth.h"
@@ -300,6 +303,9 @@ auth_failed(Port *port, int status, const char *logdetail)
 			break;
 		case uaOAuth:
 			errstr = gettext_noop("OAuth bearer authentication failed for user \"%s\"");
+			break;
+		case uaSkauth:
+			errstr = gettext_noop("sk-provider authentication failed for user \"%s\"");
 			break;
 		default:
 			errstr = gettext_noop("authentication failed for user \"%s\": invalid authentication method");
@@ -627,6 +633,11 @@ ClientAuthentication(Port *port)
 		case uaOAuth:
 			status = CheckSASLAuth(&pg_be_oauth_mech, port, NULL, NULL);
 			break;
+#ifdef USE_OPENSSL
+		case uaSkauth:
+			status = CheckSASLAuth(&pg_be_skauth_mech, port, NULL, &logdetail);
+			break;
+#endif
 	}
 
 	if ((status == STATUS_OK && port->hba->clientcert == clientCertFull)

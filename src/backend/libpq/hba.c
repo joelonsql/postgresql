@@ -117,6 +117,7 @@ static const char *const UserAuthName[] =
 	"radius",
 	"peer",
 	"oauth",
+	"skauth",
 };
 
 /*
@@ -1748,6 +1749,12 @@ parse_hba_line(TokenizedAuthLine *tok_line, int elevel)
 		parsedline->auth_method = uaRADIUS;
 	else if (strcmp(token->string, "oauth") == 0)
 		parsedline->auth_method = uaOAuth;
+	else if (strcmp(token->string, "skauth") == 0)
+#ifdef USE_OPENSSL
+		parsedline->auth_method = uaSkauth;
+#else
+		unsupauth = "skauth";
+#endif
 	else
 	{
 		ereport(elevel,

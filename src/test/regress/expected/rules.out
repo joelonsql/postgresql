@@ -1335,6 +1335,16 @@ pg_backend_memory_contexts| SELECT name,
 pg_config| SELECT name,
     setting
    FROM pg_config() pg_config(name, setting);
+pg_credentials| SELECT r.rolname,
+    p.key_name AS credential_name,
+        CASE p.algorithm
+            WHEN '-7'::integer THEN 'ES256'::text
+            ELSE 'unknown'::text
+        END AS algorithm,
+    p.enrolled_at,
+    r.oid AS roleid
+   FROM (pg_role_pubkeys p
+     JOIN pg_authid r ON ((p.roleid = r.oid)));
 pg_cursors| SELECT name,
     statement,
     is_holdable,

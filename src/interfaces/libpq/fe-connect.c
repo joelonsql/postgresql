@@ -416,6 +416,23 @@ static const internalPQconninfoOption PQconninfoOptions[] = {
 		"SSL-Key-Log-File", "D", 64,
 	offsetof(struct pg_conn, sslkeylogfile)},
 
+	/* sk-provider security key authentication */
+	{"sk_provider", "PGSKPROVIDER", NULL, NULL,
+		"Security-Key-Provider", "", 128,
+	offsetof(struct pg_conn, sk_provider)},
+
+	{"skauth_device", "PGSKAUTHDEVICE", NULL, NULL,
+		"Skauth-Device", "", 64,
+	offsetof(struct pg_conn, skauth_device)},
+
+	{"skauth_pin", "PGSKAUTHPIN", NULL, NULL,
+		"Skauth-PIN", "*", 64,
+	offsetof(struct pg_conn, skauth_pin)},
+
+	{"skauth_credential", "PGSKAUTHCREDENTIAL", NULL, NULL,
+		"Skauth-Credential", "", 256,
+	offsetof(struct pg_conn, skauth_credential)},
+
 	/* Terminating entry --- MUST BE LAST */
 	{NULL, NULL, NULL, NULL,
 	NULL, NULL, 0}
@@ -443,6 +460,7 @@ static const pg_fe_sasl_mech *supported_sasl_mechs[] =
 {
 	&pg_scram_mech,
 	&pg_oauth_mech,
+	&pg_skauth_mech,
 };
 #define SASL_MECHANISM_COUNT lengthof(supported_sasl_mechs)
 
