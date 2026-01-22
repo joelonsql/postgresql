@@ -15,6 +15,7 @@
 
 #include "postgres.h"
 
+#include "access/genam.h"
 #include "access/htup_details.h"
 #include "access/table.h"
 #include "access/xact.h"
@@ -59,7 +60,8 @@ static RangeTblEntry *drill_down_to_base_rel_query(ParseState *pstate, Query *qu
 static bool check_group_by_preserves_uniqueness(Query *query, List **uniqueness_preservation);
 static bool check_unique_index_covers_columns(Relation rel, Bitmapset *columns);
 static bool is_referencing_cols_unique(Oid referencing_relid, List *referencing_base_attnums);
-static bool is_referencing_cols_not_null(Oid referencing_relid, List *referencing_base_attnums);
+static bool is_referencing_cols_not_null(Oid referencing_relid, List *referencing_base_attnums,
+										 List **notNullConstraints);
 static List *update_uniqueness_preservation(List *referencing_uniqueness_preservation,
 											List *referenced_uniqueness_preservation,
 											RTEId *referencing_id,
@@ -115,6 +117,7 @@ transformAndValidateForeignKeyJoin(ParseState *pstate, JoinExpr *join,
 	bool		referencing_found = false;
 	bool		referenced_found = false;
 	bool		referenced_is_base_table = false;
+	List	   *notNullConstraints = NIL;
 
 	foreach(lc, l_namespace)
 	{
@@ -340,6 +343,19 @@ transformAndValidateForeignKeyJoin(ParseState *pstate, JoinExpr *join,
 
 	join->quals = build_fk_join_on_clause(pstate, referencing_rel->p_nscolumns, referencing_attnums, referenced_rel->p_nscolumns, referenced_attnums);
 
+	/*
+	 * For inner joins (and the inner side of outer joins in certain
+	 * configurations), the row preservation guarantee depends on the
+	 * referencing columns being NOT NULL.  Collect the NOT NULL constraint
+	 * OIDs so we can record dependencies on them.
+	 */
+	if (join->jointype == JOIN_INNER)
+	{
+		(void) is_referencing_cols_not_null(referencing_relid,
+											referencing_base_attnums,
+											&notNullConstraints);
+	}
+
 	fkjn_node = makeNode(ForeignKeyJoinNode);
 	fkjn_node->fkdir = fkjn->fkdir;
 	fkjn_node->referencingVarno = referencing_rel->p_rtindex;
@@ -347,6 +363,7 @@ transformAndValidateForeignKeyJoin(ParseState *pstate, JoinExpr *join,
 	fkjn_node->referencedVarno = referenced_rel->p_rtindex;
 	fkjn_node->referencedAttnums = referenced_attnums;
 	fkjn_node->constraint = fkoid;
+	fkjn_node->notNullConstraints = notNullConstraints;
 
 	join->fkJoin = (Node *) fkjn_node;
 }
@@ -427,7 +444,7 @@ analyze_join_tree(ParseState *pstate, Node *n,
 				referenced_id = base_referenced_rte->rteid;
 
 				fk_cols_unique = is_referencing_cols_unique(referencing_relid, referencing_base_attnums);
-				fk_cols_not_null = is_referencing_cols_not_null(referencing_relid, referencing_base_attnums);
+				fk_cols_not_null = is_referencing_cols_not_null(referencing_relid, referencing_base_attnums, NULL);
 
 				*uniqueness_preservation = update_uniqueness_preservation(
 																		  referencing_uniqueness_preservation,
@@ -1468,14 +1485,20 @@ is_referencing_cols_unique(Oid referencing_relid, List *referencing_base_attnums
  * This function checks if each column in the foreign key has a NOT NULL
  * constraint, which is important for correct join semantics and for
  * preserving functional dependencies across joins.
+ *
+ * If notNullConstraints is not NULL, the function also collects the OIDs
+ * of the NOT NULL constraints for each column that has one. This is used
+ * to establish dependencies on those constraints.
  */
 static bool
-is_referencing_cols_not_null(Oid referencing_relid, List *referencing_base_attnums)
+is_referencing_cols_not_null(Oid referencing_relid, List *referencing_base_attnums,
+							 List **notNullConstraints)
 {
 	Relation	rel;
 	TupleDesc	tupdesc;
 	ListCell   *lc;
 	bool		all_not_null = true;
+	List	   *constraints = NIL;
 
 	/* Open the relation to get its tuple descriptor */
 	rel = table_open(referencing_relid, AccessShareLock);
@@ -1496,10 +1519,40 @@ is_referencing_cols_not_null(Oid referencing_relid, List *referencing_base_attnu
 			all_not_null = false;
 			break;
 		}
+
+		/*
+		 * If requested, look up the NOT NULL constraint OID for this column.
+		 * We only do this if all columns so far have been NOT NULL.
+		 */
+		if (notNullConstraints != NULL)
+		{
+			HeapTuple	conTup;
+
+			conTup = findNotNullConstraintAttnum(referencing_relid, attnum);
+			if (HeapTupleIsValid(conTup))
+			{
+				Form_pg_constraint con = (Form_pg_constraint) GETSTRUCT(conTup);
+
+				constraints = lappend_oid(constraints, con->oid);
+				heap_freetuple(conTup);
+			}
+		}
 	}
 
 	/* Close the relation */
 	table_close(rel, AccessShareLock);
+
+	/* Return the collected constraint OIDs if all columns are NOT NULL */
+	if (notNullConstraints != NULL)
+	{
+		if (all_not_null)
+			*notNullConstraints = constraints;
+		else
+		{
+			list_free(constraints);
+			*notNullConstraints = NIL;
+		}
+	}
 
 	return all_not_null;
 }

@@ -2310,6 +2310,7 @@ typedef struct ForeignKeyJoinNode
 	Index		referencedVarno;	/* varno of the referenced relation */
 	List	   *referencedAttnums;	/* List of attribute numbers (int) */
 	Oid			constraint;		/* pg_constraint OID foreign key */
+	List	   *notNullConstraints; /* List of NOT NULL constraint OIDs (Oid) */
 } ForeignKeyJoinNode;
 
 /*----------

@@ -2233,9 +2233,20 @@ find_expr_references_walker(Node *node,
 		if (join->fkJoin)
 		{
 			ForeignKeyJoinNode *fkjoin = castNode(ForeignKeyJoinNode, join->fkJoin);
+			ListCell   *lc;
 
+			/* Dependency on the foreign key constraint */
 			add_object_address(ConstraintRelationId, fkjoin->constraint, 0,
 							   context->addrs);
+
+			/* Dependencies on NOT NULL constraints for row preservation */
+			foreach(lc, fkjoin->notNullConstraints)
+			{
+				Oid			notNullOid = lfirst_oid(lc);
+
+				add_object_address(ConstraintRelationId, notNullOid, 0,
+								   context->addrs);
+			}
 		}
 		/* fall through to examine substructure */
 	}

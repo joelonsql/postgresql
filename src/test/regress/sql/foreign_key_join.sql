@@ -695,6 +695,42 @@ FROM orders AS o
 JOIN customer_details AS cd FOR KEY (customer_id) <- o (customer_id)
 GROUP BY ROLLUP (cd.country_code);
 
+-- Test NOT NULL constraint dependency: should error because customer_details
+-- (and transitively orders_by_country) depends on address_id being NOT NULL
+ALTER TABLE customers ALTER COLUMN address_id DROP NOT NULL;
+
+-- Replace customer_details with LEFT JOIN version - no NOT NULL dependency
+CREATE OR REPLACE VIEW customer_details AS
+SELECT
+    c.id AS customer_id,
+    c.name AS customer_name,
+    a.street,
+    a.city,
+    a.state,
+    a.country_code,
+    a.zip_code
+FROM customers AS c
+LEFT JOIN addresses AS a FOR KEY (id) <- c (address_id);
+
+-- Now DROP NOT NULL should succeed
+ALTER TABLE customers ALTER COLUMN address_id DROP NOT NULL;
+
+-- Restore NOT NULL for subsequent tests
+ALTER TABLE customers ALTER COLUMN address_id SET NOT NULL;
+
+-- Restore customer_details to inner join version
+CREATE OR REPLACE VIEW customer_details AS
+SELECT
+    c.id AS customer_id,
+    c.name AS customer_name,
+    a.street,
+    a.city,
+    a.state,
+    a.country_code,
+    a.zip_code
+FROM customers AS c
+JOIN addresses AS a FOR KEY (id) <- c (address_id);
+
 CREATE TABLE customer_addresses
 (
     customer_id INTEGER NOT NULL,
@@ -1036,3 +1072,4 @@ FROM
 -- JOIN referenced_table FOR KEY (fk_col) -> referenced_table (pk_col);
 -- This would be safe because both tables filter by the same tenant_id condition.
 --
+

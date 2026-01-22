@@ -17,6 +17,7 @@
 #include "access/htup_details.h"
 #include "access/relation.h"
 #include "access/table.h"
+#include "access/genam.h"
 #include "access/xact.h"
 #include "catalog/namespace.h"
 #include "catalog/pg_depend.h"
