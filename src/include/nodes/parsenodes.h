@@ -1319,6 +1319,16 @@ typedef struct RangeTblEntry
 
 	/* globally unique identifier assigned to RTE instances of base relations */
 	RTEId	   *rteid pg_node_attr(equal_ignore, query_jumble_ignore);
+
+	/*
+	 * Foreign Key Join analysis results (else NIL):
+	 * uniquenessPreservation is a list of RTEId* indicating which base tables
+	 * have their uniqueness preserved through the join tree rooted at this RTE.
+	 * functionalDependencies is a list of RTEId* pairs (dependent, determinant)
+	 * indicating functional dependencies discovered through FK joins.
+	 */
+	List	   *uniquenessPreservation pg_node_attr(equal_ignore, query_jumble_ignore);
+	List	   *functionalDependencies pg_node_attr(equal_ignore, query_jumble_ignore);
 } RangeTblEntry;
 
 /*

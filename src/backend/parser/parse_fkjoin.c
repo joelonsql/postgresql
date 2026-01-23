@@ -289,6 +289,20 @@ transformAndValidateForeignKeyJoin(ParseState *pstate, JoinExpr *join,
 	/* Only analyze referenced side for derived tables - base tables always preserve uniqueness/rows */
 	if (!referenced_is_base_table)
 		analyze_join_tree(pstate, referenced_arg, NULL, referenced_rte->rteid, &referenced_uniqueness_preservation, &referenced_functional_dependencies, &referenced_found, fkjn->location, NULL);
+	else
+	{
+		/*
+		 * For base table referenced relations, set self-referential values.
+		 * Base tables inherently preserve their own uniqueness and all rows.
+		 * These values are needed for propagation to JOIN RTEs.
+		 */
+		referenced_uniqueness_preservation = list_make1(referenced_id);
+		referenced_functional_dependencies = list_make2(referenced_id, referenced_id);
+
+		/* Also store on the referenced RTE itself */
+		referenced_rte->uniquenessPreservation = referenced_uniqueness_preservation;
+		referenced_rte->functionalDependencies = referenced_functional_dependencies;
+	}
 
 	/*
 	 * Check uniqueness preservation - only for derived tables.
@@ -462,6 +476,13 @@ analyze_join_tree(ParseState *pstate, Node *n,
 																		  fkjn->fkdir
 					);
 
+				/* Store accumulated values on the JOIN RTE */
+				{
+					RangeTblEntry *join_rte = rt_fetch(join->rtindex, rtable);
+					join_rte->uniquenessPreservation = *uniqueness_preservation;
+					join_rte->functionalDependencies = *functional_dependencies;
+				}
+
 				/* Set found based on whether rte_id was in either subtree or matches either relation */
 				if (referencing_found || referenced_found ||
 					equal(referencing_rte->rteid, rte_id) || equal(referenced_rte->rteid, rte_id))
@@ -510,6 +531,10 @@ analyze_join_tree(ParseState *pstate, Node *n,
 											   !query->limitCount &&
 											   !query->havingQual))
 									*functional_dependencies = list_make2(rte->rteid, rte->rteid);
+
+								/* Store self-referential values on the base table RTE */
+								rte->uniquenessPreservation = *uniqueness_preservation;
+								rte->functionalDependencies = *functional_dependencies;
 							}
 
 							/* Close the relation */
