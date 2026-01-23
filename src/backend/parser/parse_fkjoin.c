@@ -481,6 +481,8 @@ analyze_join_tree(ParseState *pstate, Node *n,
 					RangeTblEntry *join_rte = rt_fetch(join->rtindex, rtable);
 					join_rte->uniquenessPreservation = *uniqueness_preservation;
 					join_rte->functionalDependencies = *functional_dependencies;
+					join_rte->fkColsUnique = fk_cols_unique;
+					join_rte->fkColsNotNull = fk_cols_not_null;
 				}
 
 				/* Set found based on whether rte_id was in either subtree or matches either relation */

@@ -1329,6 +1329,14 @@ typedef struct RangeTblEntry
 	 */
 	List	   *uniquenessPreservation pg_node_attr(equal_ignore, query_jumble_ignore);
 	List	   *functionalDependencies pg_node_attr(equal_ignore, query_jumble_ignore);
+
+	/*
+	 * For RTE_JOIN entries representing foreign key joins:
+	 * fkColsUnique indicates whether the FK columns have a unique constraint.
+	 * fkColsNotNull indicates whether all FK columns have NOT NULL constraints.
+	 */
+	bool		fkColsUnique pg_node_attr(equal_ignore, query_jumble_ignore);
+	bool		fkColsNotNull pg_node_attr(equal_ignore, query_jumble_ignore);
 } RangeTblEntry;
 
 /*
