@@ -42,7 +42,7 @@
 #include "utils/memutils.h"
 
 #ifdef USE_OPENSSL
-/* SASL mechanism for ssh-sk authentication (from auth-skauth.c) */
+/* SASL mechanism for skauth authentication (from auth-skauth.c) */
 extern PGDLLIMPORT const pg_be_sasl_mech pg_be_skauth_mech;
 #endif
 

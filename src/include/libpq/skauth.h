@@ -1,6 +1,6 @@
 /*-------------------------------------------------------------------------
  * skauth.h
- *	  Definitions for ssh-sk authentication (client and server)
+ *	  Definitions for skauth authentication (client and server)
  *
  * Portions Copyright (c) 1996-2026, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
@@ -16,7 +16,7 @@
 #include <stddef.h>
 
 /* SASL mechanism name */
-#define SKAUTH_MECHANISM_NAME	"ssh-sk"
+#define SKAUTH_MECHANISM_NAME	"SKAUTH"
 
 /* Hardcoded RP ID for SSH security keys */
 #define SKAUTH_RP_ID			"ssh:"

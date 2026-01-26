@@ -1,6 +1,6 @@
 /*-------------------------------------------------------------------------
  * fe-auth-skauth.c
- *	  Client-side ssh-sk SASL authentication using OpenSSH sk-api
+ *	  Client-side skauth SASL authentication using OpenSSH sk-api
  *
  * Portions Copyright (c) 1996-2026, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
