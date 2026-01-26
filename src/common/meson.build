@@ -10,6 +10,7 @@ common_sources = files(
   'controldata_utils.c',
   'encnames.c',
   'exec.c',
+  'fido2-pubkey.c',
   'file_perm.c',
   'file_utils.c',
   'hashfn.c',

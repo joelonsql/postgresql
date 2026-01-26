@@ -56,6 +56,7 @@ OBJS_COMMON = \
 	encnames.o \
 	exec.o \
 	f2s.o \
+	fido2-pubkey.o \
 	file_perm.o \
 	file_utils.o \
 	hashfn.o \

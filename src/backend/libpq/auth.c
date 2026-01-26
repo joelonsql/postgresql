@@ -41,6 +41,11 @@
 #include "tcop/backend_startup.h"
 #include "utils/memutils.h"
 
+#ifdef USE_OPENSSL
+/* SASL mechanism for FIDO2 authentication (from auth-fido2.c) */
+extern PGDLLIMPORT const pg_be_sasl_mech pg_be_fido2_mech;
+#endif
+
 /*----------------------------------------------------------------
  * Global authentication functions
  *----------------------------------------------------------------
@@ -300,6 +305,9 @@ auth_failed(Port *port, int status, const char *logdetail)
 			break;
 		case uaOAuth:
 			errstr = gettext_noop("OAuth bearer authentication failed for user \"%s\"");
+			break;
+		case uaFido2:
+			errstr = gettext_noop("FIDO2 authentication failed for user \"%s\"");
 			break;
 		default:
 			errstr = gettext_noop("authentication failed for user \"%s\": invalid authentication method");
@@ -627,6 +635,11 @@ ClientAuthentication(Port *port)
 		case uaOAuth:
 			status = CheckSASLAuth(&pg_be_oauth_mech, port, NULL, NULL);
 			break;
+#ifdef USE_OPENSSL
+		case uaFido2:
+			status = CheckSASLAuth(&pg_be_fido2_mech, port, NULL, &logdetail);
+			break;
+#endif
 	}
 
 	if ((status == STATUS_OK && port->hba->clientcert == clientCertFull)

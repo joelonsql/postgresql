@@ -446,6 +446,12 @@ struct pg_conn
 	char	   *oauth_token;	/* access token */
 	bool		oauth_want_retry;	/* should we retry on failure? */
 
+	/* FIDO2 authentication */
+	char	   *sk_provider;	/* path to SSH sk-provider library (e.g.,
+								 * ssh-sk-helper) */
+	char	   *fido2_pin;		/* device PIN for scripting */
+	char	   *fido2_credential;	/* preferred credential ID (base64) */
+
 	/* Optional file to write trace info to */
 	FILE	   *Pfdebug;
 	int			traceFlags;
@@ -516,7 +522,7 @@ struct pg_conn
 								 * the server? */
 	uint32		allowed_auth_methods;	/* bitmask of acceptable AuthRequest
 										 * codes */
-	const pg_fe_sasl_mech *allowed_sasl_mechs[2];	/* and acceptable SASL
+	const pg_fe_sasl_mech *allowed_sasl_mechs[3];	/* and acceptable SASL
 													 * mechanisms */
 	bool		client_finished_auth;	/* have we finished our half of the
 										 * authentication exchange? */

@@ -40,6 +40,7 @@ catalog_headers = [
   'pg_tablespace.h',
   'pg_authid.h',
   'pg_auth_members.h',
+  'pg_role_pubkeys.h',
   'pg_shdepend.h',
   'pg_shdescription.h',
   'pg_ts_config.h',

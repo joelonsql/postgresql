@@ -59,6 +59,7 @@ static void help(void);
 
 static void dropRoles(PGconn *conn);
 static void dumpRoles(PGconn *conn);
+static void dumpRoleCredentials(PGconn *conn);
 static void dumpRoleMembership(PGconn *conn);
 static void dumpRoleGUCPrivs(PGconn *conn);
 static void dropTablespaces(PGconn *conn);
@@ -652,6 +653,9 @@ main(int argc, char *argv[])
 			/* Dump roles (users) */
 			dumpRoles(conn);
 
+			/* Dump role credentials (FIDO2 public keys) */
+			dumpRoleCredentials(conn);
+
 			/* Dump role memberships */
 			dumpRoleMembership(conn);
 
@@ -1017,6 +1021,58 @@ dumpRoles(PGconn *conn)
 
 	fprintf(OPF, "\n\n");
 
+	destroyPQExpBuffer(buf);
+}
+
+
+/*
+ * Dump role credentials (FIDO2 public keys).
+ *
+ * This dumps the contents of pg_role_pubkeys so that FIDO2 credentials
+ * are preserved across pg_dumpall backup/restore cycles.
+ */
+static void
+dumpRoleCredentials(PGconn *conn)
+{
+	PQExpBuffer buf = createPQExpBuffer();
+	PGresult   *res;
+	int			i;
+
+	/* Skip if server is too old to have pg_role_pubkeys */
+	if (server_version < 180000)
+	{
+		destroyPQExpBuffer(buf);
+		return;
+	}
+
+	res = executeQuery(conn,
+		"SELECT r.rolname, k.key_name, k.keystring "
+		"FROM pg_catalog.pg_role_pubkeys k "
+		"JOIN pg_catalog.pg_roles r ON k.roleid = r.oid "
+		"WHERE r.rolname !~ '^pg_' "
+		"ORDER BY r.rolname, k.key_name");
+
+	if (PQntuples(res) > 0)
+		fprintf(OPF, "--\n-- Role Credentials\n--\n\n");
+
+	for (i = 0; i < PQntuples(res); i++)
+	{
+		const char *rolename = PQgetvalue(res, i, 0);
+		const char *credname = PQgetvalue(res, i, 1);
+		const char *keystring = PQgetvalue(res, i, 2);
+
+		resetPQExpBuffer(buf);
+		appendPQExpBuffer(buf, "ALTER ROLE %s ADD CREDENTIAL %s ",
+						  fmtId(rolename), fmtId(credname));
+		appendStringLiteralConn(buf, keystring, conn);
+		appendPQExpBufferStr(buf, ";\n");
+		fprintf(OPF, "%s", buf->data);
+	}
+
+	if (PQntuples(res) > 0)
+		fprintf(OPF, "\n");
+
+	PQclear(res);
 	destroyPQExpBuffer(buf);
 }
 

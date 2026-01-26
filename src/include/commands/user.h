@@ -36,6 +36,9 @@ extern void DropOwnedObjects(DropOwnedStmt *stmt);
 extern void ReassignOwnedObjects(ReassignOwnedStmt *stmt);
 extern List *roleSpecsToIds(List *memberNames);
 
+extern void AddRoleCredential(Oid roleid, const char *credname, const char *keystring);
+extern void DropRoleCredential(Oid roleid, const char *credname);
+
 extern bool check_createrole_self_grant(char **newval, void **extra,
 										GucSource source);
 extern void assign_createrole_self_grant(const char *newval, void *extra);
