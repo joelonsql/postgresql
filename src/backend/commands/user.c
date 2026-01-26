@@ -25,7 +25,7 @@
 #include "catalog/pg_authid.h"
 #include "catalog/pg_database.h"
 #include "catalog/pg_role_pubkeys.h"
-#include "common/skauth-pubkey.h"
+#include "libpq/skauth.h"
 #include "catalog/pg_db_role_setting.h"
 #include "commands/comment.h"
 #include "commands/dbcommands.h"

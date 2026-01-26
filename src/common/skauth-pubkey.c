@@ -1,23 +1,11 @@
 /*-------------------------------------------------------------------------
- *
  * skauth-pubkey.c
- *	  OpenSSH sk-ecdsa public key parser for sk-provider authentication
- *
- * This module parses OpenSSH sk-ecdsa-sha2-nistp256@openssh.com public keys
- * and extracts the EC point and credential information needed for sk-provider
- * authentication.
- *
- * OpenSSH sk-ecdsa public key format (after base64 decoding):
- *   string    key type ("sk-ecdsa-sha2-nistp256@openssh.com")
- *   string    curve name ("nistp256")
- *   string    EC point (65 bytes: 0x04 || x[32] || y[32])
- *   string    application (e.g., "ssh:")
+ *	  OpenSSH sk-ecdsa public key parser
  *
  * Portions Copyright (c) 1996-2026, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/common/skauth-pubkey.c
- *
  *-------------------------------------------------------------------------
  */
 
@@ -28,271 +16,169 @@
 #endif
 
 #include "common/base64.h"
-#include "common/skauth-pubkey.h"
+#include "libpq/skauth.h"
 
 #include <string.h>
 
-/* Expected key type for sk-ecdsa */
-#define SK_ECDSA_KEY_TYPE	"sk-ecdsa-sha2-nistp256@openssh.com"
-#define SK_ECDSA_CURVE		"nistp256"
+#define SK_KEY_TYPE		"sk-ecdsa-sha2-nistp256@openssh.com"
+#define SK_CURVE		"nistp256"
 
-/* EC point size for P-256 (uncompressed: 0x04 + 32 + 32) */
-#define EC_POINT_SIZE		65
-
-/*
- * Read a 32-bit big-endian length from buffer
- */
-static uint32_t
-read_uint32_be(const uint8_t *p)
-{
-	return ((uint32_t) p[0] << 24) |
-		   ((uint32_t) p[1] << 16) |
-		   ((uint32_t) p[2] << 8) |
-		   ((uint32_t) p[3]);
-}
-
-/*
- * Read an OpenSSH string (length-prefixed) from buffer
- *
- * Returns pointer to string data (not null-terminated) and updates
- * *len with the string length. Advances *pp past the string.
- * Returns NULL if buffer too small.
- */
-static const uint8_t *
-read_ssh_string(const uint8_t **pp, const uint8_t *end, uint32_t *len)
-{
-	const uint8_t *p = *pp;
-	const uint8_t *data;
-
-	if (end - p < 4)
-		return NULL;
-
-	*len = read_uint32_be(p);
-	p += 4;
-
-	if (end - p < *len)
-		return NULL;
-
-	data = p;
-	*pp = p + *len;
-
-	return data;
-}
-
-/*
- * Parse an OpenSSH sk-ecdsa public key string
- *
- * Input format: "sk-ecdsa-sha2-nistp256@openssh.com AAAA... [comment]"
- *
- * On success, fills in the SkauthParsedPubkey structure and returns true.
- * On failure, sets *errmsg and returns false.
- *
- * The caller must free the allocated fields in the structure when done.
- */
 bool
-skauth_parse_openssh_pubkey(const char *pubkey_str,
-							SkauthParsedPubkey *result,
-							char **errmsg)
+skauth_parse_openssh_pubkey(const char *pubkey_str, SkauthParsedPubkey *result, char **errmsg)
 {
-	const char *key_data_start;
-	const char *key_data_end;
-	char	   *base64_data = NULL;
-	uint8_t	   *decoded = NULL;
-	int			decoded_len;
-	const uint8_t *p;
-	const uint8_t *end;
-	const uint8_t *str_data;
-	uint32_t	str_len;
+	const char *p, *end;
+	char	   *b64 = NULL;
+	uint8_t	   *dec = NULL;
+	int			dec_len;
+	const uint8_t *dp, *dend;
+	uint32_t	len;
 
 	*errmsg = NULL;
 	memset(result, 0, sizeof(SkauthParsedPubkey));
 
-	/* Skip leading whitespace */
-	while (*pubkey_str && (*pubkey_str == ' ' || *pubkey_str == '\t'))
+	/* Skip whitespace and check key type */
+	while (*pubkey_str == ' ' || *pubkey_str == '\t')
 		pubkey_str++;
 
-	/* Check for key type prefix */
-	if (strncmp(pubkey_str, SK_ECDSA_KEY_TYPE, strlen(SK_ECDSA_KEY_TYPE)) != 0)
+	if (strncmp(pubkey_str, SK_KEY_TYPE, strlen(SK_KEY_TYPE)) != 0)
 	{
 		*errmsg = strdup("key type must be sk-ecdsa-sha2-nistp256@openssh.com");
 		return false;
 	}
+	pubkey_str += strlen(SK_KEY_TYPE);
 
-	pubkey_str += strlen(SK_ECDSA_KEY_TYPE);
-
-	/* Skip whitespace between key type and base64 data */
-	while (*pubkey_str && (*pubkey_str == ' ' || *pubkey_str == '\t'))
+	while (*pubkey_str == ' ' || *pubkey_str == '\t')
 		pubkey_str++;
-
-	if (*pubkey_str == '\0')
+	if (!*pubkey_str)
 	{
-		*errmsg = strdup("missing key data after key type");
+		*errmsg = strdup("missing key data");
 		return false;
 	}
 
-	/* Find end of base64 data (space or end of string) */
-	key_data_start = pubkey_str;
-	key_data_end = key_data_start;
-	while (*key_data_end && *key_data_end != ' ' && *key_data_end != '\t' &&
-		   *key_data_end != '\n' && *key_data_end != '\r')
-		key_data_end++;
-
-	/* Copy base64 data for decoding */
-	base64_data = malloc(key_data_end - key_data_start + 1);
-	if (!base64_data)
-	{
-		*errmsg = strdup("out of memory");
-		return false;
-	}
-	memcpy(base64_data, key_data_start, key_data_end - key_data_start);
-	base64_data[key_data_end - key_data_start] = '\0';
+	/* Find base64 data end */
+	p = pubkey_str;
+	while (*p && *p != ' ' && *p != '\t' && *p != '\n' && *p != '\r')
+		p++;
+	end = p;
 
 	/* Decode base64 */
-	decoded_len = pg_b64_dec_len(strlen(base64_data));
-	decoded = malloc(decoded_len);
-	if (!decoded)
+	b64 = malloc(end - pubkey_str + 1);
+	if (!b64)
+		goto oom;
+	memcpy(b64, pubkey_str, end - pubkey_str);
+	b64[end - pubkey_str] = '\0';
+
+	dec_len = pg_b64_dec_len(strlen(b64));
+	dec = malloc(dec_len);
+	if (!dec)
+		goto oom;
+
+	dec_len = pg_b64_decode(b64, strlen(b64), dec, dec_len);
+	free(b64);
+	b64 = NULL;
+
+	if (dec_len < 0)
 	{
-		free(base64_data);
-		*errmsg = strdup("out of memory");
-		return false;
+		*errmsg = strdup("invalid base64");
+		goto fail;
 	}
 
-	decoded_len = pg_b64_decode(base64_data, strlen(base64_data),
-							   decoded, decoded_len);
-	free(base64_data);
+	dp = dec;
+	dend = dec + dec_len;
 
-	if (decoded_len < 0)
+#define READ_STRING(ptr, slen) do { \
+	if (dend - dp < 4) goto trunc; \
+	slen = ((uint32_t)dp[0] << 24) | ((uint32_t)dp[1] << 16) | ((uint32_t)dp[2] << 8) | dp[3]; \
+	dp += 4; \
+	if (dend - dp < slen) goto trunc; \
+	ptr = dp; \
+	dp += slen; \
+} while(0)
+
+	/* Read and verify key type */
 	{
-		free(decoded);
-		*errmsg = strdup("invalid base64 encoding in public key");
-		return false;
+		const uint8_t *s;
+		uint32_t slen;
+		READ_STRING(s, slen);
+		if (slen != strlen(SK_KEY_TYPE) || memcmp(s, SK_KEY_TYPE, slen) != 0)
+		{
+			*errmsg = strdup("key type mismatch");
+			goto fail;
+		}
 	}
 
-	/* Parse the decoded key structure */
-	p = decoded;
-	end = decoded + decoded_len;
-
-	/* Read key type string */
-	str_data = read_ssh_string(&p, end, &str_len);
-	if (!str_data)
+	/* Read and verify curve */
 	{
-		free(decoded);
-		*errmsg = strdup("truncated key data: missing key type");
-		return false;
-	}
-
-	if (str_len != strlen(SK_ECDSA_KEY_TYPE) ||
-		memcmp(str_data, SK_ECDSA_KEY_TYPE, str_len) != 0)
-	{
-		free(decoded);
-		*errmsg = strdup("key type mismatch in encoded data");
-		return false;
-	}
-
-	/* Read curve name */
-	str_data = read_ssh_string(&p, end, &str_len);
-	if (!str_data)
-	{
-		free(decoded);
-		*errmsg = strdup("truncated key data: missing curve name");
-		return false;
-	}
-
-	if (str_len != strlen(SK_ECDSA_CURVE) ||
-		memcmp(str_data, SK_ECDSA_CURVE, str_len) != 0)
-	{
-		free(decoded);
-		*errmsg = strdup("unsupported curve: only nistp256 is supported");
-		return false;
+		const uint8_t *s;
+		uint32_t slen;
+		READ_STRING(s, slen);
+		if (slen != strlen(SK_CURVE) || memcmp(s, SK_CURVE, slen) != 0)
+		{
+			*errmsg = strdup("unsupported curve");
+			goto fail;
+		}
 	}
 
 	/* Read EC point */
-	str_data = read_ssh_string(&p, end, &str_len);
-	if (!str_data)
 	{
-		free(decoded);
-		*errmsg = strdup("truncated key data: missing EC point");
-		return false;
+		const uint8_t *s;
+		uint32_t slen;
+		READ_STRING(s, slen);
+		if (slen != 65 || s[0] != 0x04)
+		{
+			*errmsg = strdup("invalid EC point");
+			goto fail;
+		}
+		result->public_key = malloc(65);
+		if (!result->public_key)
+			goto oom;
+		memcpy(result->public_key, s, 65);
+		result->public_key_len = 65;
 	}
 
-	if (str_len != EC_POINT_SIZE)
+	/* Read application */
 	{
-		free(decoded);
-		*errmsg = strdup("invalid EC point size: expected 65 bytes");
-		return false;
+		const uint8_t *s;
+		uint32_t slen;
+		READ_STRING(s, slen);
+		result->application = malloc(slen + 1);
+		if (!result->application)
+			goto oom;
+		memcpy(result->application, s, slen);
+		result->application[slen] = '\0';
 	}
 
-	if (str_data[0] != 0x04)
-	{
-		free(decoded);
-		*errmsg = strdup("invalid EC point: must be uncompressed (0x04 prefix)");
-		return false;
-	}
+#undef READ_STRING
 
-	/* Copy EC point */
-	result->public_key = malloc(EC_POINT_SIZE);
-	if (!result->public_key)
-	{
-		free(decoded);
-		*errmsg = strdup("out of memory");
-		return false;
-	}
-	memcpy(result->public_key, str_data, EC_POINT_SIZE);
-	result->public_key_len = EC_POINT_SIZE;
-
-	/* Read application string */
-	str_data = read_ssh_string(&p, end, &str_len);
-	if (!str_data)
-	{
-		free(result->public_key);
-		result->public_key = NULL;
-		free(decoded);
-		*errmsg = strdup("truncated key data: missing application");
-		return false;
-	}
-
-	/* Copy application (as null-terminated string) */
-	result->application = malloc(str_len + 1);
-	if (!result->application)
-	{
-		free(result->public_key);
-		result->public_key = NULL;
-		free(decoded);
-		*errmsg = strdup("out of memory");
-		return false;
-	}
-	memcpy(result->application, str_data, str_len);
-	result->application[str_len] = '\0';
-
-	/*
-	 * Note: OpenSSH sk-ecdsa keys may have additional data (flags, etc.)
-	 * after the application. For now, we ignore any extra data.
-	 */
-
-	/* Set algorithm identifier */
-	result->algorithm = SKAUTH_ALG_ES256;
-
-	free(decoded);
+	result->algorithm = COSE_ALG_ES256;
+	free(dec);
 	return true;
+
+trunc:
+	*errmsg = strdup("truncated key data");
+	goto fail;
+
+oom:
+	*errmsg = strdup("out of memory");
+
+fail:
+	free(b64);
+	free(dec);
+	free(result->public_key);
+	free(result->application);
+	result->public_key = NULL;
+	result->application = NULL;
+	return false;
 }
 
-/*
- * Free a parsed public key structure
- */
 void
 skauth_free_parsed_pubkey(SkauthParsedPubkey *pubkey)
 {
 	if (pubkey)
 	{
-		if (pubkey->public_key)
-		{
-			free(pubkey->public_key);
-			pubkey->public_key = NULL;
-		}
-		if (pubkey->application)
-		{
-			free(pubkey->application);
-			pubkey->application = NULL;
-		}
+		free(pubkey->public_key);
+		free(pubkey->application);
+		pubkey->public_key = NULL;
+		pubkey->application = NULL;
 	}
 }
