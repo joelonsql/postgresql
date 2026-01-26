@@ -11,7 +11,6 @@ common_sources = files(
   'encnames.c',
   'exec.c',
   'skauth-pubkey.c',
-  'skauth-verify.c',
   'file_perm.c',
   'file_utils.c',
   'hashfn.c',

@@ -27,9 +27,6 @@
 #include "common/ip.h"
 #include "common/md5.h"
 #include "libpq/auth.h"
-#ifdef USE_OPENSSL
-#include "libpq/auth-skauth.h"
-#endif
 #include "libpq/crypt.h"
 #include "libpq/libpq.h"
 #include "libpq/oauth.h"
@@ -43,6 +40,11 @@
 #include "storage/ipc.h"
 #include "tcop/backend_startup.h"
 #include "utils/memutils.h"
+
+#ifdef USE_OPENSSL
+/* SASL mechanism for ssh-sk authentication (from auth-skauth.c) */
+extern PGDLLIMPORT const pg_be_sasl_mech pg_be_skauth_mech;
+#endif
 
 /*----------------------------------------------------------------
  * Global authentication functions

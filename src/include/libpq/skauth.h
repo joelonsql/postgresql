@@ -66,9 +66,4 @@ extern bool skauth_parse_openssh_pubkey(const char *pubkey_str,
 										char **errmsg);
 extern void skauth_free_parsed_pubkey(SkauthParsedPubkey *pubkey);
 
-/* ES256 signature verification */
-extern SkauthVerifyResult skauth_verify_es256_raw(const uint8_t *public_key_uncompressed,
-												  const uint8_t *hash,
-												  const uint8_t *signature_raw);
-
 #endif							/* SKAUTH_H */
