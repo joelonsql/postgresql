@@ -90,7 +90,10 @@ CheckSASLAuth(const pg_be_sasl_mech *mech, Port *port, char *shadow_pass,
 								mtype)));
 			}
 			else
+			{
+				elog(DEBUG1, "client disconnected during SASL authentication");
 				return STATUS_EOF;
+			}
 		}
 
 		/* Get the actual SASL message */

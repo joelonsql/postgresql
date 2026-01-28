@@ -33,4 +33,7 @@ extern char *pg_fe_scram_build_secret(const char *password,
 									  int iterations,
 									  const char **errstr);
 
+/* Mechanisms in fe-auth-passkey.c */
+extern const pg_fe_sasl_mech pg_passkey_mech;
+
 #endif							/* FE_AUTH_H */

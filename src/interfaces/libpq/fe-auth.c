@@ -46,6 +46,7 @@
 #include "fe-auth-sasl.h"
 #include "fe-auth-oauth.h"
 #include "libpq-fe.h"
+#include "libpq/passkey.h"
 
 #ifdef ENABLE_GSS
 /*
@@ -544,6 +545,13 @@ pg_SASL_init(PGconn *conn, int payloadlen, bool *async)
 			conn->sasl = &pg_oauth_mech;
 			conn->password_needed = false;
 		}
+		else if (strcmp(mechanism_buf.data, PASSKEY_MECHANISM_NAME) == 0 &&
+				 !selected_mechanism)
+		{
+			selected_mechanism = PASSKEY_MECHANISM_NAME;
+			conn->sasl = &pg_passkey_mech;
+			conn->password_needed = true;		/* TOFU requires password */
+		}
 	}
 
 	if (!selected_mechanism)
@@ -691,7 +699,9 @@ error:
 oom_error:
 	termPQExpBuffer(&mechanism_buf);
 	free(initialresponse);
-	libpq_append_conn_error(conn, "out of memory");
+	if (PQExpBufferDataBroken(conn->errorMessage) ||
+		conn->errorMessage.len == 0)
+		libpq_append_conn_error(conn, "out of memory");
 	return STATUS_ERROR;
 }
 

@@ -46,6 +46,15 @@ if have_cxx
   cxx = meson.get_compiler('cpp')
 endif
 
+# Add Objective-C support for macOS passkey authentication
+have_objc = false
+if host_system == 'darwin'
+  have_objc = add_languages('objc', required: false, native: false)
+  if have_objc
+    objc = meson.get_compiler('objc')
+  endif
+endif
+
 not_found_dep = dependency('', required: false)
 thread_dep = dependency('threads')
 auto_features = get_option('auto_features')
@@ -1137,6 +1146,15 @@ else
   lz4 = not_found_dep
 endif
 
+
+###############################################################
+# Library: qrencode (for caBLE passkey QR codes)
+###############################################################
+
+qrencode = dependency('libqrencode', required: false)
+if qrencode.found()
+  cdata.set('HAVE_LIBQRENCODE', 1)
+endif
 
 
 ###############################################################
@@ -3365,6 +3383,20 @@ libpq_deps += [
   libintl,
   ssl,
 ]
+
+# libqrencode for caBLE QR code generation (optional, used with passkey authentication)
+if qrencode.found()
+  libpq_deps += qrencode
+endif
+
+# macOS frameworks for passkey support (AuthenticationServices + AppKit for UI)
+# CoreBluetooth is needed for caBLE BLE scanning to receive routing_id from phone
+if host_system == 'darwin' and have_objc
+  passkey_dep = dependency('appleframeworks', modules: ['AuthenticationServices', 'Foundation', 'AppKit', 'CoreBluetooth'], required: false)
+  if passkey_dep.found()
+    libpq_deps += passkey_dep
+  endif
+endif
 
 libpq_oauth_deps += [
   thread_dep,

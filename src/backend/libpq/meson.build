@@ -2,6 +2,7 @@
 
 backend_sources += files(
   'auth-oauth.c',
+  'auth-passkey.c',
   'auth-sasl.c',
   'auth-scram.c',
   'auth.c',

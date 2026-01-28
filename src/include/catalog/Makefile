@@ -67,6 +67,7 @@ CATALOG_HEADERS := \
 	pg_foreign_table.h \
 	pg_policy.h \
 	pg_replication_origin.h \
+	pg_role_pubkeys.h \
 	pg_default_acl.h \
 	pg_init_privs.h \
 	pg_seclabel.h \

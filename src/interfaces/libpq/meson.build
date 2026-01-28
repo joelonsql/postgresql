@@ -2,6 +2,7 @@
 
 libpq_sources = files(
   'fe-auth-oauth.c',
+  'fe-auth-passkey.c',
   'fe-auth-scram.c',
   'fe-auth.c',
   'fe-cancel.c',
@@ -18,6 +19,7 @@ libpq_sources = files(
   'pqexpbuffer.c',
 )
 libpq_so_sources = [] # for shared lib, in addition to the above
+libpq_objc_sources = []  # Objective-C sources for macOS
 
 if host_system == 'windows'
   libpq_sources += files('pthread-win32.c', 'win32.c')
@@ -29,6 +31,19 @@ endif
 if ssl.found()
   libpq_sources += files('fe-secure-common.c')
   libpq_sources += files('fe-secure-openssl.c')
+  # caBLE (Cloud-Assisted BLE) hybrid transport for passkey authentication
+  # Enables cross-device authentication via QR code, works without entitlements
+  libpq_sources += files(
+    'fe-auth-cable.c',
+    'fe-auth-cable-cbor.c',
+    'fe-auth-cable-tunnel.c',
+    'fe-auth-cable-noise.c',
+    'fe-auth-cable-eid.c',
+  )
+  # macOS BLE support for caBLE (receives routing_id from phone via BLE advertisement)
+  if host_system == 'darwin' and have_objc
+    libpq_objc_sources += files('fe-auth-cable-ble-darwin.m')
+  endif
 endif
 
 if gssapi.found()
@@ -36,6 +51,12 @@ if gssapi.found()
     'fe-gssapi-common.c',
     'fe-secure-gssapi.c',
   )
+endif
+
+# macOS passkey support using AuthenticationServices
+# Only used when OpenSSL is not available (caBLE requires OpenSSL)
+if host_system == 'darwin' and have_objc and not ssl.found()
+  libpq_objc_sources += files('fe-auth-passkey-darwin.m')
 endif
 
 export_file = custom_target('libpq.exports',
@@ -58,7 +79,7 @@ libpq_so_c_args = ['-DUSE_DYNAMIC_OAUTH']
 # more complexity than its worth (reusing object files requires also linking
 # to the library on windows or breaks precompiled headers).
 libpq_st = static_library('libpq',
-  libpq_sources,
+  libpq_sources + libpq_objc_sources,
   include_directories: [libpq_inc],
   c_args: libpq_c_args,
   c_pch: pch_postgres_fe_h,
@@ -67,7 +88,7 @@ libpq_st = static_library('libpq',
 )
 
 libpq_so = shared_library('libpq',
-  libpq_sources + libpq_so_sources,
+  libpq_sources + libpq_so_sources + libpq_objc_sources,
   include_directories: [libpq_inc, postgres_inc],
   c_args: libpq_c_args + libpq_so_c_args,
   c_pch: pch_postgres_fe_h,

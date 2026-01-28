@@ -24,6 +24,7 @@
 #include "catalog/pg_auth_members.h"
 #include "catalog/pg_authid.h"
 #include "catalog/pg_database.h"
+#include "catalog/pg_role_pubkeys.h"
 #include "catalog/pg_db_role_setting.h"
 #include "commands/comment.h"
 #include "commands/dbcommands.h"
@@ -39,6 +40,7 @@
 #include "utils/catcache.h"
 #include "utils/fmgroids.h"
 #include "utils/syscache.h"
+#include "utils/timestamp.h"
 #include "utils/varlena.h"
 
 /*
@@ -116,6 +118,7 @@ static void plan_recursive_revoke(CatCList *memlist,
 								  bool revoke_admin_option_only,
 								  DropBehavior behavior);
 static void InitGrantRoleOptions(GrantRoleOptions *popt);
+static void DropRoleCredentialAll(Oid roleid);
 
 
 /* Check if current user has createrole privileges */
@@ -790,6 +793,7 @@ AlterRole(ParseState *pstate, AlterRoleStmt *stmt)
 					 errmsg("permission denied to alter role"),
 					 errdetail("To change another role's password, the current user must have the %s attribute and the %s option on the role.",
 							   "CREATEROLE", "ADMIN")));
+
 	}
 	else if (!superuser())
 	{
@@ -1301,6 +1305,11 @@ DropRole(DropRoleStmt *stmt)
 							NameStr(roleform->rolname)),
 					 errdetail_internal("%s", detail),
 					 errdetail_log("%s", detail_log)));
+
+		/*
+		 * Remove any passkey credentials for this role.
+		 */
+		DropRoleCredentialAll(roleid);
 
 		/*
 		 * Remove the role from the pg_authid table
@@ -2509,6 +2518,44 @@ InitGrantRoleOptions(GrantRoleOptions *popt)
 	popt->admin = false;
 	popt->inherit = false;
 	popt->set = true;
+}
+
+/*
+ * DropRoleCredentialAll - Drop all passkey credentials from a role
+ */
+static void
+DropRoleCredentialAll(Oid roleid)
+{
+	Relation	pg_pubkeys_rel;
+	ScanKeyData scankey;
+	SysScanDesc scan;
+	HeapTuple	tuple;
+	int			count = 0;
+
+	pg_pubkeys_rel = table_open(RolePubkeysRelationId, RowExclusiveLock);
+
+	ScanKeyInit(&scankey,
+				Anum_pg_role_pubkeys_roleid,
+				BTEqualStrategyNumber, F_OIDEQ,
+				ObjectIdGetDatum(roleid));
+
+	scan = systable_beginscan(pg_pubkeys_rel, InvalidOid, false,
+							  NULL, 1, &scankey);
+
+	while ((tuple = systable_getnext(scan)) != NULL)
+	{
+		CatalogTupleDelete(pg_pubkeys_rel, &tuple->t_self);
+		count++;
+	}
+
+	systable_endscan(scan);
+	table_close(pg_pubkeys_rel, RowExclusiveLock);
+
+	if (count > 0)
+		ereport(NOTICE,
+				(errmsg_plural("dropped %d credential from role",
+							   "dropped %d credentials from role",
+							   count, count)));
 }
 
 /*

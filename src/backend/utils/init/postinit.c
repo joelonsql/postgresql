@@ -69,6 +69,9 @@
 #include "utils/snapmgr.h"
 #include "utils/syscache.h"
 #include "utils/timeout.h"
+#ifdef USE_OPENSSL
+#include "libpq/passkey.h"
+#endif
 
 static HeapTuple GetDatabaseTuple(const char *dbname);
 static HeapTuple GetDatabaseTupleByOid(Oid dboid);
@@ -1172,6 +1175,15 @@ InitPostgres(const char *in_dbname, Oid dboid,
 	 * least the minimum set of "nailed-in" cache entries.
 	 */
 	RelationCacheInitializePhase3();
+
+#ifdef USE_OPENSSL
+	/*
+	 * Store any pending passkey credentials from authentication.
+	 * During passkey SASL auth, we can't access catalogs because MyDatabaseId
+	 * isn't set yet. Now that catalogs are available, store the credential.
+	 */
+	passkey_store_pending_credential();
+#endif
 
 	/* set up ACL framework (so CheckMyDatabase can check permissions) */
 	initialize_acl();

@@ -446,6 +446,10 @@ struct pg_conn
 	char	   *oauth_token;	/* access token */
 	bool		oauth_want_retry;	/* should we retry on failure? */
 
+	/* Passkey authentication */
+	char	   *passkey_rp_id;	/* relying party ID (default: server hostname) */
+	char	   *passkey_hybrid;	/* "1" to enable QR code (default), "0" to disable */
+
 	/* Optional file to write trace info to */
 	FILE	   *Pfdebug;
 	int			traceFlags;
