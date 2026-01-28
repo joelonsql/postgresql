@@ -24,6 +24,8 @@
 #include "catalog/pg_auth_members.h"
 #include "catalog/pg_authid.h"
 #include "catalog/pg_database.h"
+#include "catalog/pg_role_pubkeys.h"
+#include "libpq/fido2.h"
 #include "catalog/pg_db_role_setting.h"
 #include "commands/comment.h"
 #include "commands/dbcommands.h"
@@ -39,6 +41,7 @@
 #include "utils/catcache.h"
 #include "utils/fmgroids.h"
 #include "utils/syscache.h"
+#include "utils/timestamp.h"
 #include "utils/varlena.h"
 
 /*
@@ -116,6 +119,10 @@ static void plan_recursive_revoke(CatCList *memlist,
 								  bool revoke_admin_option_only,
 								  DropBehavior behavior);
 static void InitGrantRoleOptions(GrantRoleOptions *popt);
+static void AddRoleCredential(Oid roleid, const char *credname,
+							  const char *pubkey_str);
+static void DropRoleCredential(Oid roleid, const char *credname);
+static void DropRoleCredentialAll(Oid roleid);
 
 
 /* Check if current user has createrole privileges */
@@ -645,6 +652,8 @@ AlterRole(ParseState *pstate, AlterRoleStmt *stmt)
 	DefElem    *drolemembers = NULL;
 	DefElem    *dvalidUntil = NULL;
 	DefElem    *dbypassRLS = NULL;
+	DefElem    *daddcredential = NULL;
+	DefElem    *ddropcredential = NULL;
 	Oid			roleid;
 	Oid			currentUserId = GetUserId();
 	GrantRoleOptions popt;
@@ -723,6 +732,18 @@ AlterRole(ParseState *pstate, AlterRoleStmt *stmt)
 			if (dbypassRLS)
 				errorConflictingDefElem(defel, pstate);
 			dbypassRLS = defel;
+		}
+		else if (strcmp(defel->defname, "addcredential") == 0)
+		{
+			if (daddcredential)
+				errorConflictingDefElem(defel, pstate);
+			daddcredential = defel;
+		}
+		else if (strcmp(defel->defname, "dropcredential") == 0)
+		{
+			if (ddropcredential)
+				errorConflictingDefElem(defel, pstate);
+			ddropcredential = defel;
 		}
 		else
 			elog(ERROR, "option \"%s\" not recognized",
@@ -983,6 +1004,34 @@ AlterRole(ParseState *pstate, AlterRoleStmt *stmt)
 			DelRoleMems(currentUserId, rolename, roleid,
 						rolemembers, roleSpecsToIds(rolemembers),
 						InvalidOid, &popt, DROP_RESTRICT);
+	}
+
+	/*
+	 * Handle sk-provider credential management (ADD CREDENTIAL / DROP CREDENTIAL)
+	 */
+	if (daddcredential)
+	{
+		List	   *credargs = (List *) daddcredential->arg;
+		char	   *credname = strVal(linitial(credargs));
+		char	   *pubkey_str = strVal(lsecond(credargs));
+
+		AddRoleCredential(roleid, credname, pubkey_str);
+	}
+
+	if (ddropcredential)
+	{
+		if (ddropcredential->arg == NULL)
+		{
+			/* DROP CREDENTIAL ALL */
+			DropRoleCredentialAll(roleid);
+		}
+		else
+		{
+			/* DROP CREDENTIAL credname */
+			char	   *credname = strVal(ddropcredential->arg);
+
+			DropRoleCredential(roleid, credname);
+		}
 	}
 
 	/*
@@ -2509,6 +2558,169 @@ InitGrantRoleOptions(GrantRoleOptions *popt)
 	popt->admin = false;
 	popt->inherit = false;
 	popt->set = true;
+}
+
+/*
+ * AddRoleCredential - Add a sk-provider credential to a role
+ *
+ * Parses the OpenSSH sk-ecdsa public key and stores it in pg_role_pubkeys.
+ */
+static void
+AddRoleCredential(Oid roleid, const char *credname, const char *pubkey_str)
+{
+	Relation	pg_pubkeys_rel;
+	HeapTuple	tuple;
+	Datum		values[Natts_pg_role_pubkeys];
+	bool		nulls[Natts_pg_role_pubkeys];
+	Fido2ParsedPubkey parsed;
+	char	   *parse_error = NULL;
+	bytea	   *pubkey_bytea;
+	bytea	   *credid_bytea;
+	NameData	key_name;
+
+	/* Parse the OpenSSH public key */
+	if (!fido2_parse_openssh_pubkey(pubkey_str, &parsed, &parse_error))
+	{
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("invalid FIDO2 public key: %s", parse_error)));
+	}
+
+	/* Open pg_role_pubkeys for insertion */
+	pg_pubkeys_rel = table_open(RolePubkeysRelationId, RowExclusiveLock);
+
+	/* Check for duplicate credential name for this role */
+	/* TODO: Add syscache lookup when available */
+
+	/* Prepare values for the new tuple */
+	memset(values, 0, sizeof(values));
+	memset(nulls, false, sizeof(nulls));
+
+	/* oid - generate a new unique OID */
+	values[Anum_pg_role_pubkeys_oid - 1] =
+		ObjectIdGetDatum(GetNewOidWithIndex(pg_pubkeys_rel,
+											RolePubkeysOidIndexId,
+											Anum_pg_role_pubkeys_oid));
+
+	/* key_name */
+	namestrcpy(&key_name, credname);
+	values[Anum_pg_role_pubkeys_key_name - 1] = NameGetDatum(&key_name);
+
+	/* roleid */
+	values[Anum_pg_role_pubkeys_roleid - 1] = ObjectIdGetDatum(roleid);
+
+	/* algorithm */
+	values[Anum_pg_role_pubkeys_algorithm - 1] = Int16GetDatum(parsed.algorithm);
+
+	/* credential_id - we use the application hash as a pseudo-credential ID */
+	credid_bytea = (bytea *) palloc(VARHDRSZ + strlen(parsed.application));
+	SET_VARSIZE(credid_bytea, VARHDRSZ + strlen(parsed.application));
+	memcpy(VARDATA(credid_bytea), parsed.application, strlen(parsed.application));
+	values[Anum_pg_role_pubkeys_credential_id - 1] = PointerGetDatum(credid_bytea);
+
+	/* public_key */
+	pubkey_bytea = (bytea *) palloc(VARHDRSZ + parsed.public_key_len);
+	SET_VARSIZE(pubkey_bytea, VARHDRSZ + parsed.public_key_len);
+	memcpy(VARDATA(pubkey_bytea), parsed.public_key, parsed.public_key_len);
+	values[Anum_pg_role_pubkeys_public_key - 1] = PointerGetDatum(pubkey_bytea);
+
+	/* enrolled_at */
+	values[Anum_pg_role_pubkeys_enrolled_at - 1] = TimestampTzGetDatum(GetCurrentTimestamp());
+
+	/* Insert the tuple */
+	tuple = heap_form_tuple(RelationGetDescr(pg_pubkeys_rel), values, nulls);
+	CatalogTupleInsert(pg_pubkeys_rel, tuple);
+
+	/* Clean up */
+	heap_freetuple(tuple);
+	fido2_free_parsed_pubkey(&parsed);
+
+	table_close(pg_pubkeys_rel, RowExclusiveLock);
+
+	ereport(NOTICE,
+			(errmsg("credential \"%s\" added for role", credname)));
+}
+
+/*
+ * DropRoleCredential - Drop a specific sk-provider credential from a role
+ */
+static void
+DropRoleCredential(Oid roleid, const char *credname)
+{
+	Relation	pg_pubkeys_rel;
+	ScanKeyData scankey[2];
+	SysScanDesc scan;
+	HeapTuple	tuple;
+	bool		found = false;
+
+	pg_pubkeys_rel = table_open(RolePubkeysRelationId, RowExclusiveLock);
+
+	/* Scan for matching credential */
+	ScanKeyInit(&scankey[0],
+				Anum_pg_role_pubkeys_roleid,
+				BTEqualStrategyNumber, F_OIDEQ,
+				ObjectIdGetDatum(roleid));
+
+	scan = systable_beginscan(pg_pubkeys_rel, InvalidOid, false,
+							  NULL, 1, scankey);
+
+	while ((tuple = systable_getnext(scan)) != NULL)
+	{
+		Form_pg_role_pubkeys pkform = (Form_pg_role_pubkeys) GETSTRUCT(tuple);
+
+		if (strcmp(NameStr(pkform->key_name), credname) == 0)
+		{
+			CatalogTupleDelete(pg_pubkeys_rel, &tuple->t_self);
+			found = true;
+			break;
+		}
+	}
+
+	systable_endscan(scan);
+	table_close(pg_pubkeys_rel, RowExclusiveLock);
+
+	if (!found)
+		ereport(ERROR,
+				(errcode(ERRCODE_UNDEFINED_OBJECT),
+				 errmsg("credential \"%s\" does not exist for role",
+						credname)));
+}
+
+/*
+ * DropRoleCredentialAll - Drop all sk-provider credentials from a role
+ */
+static void
+DropRoleCredentialAll(Oid roleid)
+{
+	Relation	pg_pubkeys_rel;
+	ScanKeyData scankey;
+	SysScanDesc scan;
+	HeapTuple	tuple;
+	int			count = 0;
+
+	pg_pubkeys_rel = table_open(RolePubkeysRelationId, RowExclusiveLock);
+
+	ScanKeyInit(&scankey,
+				Anum_pg_role_pubkeys_roleid,
+				BTEqualStrategyNumber, F_OIDEQ,
+				ObjectIdGetDatum(roleid));
+
+	scan = systable_beginscan(pg_pubkeys_rel, InvalidOid, false,
+							  NULL, 1, &scankey);
+
+	while ((tuple = systable_getnext(scan)) != NULL)
+	{
+		CatalogTupleDelete(pg_pubkeys_rel, &tuple->t_self);
+		count++;
+	}
+
+	systable_endscan(scan);
+	table_close(pg_pubkeys_rel, RowExclusiveLock);
+
+	ereport(NOTICE,
+			(errmsg_plural("dropped %d credential from role",
+						   "dropped %d credentials from role",
+						   count, count)));
 }
 
 /*

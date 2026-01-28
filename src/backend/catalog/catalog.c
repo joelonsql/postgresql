@@ -34,6 +34,7 @@
 #include "catalog/pg_namespace.h"
 #include "catalog/pg_parameter_acl.h"
 #include "catalog/pg_replication_origin.h"
+#include "catalog/pg_role_pubkeys.h"
 #include "catalog/pg_seclabel.h"
 #include "catalog/pg_shdepend.h"
 #include "catalog/pg_shdescription.h"
@@ -310,6 +311,7 @@ IsSharedRelation(Oid relationId)
 		relationId == DbRoleSettingRelationId ||
 		relationId == ParameterAclRelationId ||
 		relationId == ReplicationOriginRelationId ||
+		relationId == RolePubkeysRelationId ||
 		relationId == SharedDependRelationId ||
 		relationId == SharedDescriptionRelationId ||
 		relationId == SharedSecLabelRelationId ||
@@ -330,6 +332,9 @@ IsSharedRelation(Oid relationId)
 		relationId == ParameterAclParnameIndexId ||
 		relationId == ReplicationOriginIdentIndex ||
 		relationId == ReplicationOriginNameIndex ||
+		relationId == RolePubkeysOidIndexId ||
+		relationId == RolePubkeysRoleidIndexId ||
+		relationId == RolePubkeysRoleidKeynameIndexId ||
 		relationId == SharedDependDependerIndexId ||
 		relationId == SharedDependReferenceIndexId ||
 		relationId == SharedDescriptionObjIndexId ||

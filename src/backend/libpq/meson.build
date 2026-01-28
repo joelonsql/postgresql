@@ -1,6 +1,7 @@
 # Copyright (c) 2022-2026, PostgreSQL Global Development Group
 
 backend_sources += files(
+  'auth-fido2.c',
   'auth-oauth.c',
   'auth-sasl.c',
   'auth-scram.c',

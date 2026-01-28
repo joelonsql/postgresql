@@ -32,6 +32,19 @@ CREATE VIEW pg_roles AS
     FROM pg_authid LEFT JOIN pg_db_role_setting s
     ON (pg_authid.oid = setrole AND setdatabase = 0);
 
+CREATE VIEW pg_credentials AS
+    SELECT
+        r.rolname,
+        p.key_name AS credential_name,
+        CASE p.algorithm
+            WHEN -7 THEN 'ES256'
+            ELSE 'unknown'
+        END AS algorithm,
+        p.enrolled_at,
+        r.oid AS roleid
+    FROM pg_role_pubkeys p
+    JOIN pg_authid r ON p.roleid = r.oid;
+
 CREATE VIEW pg_shadow AS
     SELECT
         rolname AS usename,

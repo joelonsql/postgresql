@@ -416,6 +416,23 @@ static const internalPQconninfoOption PQconninfoOptions[] = {
 		"SSL-Key-Log-File", "D", 64,
 	offsetof(struct pg_conn, sslkeylogfile)},
 
+	/* FIDO2 security key authentication */
+	{"fido2_provider", "PGFIDO2PROVIDER", NULL, NULL,
+		"FIDO2-Provider", "", 128,
+	offsetof(struct pg_conn, fido2_provider)},
+
+	{"fido2_device", "PGFIDO2DEVICE", NULL, NULL,
+		"FIDO2-Device", "", 64,
+	offsetof(struct pg_conn, fido2_device)},
+
+	{"fido2_pin", "PGFIDO2PIN", NULL, NULL,
+		"FIDO2-PIN", "*", 64,
+	offsetof(struct pg_conn, fido2_pin)},
+
+	{"fido2_credential", "PGFIDO2CREDENTIAL", NULL, NULL,
+		"FIDO2-Credential", "", 256,
+	offsetof(struct pg_conn, fido2_credential)},
+
 	/* Terminating entry --- MUST BE LAST */
 	{NULL, NULL, NULL, NULL,
 	NULL, NULL, 0}
@@ -443,6 +460,7 @@ static const pg_fe_sasl_mech *supported_sasl_mechs[] =
 {
 	&pg_scram_mech,
 	&pg_oauth_mech,
+	&pg_fido2_mech,
 };
 #define SASL_MECHANISM_COUNT lengthof(supported_sasl_mechs)
 

@@ -719,7 +719,7 @@ static Node *makeRecursiveViewSelect(char *relname, List *aliases, Node *query);
 	CLUSTER COALESCE COLLATE COLLATION COLUMN COLUMNS COMMENT COMMENTS COMMIT
 	COMMITTED COMPRESSION CONCURRENTLY CONDITIONAL CONFIGURATION CONFLICT
 	CONNECTION CONSTRAINT CONSTRAINTS CONTENT_P CONTINUE_P CONVERSION_P COPY
-	COST CREATE CROSS CSV CUBE CURRENT_P
+	COST CREATE CREDENTIAL CROSS CSV CUBE CURRENT_P
 	CURRENT_CATALOG CURRENT_DATE CURRENT_ROLE CURRENT_SCHEMA
 	CURRENT_TIME CURRENT_TIMESTAMP CURRENT_USER CURSOR CYCLE
 
@@ -1280,6 +1280,37 @@ AlterOptRoleElem:
 			| VALID UNTIL Sconst
 				{
 					$$ = makeDefElem("validUntil", (Node *) makeString($3), @1);
+				}
+			| ADD_P CREDENTIAL ColId Sconst
+				{
+					/*
+					 * ADD CREDENTIAL credname 'pubkey'
+					 * Creates a DefElem with defname="addcredential" and
+					 * a nested list containing (credname, pubkey).
+					 */
+					$$ = makeDefElem("addcredential",
+									 (Node *) list_make2(makeString($3),
+														 makeString($4)),
+									 @1);
+				}
+			| DROP CREDENTIAL ColId
+				{
+					/*
+					 * DROP CREDENTIAL credname
+					 * Creates a DefElem with defname="dropcredential" and
+					 * the credential name as value.
+					 */
+					$$ = makeDefElem("dropcredential",
+									 (Node *) makeString($3), @1);
+				}
+			| DROP CREDENTIAL ALL
+				{
+					/*
+					 * DROP CREDENTIAL ALL
+					 * Creates a DefElem with defname="dropcredential" and
+					 * NULL value to indicate dropping all credentials.
+					 */
+					$$ = makeDefElem("dropcredential", NULL, @1);
 				}
 		/*	Supported but not documented for roles, for use by ALTER GROUP. */
 			| USER role_list
@@ -17946,6 +17977,7 @@ unreserved_keyword:
 			| CONVERSION_P
 			| COPY
 			| COST
+			| CREDENTIAL
 			| CSV
 			| CUBE
 			| CURRENT_P
