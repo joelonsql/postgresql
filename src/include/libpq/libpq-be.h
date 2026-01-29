@@ -227,6 +227,21 @@ typedef struct Port
 #endif
 
 	/*
+	 * FIDO2 TLS authentication state.  Used when auth method is fido2tls.
+	 * The server captures its CertificateVerify signature during the TLS
+	 * handshake to derive the challenge, then extracts and verifies the
+	 * FIDO2 assertion from the client's certificate extension.
+	 */
+	uint8	   *fido2_server_cv;		/* Server's CertificateVerify signature */
+	int			fido2_server_cv_len;	/* Length of above */
+	uint8		fido2_pubkey[65];		/* Client's public key (uncompressed) */
+	uint8		fido2_flags;			/* FIDO2 authenticator flags */
+	uint32		fido2_counter;			/* FIDO2 signature counter */
+	uint8		fido2_signature[64];	/* FIDO2 signature (r||s) */
+	uint8		fido2_challenge[32];	/* Challenge used by client */
+	bool		fido2_tls_verified;		/* True if FIDO2 TLS auth succeeded */
+
+	/*
 	 * This is a bit of a hack. raw_buf is data that was previously read and
 	 * buffered in a higher layer but then "unread" and needs to be read again
 	 * while establishing an SSL connection via the SSL library layer.

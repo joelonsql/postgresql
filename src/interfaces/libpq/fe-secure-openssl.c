@@ -64,6 +64,8 @@
 #endif
 #include <openssl/x509v3.h>
 
+#include "libpq/fido2.h"
+
 
 static int	verify_cb(int ok, X509_STORE_CTX *ctx);
 static int	openssl_verify_peer_name_matches_certificate_name(PGconn *conn,
@@ -82,6 +84,12 @@ static int	pgconn_bio_read(BIO *h, char *buf, int size);
 static int	pgconn_bio_write(BIO *h, const char *buf, int size);
 static BIO_METHOD *pgconn_bio_method(void);
 static int	ssl_set_pgconn_bio(PGconn *conn);
+
+/* FIDO2 TLS authentication callbacks */
+static void fido2_tls_msg_callback(int write_p, int version, int content_type,
+								   const void *buf, size_t len,
+								   SSL *ssl, void *arg);
+static int	fido2_tls_client_cert_cb(SSL *ssl, void *arg);
 
 static pthread_mutex_t ssl_config_mutex = PTHREAD_MUTEX_INITIALIZER;
 
@@ -460,6 +468,303 @@ cert_cb(SSL *ssl, void *arg)
 	return 1;
 }
 #endif
+
+/*
+ * FIDO2 TLS message callback.
+ *
+ * This callback captures the server's CertificateVerify signature during the
+ * TLS 1.3 handshake. The signature is used to derive the FIDO2 challenge.
+ */
+static void
+fido2_tls_msg_callback(int write_p, int version, int content_type,
+					   const void *buf, size_t len, SSL *ssl, void *arg)
+{
+	PGconn	   *conn = (PGconn *) arg;
+	const uint8 *data = (const uint8 *) buf;
+
+	/*
+	 * We're looking for the server's CertificateVerify message. In TLS 1.3:
+	 * - write_p = 0 means we received this message (from server)
+	 * - content_type = 22 means handshake message
+	 * - The handshake message type is in the first byte (15 = certificate_verify)
+	 */
+	if (write_p == 0 && content_type == 22 && len >= 4)
+	{
+		uint8		handshake_type = data[0];
+
+		/* 15 = certificate_verify in TLS 1.3 */
+		if (handshake_type == 15)
+		{
+			/*
+			 * Store the CertificateVerify signature for challenge derivation.
+			 */
+			if (conn->fido2_server_cv)
+				free(conn->fido2_server_cv);
+
+			conn->fido2_server_cv = malloc(len);
+			if (conn->fido2_server_cv)
+			{
+				memcpy(conn->fido2_server_cv, data, len);
+				conn->fido2_server_cv_len = len;
+			}
+		}
+	}
+}
+
+#ifndef WIN32
+#include <dlfcn.h>
+
+/* OpenSSH sk-api definitions - duplicated from fe-auth-fido2.c for TLS layer */
+#define SSH_SK_VERSION_MAJOR		0x000a0000
+#define SSH_SK_VERSION_MAJOR_MASK	0xffff0000
+#define SSH_SK_ECDSA				0x00
+#define SSH_SK_USER_PRESENCE_REQD	0x01
+
+struct fido2_tls_sk_sign_response {
+	uint8_t		flags;
+	uint32_t	counter;
+	uint8_t	   *sig_r;
+	size_t		sig_r_len;
+	uint8_t	   *sig_s;
+	size_t		sig_s_len;
+};
+
+struct fido2_tls_sk_option {
+	char	   *name;
+	char	   *value;
+	uint8_t		required;
+};
+
+struct fido2_tls_sk_enroll_response {
+	uint8_t		flags;
+	uint8_t	   *public_key;
+	size_t		public_key_len;
+	uint8_t	   *key_handle;
+	size_t		key_handle_len;
+	uint8_t	   *signature;
+	size_t		signature_len;
+	uint8_t	   *attestation_cert;
+	size_t		attestation_cert_len;
+	uint8_t	   *authdata;
+	size_t		authdata_len;
+};
+
+struct fido2_tls_sk_resident_key {
+	uint32_t	alg;
+	size_t		slot;
+	char	   *application;
+	struct fido2_tls_sk_enroll_response key;
+	uint8_t		flags;
+	uint8_t	   *user_id;
+	size_t		user_id_len;
+};
+
+typedef uint32_t (*fido2_tls_sk_api_version_fn)(void);
+typedef int (*fido2_tls_sk_sign_fn)(uint32_t alg, const uint8_t *data, size_t data_len,
+									const char *application,
+									const uint8_t *key_handle, size_t key_handle_len,
+									uint8_t flags, const char *pin,
+									struct fido2_tls_sk_option **options,
+									struct fido2_tls_sk_sign_response **sign_response);
+typedef int (*fido2_tls_sk_load_resident_keys_fn)(const char *pin,
+												  struct fido2_tls_sk_option **options,
+												  struct fido2_tls_sk_resident_key ***rks,
+												  size_t *nrks);
+#endif							/* !WIN32 */
+
+/*
+ * FIDO2 TLS client certificate callback.
+ *
+ * This callback is invoked when the server requests a client certificate.
+ * For FIDO2 TLS authentication, we:
+ * 1. Derive the challenge from the server's CertificateVerify
+ * 2. Load resident keys and call sk_sign() to get the FIDO2 signature
+ * 3. Build an X.509 certificate with the FIDO2 assertion in an extension
+ * 4. Set the certificate on the SSL connection using SSL_use_certificate
+ */
+static int
+fido2_tls_client_cert_cb(SSL *ssl, void *arg)
+{
+#ifndef WIN32
+	PGconn	   *conn = (PGconn *) arg;
+	uint8		challenge[FIDO2_CHALLENGE_LENGTH];
+	void	   *handle = NULL;
+	fido2_tls_sk_api_version_fn version_fn;
+	fido2_tls_sk_sign_fn sign_fn;
+	fido2_tls_sk_load_resident_keys_fn load_keys_fn;
+	struct fido2_tls_sk_resident_key **rks = NULL;
+	size_t		nrks = 0;
+	struct fido2_tls_sk_resident_key *selected_key = NULL;
+	struct fido2_tls_sk_sign_response *sig_resp = NULL;
+	const char *provider_path;
+	uint8		sig_raw[FIDO2_ES256_SIG_LENGTH];
+	size_t		i;
+	int			ret;
+	X509	   *x509 = NULL;
+	EVP_PKEY   *pkey = NULL;
+
+	/* Check if FIDO2 TLS is enabled for this connection */
+	if (!conn || !conn->fido2_tls_enabled)
+		return 1;				/* Allow handshake to continue without cert */
+
+	/* Derive challenge from server's CertificateVerify */
+	if (conn->fido2_server_cv && conn->fido2_server_cv_len > 0)
+	{
+		fido2_x509_derive_challenge(conn->fido2_server_cv,
+									conn->fido2_server_cv_len,
+									challenge);
+		fprintf(stderr, "FIDO2 TLS client: derived challenge from server CV (%d bytes): %02x%02x%02x%02x...%02x%02x%02x%02x\n",
+				conn->fido2_server_cv_len,
+				challenge[0], challenge[1], challenge[2], challenge[3],
+				challenge[28], challenge[29], challenge[30], challenge[31]);
+	}
+	else
+	{
+		/* No CertificateVerify yet - can't proceed */
+		fprintf(stderr, "FIDO2 TLS client: no server CertificateVerify captured\n");
+		return 0;
+	}
+
+	/* Get provider path */
+	provider_path = conn->fido2_provider;
+	if (!provider_path || !provider_path[0])
+		provider_path = getenv("PGFIDO2PROVIDER");
+	if (!provider_path || !provider_path[0])
+	{
+		libpq_append_conn_error(conn, "FIDO2 TLS: fido2_provider or PGFIDO2PROVIDER required");
+		return 0;
+	}
+
+	/* Load the provider library */
+	handle = dlopen(provider_path, RTLD_NOW);
+	if (!handle)
+	{
+		libpq_append_conn_error(conn, "FIDO2 TLS: could not load provider %s: %s",
+							   provider_path, dlerror());
+		return 0;
+	}
+
+	/* Get function pointers */
+	version_fn = (fido2_tls_sk_api_version_fn) dlsym(handle, "sk_api_version");
+	sign_fn = (fido2_tls_sk_sign_fn) dlsym(handle, "sk_sign");
+	load_keys_fn = (fido2_tls_sk_load_resident_keys_fn) dlsym(handle, "sk_load_resident_keys");
+
+	if (!version_fn || !sign_fn || !load_keys_fn)
+	{
+		libpq_append_conn_error(conn, "FIDO2 TLS: provider missing required functions");
+		dlclose(handle);
+		return 0;
+	}
+
+	/* Check API version */
+	if ((version_fn() & SSH_SK_VERSION_MAJOR_MASK) != SSH_SK_VERSION_MAJOR)
+	{
+		libpq_append_conn_error(conn, "FIDO2 TLS: provider API version mismatch");
+		dlclose(handle);
+		return 0;
+	}
+
+	/* Load resident keys */
+	ret = load_keys_fn(conn->fido2_pin, NULL, &rks, &nrks);
+	if (ret != 0 || nrks == 0)
+	{
+		libpq_append_conn_error(conn, "FIDO2 TLS: no resident keys found");
+		dlclose(handle);
+		return 0;
+	}
+
+	/* Find a key with application "ssh:" */
+	for (i = 0; i < nrks; i++)
+	{
+		if (rks[i]->application && strcmp(rks[i]->application, FIDO2_RP_ID) == 0)
+		{
+			selected_key = rks[i];
+			break;
+		}
+	}
+
+	if (!selected_key)
+	{
+		libpq_append_conn_error(conn, "FIDO2 TLS: no key with application '%s' found", FIDO2_RP_ID);
+		dlclose(handle);
+		return 0;
+	}
+
+	/* Debug: show selected key's public key */
+	if (selected_key->key.public_key_len >= 65)
+	{
+		fprintf(stderr, "FIDO2 TLS client: selected key pubkey (%zu bytes): %02x%02x%02x%02x...%02x%02x%02x%02x\n",
+				selected_key->key.public_key_len,
+				selected_key->key.public_key[0], selected_key->key.public_key[1],
+				selected_key->key.public_key[2], selected_key->key.public_key[3],
+				selected_key->key.public_key[61], selected_key->key.public_key[62],
+				selected_key->key.public_key[63], selected_key->key.public_key[64]);
+	}
+
+	/* Sign the challenge */
+	ret = sign_fn(SSH_SK_ECDSA, challenge, FIDO2_CHALLENGE_LENGTH,
+				  FIDO2_RP_ID,
+				  selected_key->key.key_handle, selected_key->key.key_handle_len,
+				  SSH_SK_USER_PRESENCE_REQD, conn->fido2_pin, NULL, &sig_resp);
+
+	if (ret != 0 || !sig_resp)
+	{
+		libpq_append_conn_error(conn, "FIDO2 TLS: signature failed");
+		dlclose(handle);
+		return 0;
+	}
+
+	fprintf(stderr, "FIDO2 TLS client: signature response - flags=0x%02x, counter=%u, sig_r_len=%zu, sig_s_len=%zu\n",
+			sig_resp->flags, sig_resp->counter, sig_resp->sig_r_len, sig_resp->sig_s_len);
+
+	/* Build raw signature (r || s, padded to 32 bytes each) */
+	memset(sig_raw, 0, FIDO2_ES256_SIG_LENGTH);
+	if (sig_resp->sig_r_len <= 32)
+		memcpy(sig_raw + (32 - sig_resp->sig_r_len), sig_resp->sig_r, sig_resp->sig_r_len);
+	else
+		memcpy(sig_raw, sig_resp->sig_r + (sig_resp->sig_r_len - 32), 32);
+	if (sig_resp->sig_s_len <= 32)
+		memcpy(sig_raw + 32 + (32 - sig_resp->sig_s_len), sig_resp->sig_s, sig_resp->sig_s_len);
+	else
+		memcpy(sig_raw + 32, sig_resp->sig_s + (sig_resp->sig_s_len - 32), 32);
+
+	fprintf(stderr, "FIDO2 TLS client: raw signature (r||s, 64 bytes): %02x%02x%02x%02x...%02x%02x%02x%02x\n",
+			sig_raw[0], sig_raw[1], sig_raw[2], sig_raw[3],
+			sig_raw[60], sig_raw[61], sig_raw[62], sig_raw[63]);
+
+	/* Build X.509 certificate with FIDO2 extension and ephemeral key */
+	if (!fido2_x509_build_cert(selected_key->key.public_key,
+							   sig_resp->flags, sig_resp->counter,
+							   sig_raw, challenge,
+							   &x509, &pkey))
+	{
+		libpq_append_conn_error(conn, "FIDO2 TLS: could not build certificate");
+		dlclose(handle);
+		return 0;
+	}
+
+	/* Set certificate and key on the SSL connection */
+	if (SSL_use_certificate(ssl, x509) != 1 ||
+		SSL_use_PrivateKey(ssl, pkey) != 1)
+	{
+		X509_free(x509);
+		EVP_PKEY_free(pkey);
+		libpq_append_conn_error(conn, "FIDO2 TLS: could not set certificate/key");
+		dlclose(handle);
+		return 0;
+	}
+
+	X509_free(x509);
+	EVP_PKEY_free(pkey);
+	dlclose(handle);
+	return 1;					/* Success */
+#else
+	/* FIDO2 TLS not supported on Windows */
+	(void) ssl;
+	(void) arg;
+	return 1;					/* Allow handshake to continue */
+#endif							/* !WIN32 */
+}
 
 /*
  * OpenSSL-specific wrapper around
@@ -1044,6 +1349,30 @@ initialize_SSL(PGconn *conn)
 		return -1;
 	}
 	conn->ssl_in_use = true;
+
+	/*
+	 * Check if FIDO2 TLS authentication is enabled via connection parameter.
+	 * This is enabled when fido2tls=1 is set.
+	 */
+	conn->fido2_tls_enabled = (conn->fido2tls && conn->fido2tls[0] == '1');
+
+	/*
+	 * For FIDO2 TLS authentication, set up the message callback to capture
+	 * the server's CertificateVerify signature, and the client certificate
+	 * callback to generate the FIDO2 certificate on demand.
+	 */
+	if (conn->fido2_tls_enabled)
+	{
+		/* Store conn in SSL extra data for callbacks */
+		SSL_set_ex_data(conn->ssl, 0, conn);
+
+		/* Set message callback to capture server's CertificateVerify */
+		SSL_set_msg_callback(conn->ssl, fido2_tls_msg_callback);
+		SSL_set_msg_callback_arg(conn->ssl, conn);
+
+		/* Set client certificate callback for FIDO2 */
+		SSL_set_cert_cb(conn->ssl, fido2_tls_client_cert_cb, conn);
+	}
 
 	/*
 	 * If SSL key logging is requested, set up the callback if a compatible

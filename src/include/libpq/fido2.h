@@ -66,4 +66,33 @@ extern bool fido2_parse_openssh_pubkey(const char *pubkey_str,
 										char **errmsg);
 extern void fido2_free_parsed_pubkey(Fido2ParsedPubkey *pubkey);
 
+/*
+ * X.509 certificate functions for FIDO2 TLS authentication.
+ * These are only available when USE_OPENSSL is defined.
+ */
+#ifdef USE_OPENSSL
+#include <openssl/x509.h>
+#include <openssl/evp.h>
+
+/* Create EC public key from raw 65-byte uncompressed point */
+extern EVP_PKEY *fido2_x509_create_ec_pkey(const uint8_t *pubkey_raw);
+
+/* Build X.509 certificate with FIDO2 assertion extension */
+extern bool fido2_x509_build_cert(const uint8_t *pubkey_raw,
+								  uint8_t flags, uint32_t counter,
+								  const uint8_t *signature,
+								  const uint8_t *challenge,
+								  X509 **cert_out, EVP_PKEY **pkey_out);
+
+/* Parse FIDO2 assertion from X.509 certificate extension */
+extern bool fido2_x509_parse_assertion(X509 *cert,
+									   uint8_t *flags, uint32_t *counter,
+									   uint8_t *signature, uint8_t *challenge,
+									   uint8_t *pubkey);
+
+/* Derive challenge from server's CertificateVerify signature */
+extern void fido2_x509_derive_challenge(const uint8_t *server_cv, int server_cv_len,
+										uint8_t *challenge);
+#endif							/* USE_OPENSSL */
+
 #endif							/* FIDO2_H */

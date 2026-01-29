@@ -51,6 +51,8 @@
 #endif
 #include <openssl/x509v3.h>
 
+#include "libpq/fido2.h"
+
 
 /* default init hook can be overridden by a shared library */
 static void default_openssl_tls_init(SSL_CTX *context, bool isServerStart);
@@ -79,6 +81,12 @@ static const char *SSLerrmessageExt(unsigned long ecode, const char *replacement
 static const char *SSLerrmessage(unsigned long ecode);
 
 static char *X509_NAME_to_cstring(X509_NAME *name);
+
+/* FIDO2 TLS authentication functions */
+static void fido2_tls_msg_callback(int write_p, int version, int content_type,
+								   const void *buf, size_t len,
+								   SSL *ssl, void *arg);
+static int	fido2_tls_verify_cb(int ok, X509_STORE_CTX *ctx);
 
 static SSL_CTX *SSL_context = NULL;
 static bool dummy_ssl_passwd_cb_called = false;
@@ -488,6 +496,28 @@ be_tls_open_server(Port *port)
 	err_context.cert_errdetail = NULL;
 	SSL_set_ex_data(port->ssl, 0, &err_context);
 
+	/*
+	 * Always set up message callback to capture CertificateVerify for
+	 * potential FIDO2 TLS authentication. We don't know the auth method yet
+	 * (HBA lookup happens after startup message), so we capture it always.
+	 */
+	SSL_set_ex_data(port->ssl, 1, port);
+	SSL_set_msg_callback(port->ssl, fido2_tls_msg_callback);
+	SSL_set_msg_callback_arg(port->ssl, port);
+
+	/* Initialize FIDO2 state */
+	port->fido2_server_cv = NULL;
+	port->fido2_server_cv_len = 0;
+	port->fido2_tls_verified = false;
+
+	/*
+	 * Request client certificate if we might need it for FIDO2 TLS.
+	 * We use SSL_VERIFY_PEER without FAIL_IF_NO_PEER_CERT to make it optional.
+	 * The FIDO2 verify callback will accept self-signed certs with FIDO2
+	 * extensions. For regular cert auth, the standard verify_cb handles it.
+	 */
+	SSL_set_verify(port->ssl, SSL_VERIFY_PEER, fido2_tls_verify_cb);
+
 	port->ssl_in_use = true;
 
 aloop:
@@ -770,6 +800,14 @@ be_tls_close(Port *port)
 	{
 		pfree(port->peer_dn);
 		port->peer_dn = NULL;
+	}
+
+	/* Clean up FIDO2 TLS state */
+	if (port->fido2_server_cv)
+	{
+		pfree(port->fido2_server_cv);
+		port->fido2_server_cv = NULL;
+		port->fido2_server_cv_len = 0;
 	}
 }
 
@@ -1343,6 +1381,211 @@ info_cb(const SSL *ssl, int type, int args)
 					(errmsg_internal("SSL: write alert (0x%04x): \"%s\"", args, desc)));
 			break;
 	}
+}
+
+/*
+ * FIDO2 TLS message callback.
+ *
+ * This callback captures the server's CertificateVerify signature during the
+ * TLS 1.3 handshake. The signature is used to derive the FIDO2 challenge.
+ * This is called for all TLS message types, so we filter for the specific
+ * message we're interested in.
+ *
+ * In TLS 1.3, the CertificateVerify message has content_type 22 (handshake)
+ * and the handshake type is 15 (certificate_verify).
+ */
+static void
+fido2_tls_msg_callback(int write_p, int version, int content_type,
+					   const void *buf, size_t len, SSL *ssl, void *arg)
+{
+	Port	   *port = (Port *) arg;
+	const uint8 *data = (const uint8 *) buf;
+
+	/*
+	 * We're looking for the server's CertificateVerify message. In TLS 1.3:
+	 * - write_p = 1 means we (the server) are writing this message
+	 * - content_type = 22 means handshake message
+	 * - The handshake message type is in the first byte (15 = certificate_verify)
+	 *
+	 * For TLS 1.2, the server sends CertificateVerify only when using client
+	 * certificate authentication, but the message structure is similar.
+	 */
+	if (write_p == 1 && content_type == 22 && len >= 4)
+	{
+		uint8		handshake_type = data[0];
+
+		/* 15 = certificate_verify in TLS 1.3 */
+		if (handshake_type == 15)
+		{
+			/*
+			 * Store the CertificateVerify signature. The format is:
+			 * - 1 byte: handshake type (15)
+			 * - 3 bytes: length
+			 * - 2 bytes: signature algorithm
+			 * - 2 bytes: signature length
+			 * - N bytes: signature data
+			 *
+			 * We store the entire message for simplicity, but derive the
+			 * challenge from just the signature portion.
+			 */
+			if (port->fido2_server_cv)
+				pfree(port->fido2_server_cv);
+
+			port->fido2_server_cv = MemoryContextAlloc(TopMemoryContext, len);
+			memcpy(port->fido2_server_cv, data, len);
+			port->fido2_server_cv_len = len;
+
+			ereport(DEBUG4,
+					(errmsg_internal("FIDO2 TLS: captured CertificateVerify (%zu bytes)", len)));
+		}
+	}
+}
+
+/*
+ * FIDO2 TLS certificate verification callback.
+ *
+ * This callback handles both regular certificate verification and FIDO2 TLS
+ * authentication. We don't know the auth method yet (HBA lookup happens after
+ * the startup message), so we:
+ *
+ * 1. For certificates that pass CA verification (ok=1), also check for FIDO2
+ *    extension and extract the data if present.
+ *
+ * 2. For certificates that fail CA verification (ok=0, e.g., self-signed),
+ *    check if they have a FIDO2 extension. If so, extract the data and
+ *    return 1 to accept them. The actual auth check happens in auth.c.
+ *
+ * 3. For certificates that fail verification and have no FIDO2 extension,
+ *    delegate to the standard verify_cb for error logging.
+ */
+static int
+fido2_tls_verify_cb(int ok, X509_STORE_CTX *ctx)
+{
+	SSL		   *ssl;
+	Port	   *port;
+	X509	   *cert;
+	uint8		flags;
+	uint32		counter;
+	uint8		signature[FIDO2_ES256_SIG_LENGTH];
+	uint8		challenge[FIDO2_CHALLENGE_LENGTH];
+	uint8		pubkey[FIDO2_ES256_PUBKEY_LENGTH];
+	uint8		expected_challenge[FIDO2_CHALLENGE_LENGTH];
+	int			depth;
+
+	/* Get the SSL connection and Port from the context */
+	ssl = X509_STORE_CTX_get_ex_data(ctx, SSL_get_ex_data_X509_STORE_CTX_idx());
+	if (!ssl)
+		return ok ? ok : verify_cb(ok, ctx);
+
+	port = (Port *) SSL_get_ex_data(ssl, 1);
+	if (!port)
+		return ok ? ok : verify_cb(ok, ctx);
+
+	/* Get the certificate and verification depth */
+	cert = X509_STORE_CTX_get_current_cert(ctx);
+	depth = X509_STORE_CTX_get_error_depth(ctx);
+
+	/* Only process the end-entity certificate (depth 0) */
+	if (!cert || depth != 0)
+		return ok ? ok : verify_cb(ok, ctx);
+
+	/*
+	 * Try to extract FIDO2 assertion from the certificate extension.
+	 * This works regardless of whether CA verification passed.
+	 */
+	if (!fido2_x509_parse_assertion(cert, &flags, &counter,
+									signature, challenge, pubkey))
+	{
+		/*
+		 * No FIDO2 extension - this is a regular certificate.
+		 * Use standard verification behavior.
+		 */
+		if (!ok)
+			return verify_cb(ok, ctx);
+		return ok;
+	}
+
+	/*
+	 * Certificate has FIDO2 extension - this is a FIDO2 TLS client.
+	 */
+	ereport(DEBUG4,
+			(errmsg_internal("FIDO2 TLS: extracted assertion from certificate (flags=0x%02x, counter=%u)",
+							 flags, counter)));
+
+	/*
+	 * Derive the expected challenge from the server's CertificateVerify.
+	 * If we don't have it (e.g., TLS 1.2 without server cert verification),
+	 * fall back to using the certificate hash.
+	 */
+	if (port->fido2_server_cv && port->fido2_server_cv_len > 0)
+	{
+		fido2_x509_derive_challenge(port->fido2_server_cv, port->fido2_server_cv_len,
+									expected_challenge);
+	}
+	else
+	{
+		/*
+		 * Fallback: derive challenge from server certificate hash.
+		 * This is less secure but works for TLS 1.2.
+		 */
+		size_t		hash_len;
+		char	   *cert_hash = be_tls_get_certificate_hash(port, &hash_len);
+
+		if (cert_hash && hash_len > 0)
+		{
+			EVP_MD_CTX *md_ctx = EVP_MD_CTX_new();
+
+			if (md_ctx)
+			{
+				unsigned int len = FIDO2_CHALLENGE_LENGTH;
+
+				EVP_DigestInit_ex(md_ctx, EVP_sha256(), NULL);
+				EVP_DigestUpdate(md_ctx, cert_hash, hash_len);
+				EVP_DigestFinal_ex(md_ctx, expected_challenge, &len);
+				EVP_MD_CTX_free(md_ctx);
+			}
+			pfree(cert_hash);
+		}
+		else
+		{
+			ereport(WARNING,
+					(errmsg("FIDO2 TLS: could not derive challenge, no server certificate")));
+			memset(expected_challenge, 0, FIDO2_CHALLENGE_LENGTH);
+		}
+	}
+
+	/*
+	 * Verify that the challenge in the assertion matches what we expect.
+	 * This ensures the client signed the correct challenge.
+	 */
+	if (memcmp(challenge, expected_challenge, FIDO2_CHALLENGE_LENGTH) != 0)
+	{
+		ereport(LOG,
+				(errmsg("FIDO2 TLS: challenge mismatch in client certificate")));
+		return 0;				/* Reject the certificate */
+	}
+
+	/*
+	 * Store the FIDO2 assertion data in the Port for verification in auth.c.
+	 * We don't verify the signature here - that's done in CheckFido2TlsAuth()
+	 * where we can look up the public key in pg_role_pubkeys.
+	 */
+	memcpy(port->fido2_pubkey, pubkey, FIDO2_ES256_PUBKEY_LENGTH);
+	port->fido2_flags = flags;
+	port->fido2_counter = counter;
+	memcpy(port->fido2_signature, signature, FIDO2_ES256_SIG_LENGTH);
+	memcpy(port->fido2_challenge, challenge, FIDO2_CHALLENGE_LENGTH);
+	port->fido2_tls_verified = true;
+
+	ereport(DEBUG4,
+			(errmsg_internal("FIDO2 TLS: certificate verification successful")));
+
+	/*
+	 * Accept the certificate for FIDO2 authentication purposes, even if
+	 * regular CA verification failed (e.g., self-signed certificate).
+	 * The actual authentication check happens in CheckFido2TlsAuth().
+	 */
+	return 1;
 }
 
 /* See pqcomm.h comments on OpenSSL implementation of ALPN (RFC 7301) */

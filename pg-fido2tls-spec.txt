@@ -1,0 +1,627 @@
+
+
+PostgreSQL FIDO2 TLS Authentication Technical Specification
+============================================================
+
+Hardware Security Key Authentication via TLS Certificate Extension
+
+Version: 1.0
+Date: January 2026
+
+Abstract
+
+   This document provides a comprehensive technical specification for
+   PostgreSQL's FIDO2 TLS authentication implementation. It describes how
+   hardware security keys (such as YubiKeys) are used to authenticate
+   database connections by embedding FIDO2 assertions within X.509
+   client certificates during the TLS handshake, with challenge binding
+   derived from the server's CertificateVerify signature.
+
+Table of Contents
+
+   1.  Architecture Overview
+   2.  Authentication Flow
+   3.  Layer 1: TLS 1.3 Handshake
+       3.1.  Challenge Derivation from CertificateVerify
+       3.2.  TLS Message Callback
+       3.3.  TLS 1.2 Fallback
+   4.  Layer 2: X.509 Certificate Extension
+       4.1.  Extension OID
+       4.2.  DER SEQUENCE Format
+       4.3.  Certificate Structure
+   5.  Server-Side Verification
+       5.1.  Certificate Verification Callback
+       5.2.  CheckFido2TlsAuth Flow
+       5.3.  Signature Verification
+   6.  Client-Side Certificate Generation
+       6.1.  sk-provider Interface
+       6.2.  Certificate Building
+   7.  Message Format Reference
+   8.  Security Considerations
+   9.  References
+
+                      ============================================
+
+1.  Architecture Overview
+
+   FIDO2 TLS authentication uses a two-layer protocol stack:
+
+   +------------------------------------------------------------------+
+   |                     PostgreSQL Server                             |
+   |              (auth.c, be-secure-openssl.c)                        |
+   +------------------------------------------------------------------+
+                               |
+                               | Layer 2: X.509 Certificate with
+                               | FIDO2 Extension (custom OID)
+                               v
+   +------------------------------------------------------------------+
+   |                      TLS 1.3 Layer                                |
+   |     Challenge = SHA256(Server CertificateVerify Signature)        |
+   +------------------------------------------------------------------+
+                               |
+                               | Layer 1: TLS Handshake
+                               v
+   +------------------------------------------------------------------+
+   |                     libpq Client (psql)                           |
+   |           (fe-secure-openssl.c, fido2-x509.c)                     |
+   +------------------------------------------------------------------+
+                               |
+                               | sk-provider API
+                               v
+   +------------------------------------------------------------------+
+   |                   Hardware Security Key                           |
+   |              (YubiKey, SoloKey, or similar)                       |
+   +------------------------------------------------------------------+
+
+
+   Key Design Principles:
+
+   - Challenge Binding: The FIDO2 challenge is derived from the server's
+     TLS 1.3 CertificateVerify signature, binding authentication to the
+     specific TLS session and preventing replay attacks.
+
+   - Zero Round-Trip Overhead: The FIDO2 assertion is embedded in the
+     client certificate sent during the standard TLS handshake, adding
+     no extra network round-trips.
+
+   - Compatibility with SSH Keys: Uses the OpenSSH sk-provider API
+     (sk_sign, sk_load_resident_keys) for hardware key access, allowing
+     the same security key to be used for both SSH and PostgreSQL auth.
+
+
+2.  Authentication Flow
+
+   This section shows the complete message sequence for FIDO2 TLS
+   authentication.
+
+   PostgreSQL    libpq       TLS Layer      Security Key
+   Server       (psql)
+      |           |            |                |
+      |           |            |                |
+   [1. TLS Handshake Initiation]
+      |<--ClientHello----------|                |
+      |           |            |                |
+      |--ServerHello---------->|                |
+      |--EncryptedExtensions-->|                |
+      |--Certificate---------->|                |
+      |--CertificateVerify---->|                |
+      |--Finished------------->|                |
+      |           |            |                |
+   [2. Client captures CertificateVerify]
+      |           |<-callback--|                |
+      |           |  (msg_cb)  |                |
+      |           |            |                |
+   [3. Server requests client cert]
+      |--CertificateRequest--->|                |
+      |           |            |                |
+   [4. Client derives challenge & signs]
+      |           |--challenge = SHA256(CertificateVerify)
+      |           |            |                |
+      |           |--sk_sign()----------------->|
+      |           |            |                |
+      |           |            |   [User touches|
+      |           |            |    security key]
+      |           |            |                |
+      |           |<--signature, flags, counter-|
+      |           |            |                |
+   [5. Client builds X.509 cert with FIDO2 extension]
+      |           |--build_cert|                |
+      |           |            |                |
+   [6. Client sends certificate]
+      |<--Certificate----------|                |
+      |<--CertificateVerify----|                |
+      |<--Finished-------------|                |
+      |           |            |                |
+   [7. Server extracts FIDO2 assertion from cert extension]
+      |--verify_cb|            |                |
+      |   (parse  |            |                |
+      |    ext)   |            |                |
+      |           |            |                |
+   [8. TLS Handshake Complete]
+      |--Finished------------->|                |
+      |           |            |                |
+   [9. PostgreSQL Authentication Check]
+      |--CheckFido2TlsAuth()   |                |
+      |   (lookup pubkey,      |                |
+      |    verify sig)         |                |
+      |           |            |                |
+   [10. Authentication Complete]
+      |--AuthenticationOk----->|                |
+      |           |            |                |
+
+
+3.  Layer 1: TLS 1.3 Handshake
+
+3.1.  Challenge Derivation from CertificateVerify
+
+   The FIDO2 challenge is derived from the server's TLS 1.3
+   CertificateVerify message, providing strong binding between the
+   FIDO2 assertion and the TLS session:
+
+      challenge = SHA256(server_certificate_verify_signature)
+
+   The CertificateVerify message format in TLS 1.3:
+
+    0                   1                   2                   3
+    0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
+   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+   | Type (15)     |       Length (24 bits, big-endian)           |
+   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+   |       Signature Algorithm (2 bytes)         |  Sig Len (16b) |
+   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+   |                    Signature Data                           ...
+   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+
+   The entire CertificateVerify message is hashed to derive the challenge.
+
+3.2.  TLS Message Callback
+
+   Both client and server use OpenSSL's SSL_set_msg_callback() to
+   capture the CertificateVerify message during the handshake.
+
+   Client-side (fe-secure-openssl.c:fido2_tls_msg_callback):
+
+      - write_p = 0 (received from server)
+      - content_type = 22 (handshake)
+      - handshake_type = 15 (certificate_verify)
+      - Stores message for challenge derivation
+
+   Server-side (be-secure-openssl.c:fido2_tls_msg_callback):
+
+      - write_p = 1 (sent by server)
+      - content_type = 22 (handshake)
+      - handshake_type = 15 (certificate_verify)
+      - Stores message for challenge verification
+
+3.3.  TLS 1.2 Fallback
+
+   For TLS 1.2 connections (where CertificateVerify may not be present),
+   the challenge is derived from the server certificate hash:
+
+      challenge = SHA256(server_certificate_hash)
+
+   This fallback is less secure because the certificate hash is static
+   and could potentially be replayed. TLS 1.3 is strongly recommended.
+
+
+4.  Layer 2: X.509 Certificate Extension
+
+4.1.  Extension OID
+
+   The FIDO2 assertion is carried in a custom X.509v3 extension:
+
+      OID: 1.3.6.1.4.1.58324.1.1
+
+   OID breakdown:
+      1.3.6.1.4.1  = ISO assigned OIDs, private enterprise
+      58324        = PostgreSQL IANA private enterprise number
+      1.1          = FIDO2 assertion extension
+
+4.2.  DER SEQUENCE Format
+
+   The extension value is a DER-encoded SEQUENCE containing five fields:
+
+      SEQUENCE {
+         pubkey     OCTET STRING (65 bytes, uncompressed EC point)
+         flags      OCTET STRING (1 byte)
+         counter    INTEGER (variable length, typically 1-5 bytes)
+         signature  OCTET STRING (64 bytes, r||s concatenated)
+         challenge  OCTET STRING (32 bytes, SHA256 hash)
+      }
+
+   Byte-level encoding example:
+
+    0                   1                   2
+    0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3
+   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+   |  0x30 (SEQ)   | 0x81 | Length (1-2 bytes)     |
+   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+   |  0x04 (OCT)   |  65  |  Public Key (65 bytes) |
+   +-+-+-+-+-+-+-+-+-+-+-+-+                        |
+   |                0x04 || X(32) || Y(32)        ...
+   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+   |  0x04 (OCT)   |   1  | Flags |  0x02 (INT)   |
+   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+   |  Len  |         Counter (big-endian)         |
+   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+   |  0x04 (OCT)   |  64  |  Signature (64 bytes) |
+   +-+-+-+-+-+-+-+-+-+-+-+-+                        |
+   |                   r(32) || s(32)             ...
+   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+   |  0x04 (OCT)   |  32  | Challenge (32 bytes)  |
+   +-+-+-+-+-+-+-+-+-+-+-+-+                       ...
+   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+
+   Field details:
+
+   +------------+--------+----------------------------------------+
+   | Field      | Size   | Description                            |
+   +------------+--------+----------------------------------------+
+   | pubkey     | 65     | Uncompressed EC P-256 point            |
+   |            |        | Format: 0x04 || X(32) || Y(32)         |
+   +------------+--------+----------------------------------------+
+   | flags      | 1      | FIDO2 authenticator flags              |
+   |            |        | Bit 0 (0x01): UP - User Present        |
+   |            |        | Bit 2 (0x04): UV - User Verified       |
+   +------------+--------+----------------------------------------+
+   | counter    | 1-5    | Signature counter (ASN.1 INTEGER)      |
+   |            |        | Big-endian, may have leading 0x00      |
+   +------------+--------+----------------------------------------+
+   | signature  | 64     | ECDSA signature, raw format            |
+   |            |        | r(32 bytes) || s(32 bytes)             |
+   +------------+--------+----------------------------------------+
+   | challenge  | 32     | SHA256(CertificateVerify)              |
+   +------------+--------+----------------------------------------+
+
+4.3.  Certificate Structure
+
+   The X.509 certificate uses an ephemeral key pair for the TLS
+   CertificateVerify signature. The FIDO2 public key is stored in the
+   extension, not in the Subject Public Key Info field.
+
+   Certificate fields:
+
+      Version:            v3 (0x02)
+      Serial Number:      Random or timestamp-based
+      Issuer:             CN=FIDO2-Client
+      Subject:            CN=FIDO2-Client
+      Validity:           Not Before: now, Not After: now + 5 minutes
+      Subject Public Key: Ephemeral EC P-256 key (for TLS)
+      Extensions:         1.3.6.1.4.1.58324.1.1 (FIDO2 assertion)
+      Signature:          Self-signed with ephemeral key
+
+
+5.  Server-Side Verification
+
+5.1.  Certificate Verification Callback
+
+   The server's fido2_tls_verify_cb() function (be-secure-openssl.c)
+   handles FIDO2 certificate verification during the TLS handshake:
+
+   1. Check if certificate has FIDO2 extension (OID 1.3.6.1.4.1.58324.1.1)
+   2. If no extension, use standard certificate verification
+   3. If extension present:
+      a. Parse extension to extract pubkey, flags, counter, sig, challenge
+      b. Derive expected challenge from stored CertificateVerify
+      c. Verify challenge matches expected value
+      d. Store assertion data in Port struct
+      e. Accept certificate (return 1)
+
+   Port struct fields (libpq-be.h):
+
+      uint8   *fido2_server_cv       /* CertificateVerify message */
+      int      fido2_server_cv_len   /* Length of above */
+      uint8    fido2_pubkey[65]      /* Client's FIDO2 public key */
+      uint8    fido2_flags           /* FIDO2 authenticator flags */
+      uint32   fido2_counter         /* Signature counter */
+      uint8    fido2_signature[64]   /* Raw ECDSA signature */
+      uint8    fido2_challenge[32]   /* Challenge from cert */
+      bool     fido2_tls_verified    /* True if extraction succeeded */
+
+5.2.  CheckFido2TlsAuth Flow
+
+   After TLS handshake completes, auth.c:CheckFido2TlsAuth() performs:
+
+   1. Verify port->fido2_tls_verified is true
+   2. Check user presence flag (UP) is set
+   3. Look up user in pg_roles
+   4. Look up public key in pg_role_pubkeys catalog
+   5. Match FIDO2 pubkey from certificate against stored keys
+   6. Verify FIDO2 signature (see 5.3)
+   7. Return STATUS_OK on success
+
+5.3.  Signature Verification
+
+   The FIDO2 signature verification follows the WebAuthn specification:
+
+   Step 1: Compute authenticatorData (37 bytes)
+
+      authenticatorData = rpIdHash(32) || flags(1) || counter(4)
+
+      rpIdHash = SHA256("ssh:")    /* RP ID for SSH security keys */
+      flags    = port->fido2_flags
+      counter  = port->fido2_counter (big-endian)
+
+   Step 2: Compute clientDataHash
+
+      clientDataHash = SHA256(challenge)
+
+   Step 3: Compute signedDataHash
+
+      signedDataHash = SHA256(authenticatorData || clientDataHash)
+
+   Step 4: Verify ES256 signature
+
+      result = ECDSA_verify(signedDataHash, signature, public_key)
+
+   The signature uses ECDSA with P-256 curve (ES256/COSE algorithm -7).
+   The raw signature format (r||s, 64 bytes) must be converted to
+   ASN.1 DER format for OpenSSL's ECDSA_verify().
+
+
+6.  Client-Side Certificate Generation
+
+6.1.  sk-provider Interface
+
+   The client uses the OpenSSH sk-provider API to access the hardware
+   security key. The provider is loaded via dlopen() from the path
+   specified by fido2_provider connection parameter or PGFIDO2PROVIDER
+   environment variable.
+
+   Required sk-provider functions:
+
+      uint32_t sk_api_version(void);
+
+         Returns API version. Must match SSH_SK_VERSION_MAJOR (0x000a0000).
+
+      int sk_sign(uint32_t alg,
+                  const uint8_t *data, size_t data_len,
+                  const char *application,
+                  const uint8_t *key_handle, size_t key_handle_len,
+                  uint8_t flags,
+                  const char *pin,
+                  struct sk_option **options,
+                  struct sk_sign_response **response);
+
+         Signs the challenge with the security key.
+         - alg: SSH_SK_ECDSA (0x00)
+         - data: 32-byte challenge
+         - application: "ssh:" (RP ID)
+         - key_handle: credential ID from resident key
+         - flags: SSH_SK_USER_PRESENCE_REQD (0x01)
+
+      int sk_load_resident_keys(const char *pin,
+                                struct sk_option **options,
+                                struct sk_resident_key ***rks,
+                                size_t *nrks);
+
+         Loads all resident keys from the security key.
+
+   Response structure:
+
+      struct sk_sign_response {
+         uint8_t   flags;      /* Authenticator flags */
+         uint32_t  counter;    /* Signature counter */
+         uint8_t  *sig_r;      /* ECDSA r value */
+         size_t    sig_r_len;
+         uint8_t  *sig_s;      /* ECDSA s value */
+         size_t    sig_s_len;
+      };
+
+6.2.  Certificate Building
+
+   The fido2_x509_build_cert() function (fido2-x509.c) creates the
+   X.509 certificate:
+
+   1. Generate ephemeral EC P-256 key pair
+   2. Create X509 structure
+   3. Set version to v3
+   4. Set serial number
+   5. Set subject/issuer to "CN=FIDO2-Client"
+   6. Set validity (now to now + 5 minutes)
+   7. Set public key (ephemeral key, NOT FIDO2 key)
+   8. Create FIDO2 extension:
+      a. Encode assertion as DER SEQUENCE
+      b. Create extension object with OID
+      c. Add to certificate
+   9. Self-sign with ephemeral key
+   10. Return certificate and ephemeral private key
+
+
+7.  Message Format Reference
+
+7.1.  pg_hba.conf Configuration
+
+   FIDO2 TLS authentication requires:
+
+      hostssl  all  user  0.0.0.0/0  fido2tls
+
+   The "hostssl" prefix is mandatory - FIDO2 TLS only works over
+   TLS-encrypted connections.
+
+7.2.  Client Connection Parameters
+
+   +------------------+------------------+-------------------------------+
+   | Parameter        | Environment Var  | Description                   |
+   +------------------+------------------+-------------------------------+
+   | fido2tls         | PGFIDO2TLS       | Set to "1" to enable          |
+   | fido2_provider   | PGFIDO2PROVIDER  | Path to sk-provider library   |
+   | fido2_pin        | PGFIDO2PIN       | Security key PIN (optional)   |
+   +------------------+------------------+-------------------------------+
+
+   Example connection string:
+
+      psql "host=db.example.com sslmode=require fido2tls=1 \
+            fido2_provider=/usr/lib/ssh-sk-helper user=admin"
+
+7.3.  Public Key Storage
+
+   Public keys are stored in pg_role_pubkeys system catalog:
+
+      CREATE TABLE pg_role_pubkeys (
+         roleid     oid,
+         key_name   name,
+         public_key bytea    /* 65-byte uncompressed EC point */
+      );
+
+   The public key format matches the FIDO2 extension pubkey field:
+   0x04 followed by 32-byte X and 32-byte Y coordinates.
+
+7.4.  Complete Authentication Example
+
+   TLS CertificateVerify (server sends, ~100-150 bytes):
+      0F                            -- handshake type: certificate_verify
+      00 00 XX                      -- length (3 bytes, big-endian)
+      08 04                         -- signature algorithm (ecdsa_secp256r1_sha256)
+      00 XX                         -- signature length
+      30 ...                        -- DER-encoded ECDSA signature
+
+   Challenge derivation:
+      challenge = SHA256(entire_certificate_verify_message)
+
+   X.509 Certificate Extension (in client cert):
+      OID: 06 0A 2B 06 01 04 01 83 87 14 01 01
+           -- 1.3.6.1.4.1.58324.1.1
+
+      Value (DER SEQUENCE, ~175 bytes):
+      30 81 AD                      -- SEQUENCE, 173 bytes
+         04 41                      -- OCTET STRING, 65 bytes
+            04 XX XX ... XX         -- pubkey (0x04 || X || Y)
+         04 01                      -- OCTET STRING, 1 byte
+            05                      -- flags (UP=1, UV=1 -> 0x05)
+         02 02                      -- INTEGER, 2 bytes
+            00 2A                   -- counter = 42
+         04 40                      -- OCTET STRING, 64 bytes
+            XX XX ... XX            -- signature (r || s)
+         04 20                      -- OCTET STRING, 32 bytes
+            XX XX ... XX            -- challenge
+
+   Signature verification (server-side):
+      rpIdHash       = SHA256("ssh:")  -- 32 bytes
+      authData       = rpIdHash || 0x05 || 0x0000002A  -- 37 bytes
+      clientDataHash = SHA256(challenge)  -- 32 bytes
+      signedDataHash = SHA256(authData || clientDataHash)  -- 32 bytes
+      ECDSA_verify(signedDataHash, signature, pubkey)
+
+
+8.  Security Considerations
+
+8.1.  Challenge Binding
+
+   - The challenge is derived from the server's CertificateVerify,
+     which is unique to each TLS session
+   - This prevents replay attacks - an intercepted certificate cannot
+     be reused for a different connection
+   - The challenge is verified both during cert extraction and in
+     CheckFido2TlsAuth()
+
+8.2.  Hardware Key Requirements
+
+   - Requires a FIDO2-compatible security key with resident key support
+   - The key must have a credential with application/RP ID "ssh:"
+   - User presence (touch) is always required
+   - User verification (PIN/biometric) is optional but recommended
+
+8.3.  Transport Security
+
+   - FIDO2 TLS is only available on hostssl connections
+   - The client must verify the server certificate to prevent MITM
+   - TLS 1.3 is strongly recommended; TLS 1.2 fallback is less secure
+
+8.4.  Cryptographic Algorithms
+
+   - Challenge hash: SHA-256
+   - Signature algorithm: ES256 (ECDSA P-256 with SHA-256)
+   - Public key format: Uncompressed EC point (65 bytes)
+
+8.5.  Counter Verification
+
+   The signature counter is extracted but currently not verified against
+   a stored counter. Future implementations should:
+   - Store the last seen counter value
+   - Reject signatures with counter <= stored value
+   - Update stored counter on successful authentication
+
+8.6.  No Password Phase
+
+   Unlike SASL PASSKEY, FIDO2 TLS does not require a password phase.
+   The hardware key provides strong authentication on its own. If
+   multi-factor authentication is desired, combine with another method.
+
+
+9.  References
+
+   [WebAuthn] W3C, "Web Authentication: An API for accessing Public Key
+              Credentials Level 2", W3C Recommendation, April 2021.
+              https://www.w3.org/TR/webauthn-2/
+
+   [CTAP2]    FIDO Alliance, "Client to Authenticator Protocol (CTAP)",
+              Version 2.2, March 2023.
+              https://fidoalliance.org/specs/fido-v2.2-rd-20230321/
+
+   [RFC8446]  Rescorla, E., "The Transport Layer Security (TLS) Protocol
+              Version 1.3", RFC 8446, August 2018.
+
+   [OpenSSH]  OpenSSH Project, "PROTOCOL.u2f",
+              https://github.com/openssh/openssh-portable/blob/master/PROTOCOL.u2f
+
+
+Appendix A.  Glossary
+
+   COSE       CBOR Object Signing and Encryption
+   CTAP       Client to Authenticator Protocol
+   DER        Distinguished Encoding Rules (ASN.1)
+   ECDSA      Elliptic Curve Digital Signature Algorithm
+   ES256      ECDSA using P-256 curve and SHA-256
+   FIDO2      Fast Identity Online version 2
+   RP ID      Relying Party Identifier
+   sk-provider OpenSSH security key provider library
+   UP         User Presence (physical touch required)
+   UV         User Verification (PIN or biometric required)
+
+
+Appendix B.  Implementation Files
+
+   PostgreSQL implementation files:
+
+   +----------------------------------------+-----------------------------+
+   | File                                   | Content                     |
+   +----------------------------------------+-----------------------------+
+   | src/backend/libpq/auth.c               | CheckFido2TlsAuth()         |
+   |                                        | verification flow           |
+   +----------------------------------------+-----------------------------+
+   | src/backend/libpq/be-secure-openssl.c  | Server TLS callbacks:       |
+   |                                        | - fido2_tls_msg_callback()  |
+   |                                        | - fido2_tls_verify_cb()     |
+   +----------------------------------------+-----------------------------+
+   | src/backend/libpq/hba.c                | fido2tls auth method        |
+   |                                        | parsing and validation      |
+   +----------------------------------------+-----------------------------+
+   | src/interfaces/libpq/fe-secure-openssl.c | Client TLS callbacks:     |
+   |                                        | - fido2_tls_msg_callback()  |
+   |                                        | - fido2_tls_client_cert_cb()|
+   +----------------------------------------+-----------------------------+
+   | src/interfaces/libpq/fe-connect.c      | Connection parameter        |
+   |                                        | handling (fido2tls, etc.)   |
+   +----------------------------------------+-----------------------------+
+   | src/common/fido2-x509.c                | X.509 certificate functions:|
+   |                                        | - fido2_x509_build_cert()   |
+   |                                        | - fido2_x509_parse_assertion|
+   |                                        | - fido2_x509_derive_challenge|
+   +----------------------------------------+-----------------------------+
+   | src/include/libpq/fido2.h              | Constants and definitions:  |
+   |                                        | - FIDO2_CHALLENGE_LENGTH    |
+   |                                        | - FIDO2_ES256_PUBKEY_LENGTH |
+   |                                        | - FIDO2_ES256_SIG_LENGTH    |
+   |                                        | - FIDO2_RP_ID ("ssh:")      |
+   +----------------------------------------+-----------------------------+
+   | src/include/libpq/libpq-be.h           | Port struct FIDO2 fields    |
+   +----------------------------------------+-----------------------------+
+   | src/interfaces/libpq/libpq-int.h       | PGconn FIDO2 fields         |
+   +----------------------------------------+-----------------------------+
+
+
+Authors' Addresses
+
+   Joel Jacobson
+   Email: joel@compiler.org

@@ -433,6 +433,10 @@ static const internalPQconninfoOption PQconninfoOptions[] = {
 		"FIDO2-Credential", "", 256,
 	offsetof(struct pg_conn, fido2_credential)},
 
+	{"fido2tls", "PGFIDO2TLS", NULL, NULL,
+		"FIDO2-TLS", "", 2,
+	offsetof(struct pg_conn, fido2tls)},
+
 	/* Terminating entry --- MUST BE LAST */
 	{NULL, NULL, NULL, NULL,
 	NULL, NULL, 0}

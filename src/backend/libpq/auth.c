@@ -28,6 +28,7 @@
 #include "common/md5.h"
 #include "libpq/auth.h"
 #include "libpq/crypt.h"
+#include "libpq/fido2.h"
 #include "libpq/libpq.h"
 #include "libpq/oauth.h"
 #include "libpq/pqformat.h"
@@ -44,6 +45,22 @@
 #ifdef USE_OPENSSL
 /* SASL mechanism for FIDO2 authentication (from auth-fido2.c) */
 extern PGDLLIMPORT const pg_be_sasl_mech pg_be_fido2_mech;
+
+/* FIDO2 TLS authentication (TLS-layer FIDO2 with certificate extension) */
+static int	CheckFido2TlsAuth(Port *port, const char **logdetail);
+
+#include "access/htup_details.h"
+#include "catalog/pg_role_pubkeys.h"
+#include "common/cryptohash.h"
+#include "common/sha2.h"
+#include "utils/acl.h"
+#include "utils/builtins.h"
+#include "utils/catcache.h"
+#include "utils/syscache.h"
+#include <openssl/bn.h>
+#include <openssl/ec.h>
+#include <openssl/ecdsa.h>
+#include <openssl/obj_mac.h>
 #endif
 
 /*----------------------------------------------------------------
@@ -308,6 +325,9 @@ auth_failed(Port *port, int status, const char *logdetail)
 			break;
 		case uaFido2:
 			errstr = gettext_noop("FIDO2 authentication failed for user \"%s\"");
+			break;
+		case uaFido2Tls:
+			errstr = gettext_noop("FIDO2 TLS authentication failed for user \"%s\"");
 			break;
 		default:
 			errstr = gettext_noop("authentication failed for user \"%s\": invalid authentication method");
@@ -638,6 +658,9 @@ ClientAuthentication(Port *port)
 #ifdef USE_OPENSSL
 		case uaFido2:
 			status = CheckSASLAuth(&pg_be_fido2_mech, port, NULL, &logdetail);
+			break;
+		case uaFido2Tls:
+			status = CheckFido2TlsAuth(port, &logdetail);
 			break;
 #endif
 	}
@@ -2785,6 +2808,334 @@ CheckCertAuth(Port *port)
 	return status_check_usermap;
 }
 #endif
+
+
+/*----------------------------------------------------------------
+ * FIDO2 TLS authentication
+ *----------------------------------------------------------------
+ */
+#ifdef USE_OPENSSL
+
+/*
+ * Verify an ES256 (ECDSA P-256) signature for FIDO2 TLS auth.
+ * This is duplicated from auth-fido2.c for TLS-layer verification.
+ *
+ * pubkey: 65-byte uncompressed public key (0x04 || x || y)
+ * hash: 32-byte SHA-256 hash of the signed data
+ * sig: 64-byte raw signature (r || s, each 32 bytes)
+ */
+static Fido2VerifyResult
+fido2_tls_verify_es256(const uint8_t *pubkey, const uint8_t *hash, const uint8_t *sig)
+{
+	EC_KEY	   *key = NULL;
+	BIGNUM	   *x = NULL, *y = NULL, *r = NULL, *s = NULL;
+	ECDSA_SIG  *esig = NULL;
+	Fido2VerifyResult result = FIDO2_VERIFY_FAIL;
+
+	if (pubkey[0] != 0x04)
+		return FIDO2_VERIFY_FAIL;
+
+	key = EC_KEY_new_by_curve_name(NID_X9_62_prime256v1);
+	if (!key)
+		goto done;
+
+	x = BN_bin2bn(pubkey + 1, 32, NULL);
+	y = BN_bin2bn(pubkey + 33, 32, NULL);
+	if (!x || !y || EC_KEY_set_public_key_affine_coordinates(key, x, y) != 1)
+		goto done;
+
+	esig = ECDSA_SIG_new();
+	r = BN_bin2bn(sig, 32, NULL);
+	s = BN_bin2bn(sig + 32, 32, NULL);
+	if (!esig || !r || !s || ECDSA_SIG_set0(esig, r, s) != 1)
+		goto done;
+	r = s = NULL;
+
+	if (ECDSA_do_verify(hash, 32, esig, key) == 1)
+		result = FIDO2_VERIFY_OK;
+
+done:
+	ECDSA_SIG_free(esig);
+	BN_free(r);
+	BN_free(s);
+	BN_free(x);
+	BN_free(y);
+	EC_KEY_free(key);
+	return result;
+}
+
+/*
+ * CheckFido2TlsAuth - Verify FIDO2 authentication via TLS layer.
+ *
+ * This function is called after the TLS handshake completes. The FIDO2
+ * assertion was extracted from the client's certificate extension during
+ * the handshake by fido2_tls_verify_cb() and stored in the Port struct.
+ *
+ * We need to:
+ * 1. Verify that the TLS-layer FIDO2 verification succeeded
+ * 2. Look up the public key in pg_role_pubkeys
+ * 3. Verify the FIDO2 signature
+ * 4. Check user presence/verification flags
+ */
+static int
+CheckFido2TlsAuth(Port *port, const char **logdetail)
+{
+	CatCList   *memlist;
+	int			i;
+	uint8	   *stored_pubkey = NULL;
+	int			stored_pubkey_len = 0;
+	Oid			roleid;
+	uint8		rp_hash[PG_SHA256_DIGEST_LENGTH];
+	uint8		auth_data[37];
+	uint8		signed_hash[PG_SHA256_DIGEST_LENGTH];
+	pg_cryptohash_ctx *ctx;
+
+	*logdetail = NULL;
+
+	/* Verify TLS-layer FIDO2 verification completed */
+	if (!port->fido2_tls_verified)
+	{
+		*logdetail = "FIDO2 TLS authentication not performed during handshake";
+		ereport(LOG,
+				(errmsg("FIDO2 TLS authentication failed for user \"%s\": %s",
+						port->user_name, *logdetail)));
+		return STATUS_ERROR;
+	}
+
+	/* Debug: show extracted FIDO2 data */
+	ereport(LOG,
+			(errmsg("FIDO2 TLS: client pubkey from cert: %02x%02x%02x%02x...%02x%02x%02x%02x (flags=0x%02x, counter=%u)",
+					port->fido2_pubkey[0], port->fido2_pubkey[1],
+					port->fido2_pubkey[2], port->fido2_pubkey[3],
+					port->fido2_pubkey[61], port->fido2_pubkey[62],
+					port->fido2_pubkey[63], port->fido2_pubkey[64],
+					port->fido2_flags, port->fido2_counter)));
+
+	/* Check user presence flag */
+	if (!(port->fido2_flags & FIDO2_FLAG_UP))
+	{
+		*logdetail = "user presence not verified";
+		ereport(LOG,
+				(errmsg("FIDO2 TLS authentication failed for user \"%s\": %s",
+						port->user_name, *logdetail)));
+		return STATUS_ERROR;
+	}
+
+	/* Look up the user */
+	roleid = get_role_oid(port->user_name, true);
+	if (!OidIsValid(roleid))
+	{
+		*logdetail = psprintf("role \"%s\" does not exist", port->user_name);
+		ereport(LOG,
+				(errmsg("FIDO2 TLS authentication failed for user \"%s\": %s",
+						port->user_name, *logdetail)));
+		return STATUS_ERROR;
+	}
+
+	/* Look up the public key in pg_role_pubkeys */
+	memlist = SearchSysCacheList1(ROLEPUBKEYSROLEID, ObjectIdGetDatum(roleid));
+	ereport(LOG,
+			(errmsg("FIDO2 TLS: found %d registered keys for role \"%s\"",
+					memlist->n_members, port->user_name)));
+
+	for (i = 0; i < memlist->n_members; i++)
+	{
+		HeapTuple	tuple = &memlist->members[i]->tuple;
+		Form_pg_role_pubkeys pk = (Form_pg_role_pubkeys) GETSTRUCT(tuple);
+		Datum		d;
+		bool		isnull;
+		bytea	   *stored;
+
+		d = SysCacheGetAttr(ROLEPUBKEYSROLEID, tuple, Anum_pg_role_pubkeys_public_key, &isnull);
+		if (isnull)
+			continue;
+		stored = DatumGetByteaP(d);
+
+		/* Debug: show stored key */
+		if (VARSIZE_ANY_EXHDR(stored) >= 65)
+		{
+			uint8 *sp = (uint8 *) VARDATA_ANY(stored);
+			ereport(LOG,
+					(errmsg("FIDO2 TLS: stored key[%d] (%s): %02x%02x%02x%02x...%02x%02x%02x%02x (%d bytes)",
+							i, NameStr(pk->key_name),
+							sp[0], sp[1], sp[2], sp[3],
+							sp[61], sp[62], sp[63], sp[64],
+							(int) VARSIZE_ANY_EXHDR(stored))));
+		}
+
+		/* Check if this stored key matches the key from the certificate */
+		if (VARSIZE_ANY_EXHDR(stored) == FIDO2_ES256_PUBKEY_LENGTH &&
+			memcmp(VARDATA_ANY(stored), port->fido2_pubkey, FIDO2_ES256_PUBKEY_LENGTH) == 0)
+		{
+			ereport(LOG,
+					(errmsg("FIDO2 TLS: key match found!")));
+			stored_pubkey_len = VARSIZE_ANY_EXHDR(stored);
+			stored_pubkey = palloc(stored_pubkey_len);
+			memcpy(stored_pubkey, VARDATA_ANY(stored), stored_pubkey_len);
+			break;
+		}
+	}
+	ReleaseSysCacheList(memlist);
+
+	if (!stored_pubkey)
+	{
+		*logdetail = psprintf("public key not registered for role \"%s\"", port->user_name);
+		ereport(LOG,
+				(errmsg("FIDO2 TLS authentication failed for user \"%s\": %s",
+						port->user_name, *logdetail)));
+		return STATUS_ERROR;
+	}
+
+	/*
+	 * Now verify the FIDO2 signature.
+	 * The signature format follows WebAuthn/FIDO2 spec:
+	 * - signedData = authenticatorData || clientDataHash
+	 * - authenticatorData = rpIdHash (32) || flags (1) || counter (4)
+	 * - clientDataHash = SHA256(challenge || rpIdHash)
+	 */
+
+	/* Debug: show challenge from cert */
+	ereport(LOG,
+			(errmsg("FIDO2 TLS: challenge from cert: %02x%02x%02x%02x...%02x%02x%02x%02x",
+					port->fido2_challenge[0], port->fido2_challenge[1],
+					port->fido2_challenge[2], port->fido2_challenge[3],
+					port->fido2_challenge[28], port->fido2_challenge[29],
+					port->fido2_challenge[30], port->fido2_challenge[31])));
+
+	/* Debug: show signature from cert */
+	ereport(LOG,
+			(errmsg("FIDO2 TLS: signature from cert: %02x%02x%02x%02x...%02x%02x%02x%02x",
+					port->fido2_signature[0], port->fido2_signature[1],
+					port->fido2_signature[2], port->fido2_signature[3],
+					port->fido2_signature[60], port->fido2_signature[61],
+					port->fido2_signature[62], port->fido2_signature[63])));
+
+	/* Compute rpIdHash = SHA256(FIDO2_RP_ID) */
+	ereport(LOG,
+			(errmsg("FIDO2 TLS: computing rpIdHash for RP ID: \"%s\"", FIDO2_RP_ID)));
+
+	ctx = pg_cryptohash_create(PG_SHA256);
+	if (!ctx || pg_cryptohash_init(ctx) < 0 ||
+		pg_cryptohash_update(ctx, (uint8 *) FIDO2_RP_ID, strlen(FIDO2_RP_ID)) < 0 ||
+		pg_cryptohash_final(ctx, rp_hash, PG_SHA256_DIGEST_LENGTH) < 0)
+	{
+		pg_cryptohash_free(ctx);
+		pfree(stored_pubkey);
+		*logdetail = "hash computation failed";
+		return STATUS_ERROR;
+	}
+	pg_cryptohash_free(ctx);
+
+	ereport(LOG,
+			(errmsg("FIDO2 TLS: rpIdHash: %02x%02x%02x%02x...%02x%02x%02x%02x",
+					rp_hash[0], rp_hash[1], rp_hash[2], rp_hash[3],
+					rp_hash[28], rp_hash[29], rp_hash[30], rp_hash[31])));
+
+	/* Build authenticatorData */
+	memcpy(auth_data, rp_hash, 32);
+	auth_data[32] = port->fido2_flags;
+	auth_data[33] = (port->fido2_counter >> 24) & 0xFF;
+	auth_data[34] = (port->fido2_counter >> 16) & 0xFF;
+	auth_data[35] = (port->fido2_counter >> 8) & 0xFF;
+	auth_data[36] = port->fido2_counter & 0xFF;
+
+	/* Debug: show full authenticatorData */
+	{
+		StringInfoData buf;
+		initStringInfo(&buf);
+		for (int j = 0; j < 37; j++)
+			appendStringInfo(&buf, "%02x", auth_data[j]);
+		ereport(LOG,
+				(errmsg("FIDO2 TLS: full authenticatorData (37 bytes): %s", buf.data)));
+		pfree(buf.data);
+	}
+
+	/* Debug: show full challenge */
+	{
+		StringInfoData buf;
+		initStringInfo(&buf);
+		for (int j = 0; j < 32; j++)
+			appendStringInfo(&buf, "%02x", port->fido2_challenge[j]);
+		ereport(LOG,
+				(errmsg("FIDO2 TLS: full challenge (32 bytes): %s", buf.data)));
+		pfree(buf.data);
+	}
+
+	/*
+	 * For SSH security keys, the sk_sign API internally hashes the data
+	 * parameter to create clientDataHash. The authenticator then signs:
+	 *   clientDataHash = SHA256(challenge)
+	 *   signedData = authenticatorData || clientDataHash
+	 *   signedHash = SHA256(signedData)
+	 *
+	 * So we need to hash the challenge first, then hash (authData || hashedChallenge).
+	 */
+
+	/* Step 1: Compute clientDataHash = SHA256(challenge) */
+	uint8		client_data_hash[PG_SHA256_DIGEST_LENGTH];
+
+	ctx = pg_cryptohash_create(PG_SHA256);
+	if (!ctx || pg_cryptohash_init(ctx) < 0 ||
+		pg_cryptohash_update(ctx, port->fido2_challenge, FIDO2_CHALLENGE_LENGTH) < 0 ||
+		pg_cryptohash_final(ctx, client_data_hash, PG_SHA256_DIGEST_LENGTH) < 0)
+	{
+		pg_cryptohash_free(ctx);
+		pfree(stored_pubkey);
+		*logdetail = "hash computation failed";
+		return STATUS_ERROR;
+	}
+	pg_cryptohash_free(ctx);
+
+	ereport(LOG,
+			(errmsg("FIDO2 TLS: clientDataHash = SHA256(challenge): %02x%02x%02x%02x...%02x%02x%02x%02x",
+					client_data_hash[0], client_data_hash[1], client_data_hash[2], client_data_hash[3],
+					client_data_hash[28], client_data_hash[29], client_data_hash[30], client_data_hash[31])));
+
+	/* Step 2: Compute signedDataHash = SHA256(authenticatorData || clientDataHash) */
+	ctx = pg_cryptohash_create(PG_SHA256);
+	if (!ctx || pg_cryptohash_init(ctx) < 0 ||
+		pg_cryptohash_update(ctx, auth_data, 37) < 0 ||
+		pg_cryptohash_update(ctx, client_data_hash, PG_SHA256_DIGEST_LENGTH) < 0 ||
+		pg_cryptohash_final(ctx, signed_hash, PG_SHA256_DIGEST_LENGTH) < 0)
+	{
+		pg_cryptohash_free(ctx);
+		pfree(stored_pubkey);
+		*logdetail = "hash computation failed";
+		return STATUS_ERROR;
+	}
+	pg_cryptohash_free(ctx);
+
+	ereport(LOG,
+			(errmsg("FIDO2 TLS: signedDataHash = SHA256(authData || clientDataHash): %02x%02x%02x%02x...%02x%02x%02x%02x",
+					signed_hash[0], signed_hash[1], signed_hash[2], signed_hash[3],
+					signed_hash[28], signed_hash[29], signed_hash[30], signed_hash[31])));
+
+	/* Verify the signature */
+	ereport(LOG,
+			(errmsg("FIDO2 TLS: verifying signature with public key...")));
+	if (fido2_tls_verify_es256(stored_pubkey, signed_hash, port->fido2_signature) != FIDO2_VERIFY_OK)
+	{
+		pfree(stored_pubkey);
+		*logdetail = "signature verification failed";
+		ereport(LOG,
+				(errmsg("FIDO2 TLS authentication failed for user \"%s\": %s",
+						port->user_name, *logdetail)));
+		return STATUS_ERROR;
+	}
+
+	pfree(stored_pubkey);
+
+	/* Authentication succeeded - set the authenticated identity */
+	set_authn_id(port, port->user_name);
+
+	ereport(DEBUG1,
+			(errmsg("FIDO2 TLS authentication succeeded for user \"%s\"",
+					port->user_name)));
+
+	return STATUS_OK;
+}
+
+#endif							/* USE_OPENSSL */
 
 
 /*----------------------------------------------------------------

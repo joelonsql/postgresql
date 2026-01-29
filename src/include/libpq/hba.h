@@ -41,7 +41,8 @@ typedef enum UserAuth
 	uaPeer,
 	uaOAuth,
 	uaFido2,
-#define USER_AUTH_LAST uaFido2	/* Must be last value of this enum */
+	uaFido2Tls,					/* FIDO2 via TLS client certificate */
+#define USER_AUTH_LAST uaFido2Tls	/* Must be last value of this enum */
 } UserAuth;
 
 /*

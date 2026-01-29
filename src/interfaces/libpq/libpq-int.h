@@ -453,6 +453,13 @@ struct pg_conn
 	char	   *fido2_pin;		/* device PIN for scripting */
 	char	   *fido2_credential;	/* preferred credential ID (base64) */
 
+	char	   *fido2tls;			/* Enable FIDO2 TLS authentication ("1") */
+
+	/* FIDO2 TLS authentication state */
+	uint8	   *fido2_server_cv;		/* Server's CertificateVerify signature */
+	int			fido2_server_cv_len;	/* Length of above */
+	bool		fido2_tls_enabled;		/* FIDO2 TLS auth is active */
+
 	/* Optional file to write trace info to */
 	FILE	   *Pfdebug;
 	int			traceFlags;

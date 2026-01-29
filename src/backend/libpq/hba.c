@@ -118,6 +118,7 @@ static const char *const UserAuthName[] =
 	"peer",
 	"oauth",
 	"fido2",
+	"fido2tls",
 };
 
 /*
@@ -1755,6 +1756,12 @@ parse_hba_line(TokenizedAuthLine *tok_line, int elevel)
 #else
 		unsupauth = "fido2";
 #endif
+	else if (strcmp(token->string, "fido2tls") == 0)
+#ifdef USE_OPENSSL
+		parsedline->auth_method = uaFido2Tls;
+#else
+		unsupauth = "fido2tls";
+#endif
 	else
 	{
 		ereport(elevel,
@@ -1829,6 +1836,18 @@ parse_hba_line(TokenizedAuthLine *tok_line, int elevel)
 				 errcontext("line %d of configuration file \"%s\"",
 							line_num, file_name)));
 		*err_msg = "cert authentication is only supported on hostssl connections";
+		return NULL;
+	}
+
+	if (parsedline->conntype != ctHostSSL &&
+		parsedline->auth_method == uaFido2Tls)
+	{
+		ereport(elevel,
+				(errcode(ERRCODE_CONFIG_FILE_ERROR),
+				 errmsg("fido2tls authentication is only supported on hostssl connections"),
+				 errcontext("line %d of configuration file \"%s\"",
+							line_num, file_name)));
+		*err_msg = "fido2tls authentication is only supported on hostssl connections";
 		return NULL;
 	}
 
