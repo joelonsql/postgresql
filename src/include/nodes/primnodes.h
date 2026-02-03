@@ -2311,6 +2311,10 @@ typedef struct ForeignKeyJoinNode
 	List	   *referencedAttnums;	/* List of attribute numbers (int) */
 	Oid			constraint;		/* pg_constraint OID foreign key */
 	List	   *notNullConstraints; /* List of NOT NULL constraint OIDs (Oid) */
+	bool		fkColsUnique;	/* referencing FK columns have unique constraint */
+	bool		fkColsNotNull;	/* referencing FK columns are all NOT NULL */
+	List	   *uniquenessPreservation;  /* RTEIds preserved through this join */
+	List	   *functionalDependencies;  /* pairs of RTEIds for functional deps */
 } ForeignKeyJoinNode;
 
 /*----------

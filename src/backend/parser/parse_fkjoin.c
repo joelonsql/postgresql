@@ -58,6 +58,8 @@ static RangeTblEntry *drill_down_to_base_rel_query(ParseState *pstate, Query *qu
 												   int location, QueryStack *query_stack);
 
 static bool check_group_by_preserves_uniqueness(Query *query, List **uniqueness_preservation);
+static bool trace_var_to_base_table(Query *query, Index varno, AttrNumber varattno,
+									RangeTblEntry **base_rte_out, AttrNumber *base_attno_out);
 static bool check_unique_index_covers_columns(Relation rel, Bitmapset *columns);
 static bool is_referencing_cols_unique(Oid referencing_relid, List *referencing_base_attnums);
 static bool is_referencing_cols_not_null(Oid referencing_relid, List *referencing_base_attnums,
@@ -286,16 +288,19 @@ transformAndValidateForeignKeyJoin(ParseState *pstate, JoinExpr *join,
 
 	analyze_join_tree(pstate, referencing_arg, NULL, referencing_rte->rteid, &referencing_uniqueness_preservation, &referencing_functional_dependencies, &referencing_found, fkjn->location, NULL);
 
-	/* Only analyze referenced side for derived tables - base tables always preserve uniqueness/rows */
-	if (!referenced_is_base_table)
-		analyze_join_tree(pstate, referenced_arg, NULL, referenced_rte->rteid, &referenced_uniqueness_preservation, &referenced_functional_dependencies, &referenced_found, fkjn->location, NULL);
-	else
+	/*
+	 * Always analyze the referenced side to populate JOIN RTEs with FD data.
+	 * This is needed for visualization even when not required by the algorithm.
+	 */
+	analyze_join_tree(pstate, referenced_arg, NULL, referenced_rte->rteid, &referenced_uniqueness_preservation, &referenced_functional_dependencies, &referenced_found, fkjn->location, NULL);
+
+	/*
+	 * For base table referenced relations, override with self-referential values.
+	 * Base tables inherently preserve their own uniqueness and all rows.
+	 * These values are needed for the FK join algorithm.
+	 */
+	if (referenced_is_base_table)
 	{
-		/*
-		 * For base table referenced relations, set self-referential values.
-		 * Base tables inherently preserve their own uniqueness and all rows.
-		 * These values are needed for propagation to JOIN RTEs.
-		 */
 		referenced_uniqueness_preservation = list_make1(referenced_id);
 		referenced_functional_dependencies = list_make2(referenced_id, referenced_id);
 
@@ -378,6 +383,8 @@ transformAndValidateForeignKeyJoin(ParseState *pstate, JoinExpr *join,
 	fkjn_node->referencedAttnums = referenced_attnums;
 	fkjn_node->constraint = fkoid;
 	fkjn_node->notNullConstraints = notNullConstraints;
+	fkjn_node->fkColsUnique = is_referencing_cols_unique(referencing_relid, referencing_base_attnums);
+	fkjn_node->fkColsNotNull = is_referencing_cols_not_null(referencing_relid, referencing_base_attnums, NULL);
 
 	join->fkJoin = (Node *) fkjn_node;
 }
@@ -418,7 +425,7 @@ analyze_join_tree(ParseState *pstate, Node *n,
 				Node	   *referenced_arg;
 				RangeTblEntry *referencing_rte;
 				RangeTblEntry *referenced_rte;
-				ForeignKeyJoinNode *fkjn = castNode(ForeignKeyJoinNode, join->fkJoin);
+				ForeignKeyJoinNode *fkjn;
 				bool		fk_cols_unique;
 				bool		fk_cols_not_null;
 
@@ -426,6 +433,23 @@ analyze_join_tree(ParseState *pstate, Node *n,
 					rtable = query->rtable;
 				else
 					rtable = pstate->p_rtable;
+
+				/*
+				 * For non-FK joins (e.g., CROSS JOIN), fkJoin is NULL.
+				 * We cannot determine uniqueness preservation or functional
+				 * dependencies for such joins, so set them to empty.
+				 * The caller's validation will report an appropriate error
+				 * if this join appears in the referenced side of an FK join.
+				 */
+				if (join->fkJoin == NULL)
+				{
+					*uniqueness_preservation = NIL;
+					*functional_dependencies = NIL;
+					*found = false;
+					break;
+				}
+
+				fkjn = castNode(ForeignKeyJoinNode, join->fkJoin);
 
 				if (fkjn->fkdir == FKDIR_FROM)
 				{
@@ -476,7 +500,7 @@ analyze_join_tree(ParseState *pstate, Node *n,
 																		  fkjn->fkdir
 					);
 
-				/* Store accumulated values on the JOIN RTE */
+					/* Store accumulated values on the JOIN RTE */
 				{
 					RangeTblEntry *join_rte = rt_fetch(join->rtindex, rtable);
 					join_rte->uniquenessPreservation = *uniqueness_preservation;
@@ -593,14 +617,14 @@ analyze_join_tree(ParseState *pstate, Node *n,
 						 */
 						if (inner_query->groupClause)
 						{
-							elog(DEBUG1, "analyze_join_tree: found GROUP BY in inner query, checking uniqueness preservation");
+							elog(NOTICE, "analyze_join_tree: found GROUP BY in inner query, checking uniqueness preservation");
 							if (check_group_by_preserves_uniqueness(inner_query, uniqueness_preservation))
 							{
 								/*
 								 * GROUP BY preserves uniqueness, the function
 								 * has updated uniqueness_preservation
 								 */
-								elog(DEBUG1, "analyze_join_tree: GROUP BY preserves uniqueness");
+								elog(NOTICE, "analyze_join_tree: GROUP BY preserves uniqueness");
 							}
 							else
 							{
@@ -608,7 +632,7 @@ analyze_join_tree(ParseState *pstate, Node *n,
 								 * GROUP BY does not preserve uniqueness,
 								 * clear the list
 								 */
-								elog(DEBUG1, "analyze_join_tree: GROUP BY does not preserve uniqueness, clearing uniqueness preservation");
+								elog(NOTICE, "analyze_join_tree: GROUP BY does not preserve uniqueness, clearing uniqueness preservation");
 								*uniqueness_preservation = NIL;
 							}
 						}
@@ -655,12 +679,14 @@ build_fk_join_on_clause(ParseState *pstate, ParseNamespaceColumn *l_nscols, List
 						l_col->p_vartypmod,
 						l_col->p_varcollid,
 						0);
+		markNullableIfNeeded(pstate, l_var);
 		r_var = makeVar(r_col->p_varno,
 						r_col->p_varattno,
 						r_col->p_vartype,
 						r_col->p_vartypmod,
 						r_col->p_varcollid,
 						0);
+		markNullableIfNeeded(pstate, r_var);
 
 		e = makeSimpleA_Expr(AEXPR_OP, "=",
 							 (Node *) copyObject(l_var),
@@ -1114,6 +1140,76 @@ drill_down_to_base_rel_query(ParseState *pstate, Query *query,
 }
 
 
+/*
+ * trace_var_to_base_table
+ *		Trace a Var reference through subqueries to find the underlying
+ *		base table and column. Returns true if we find a base table,
+ *		setting base_rte_out and base_attno_out. Returns false if the
+ *		trace leads to something other than a base table column.
+ */
+static bool
+trace_var_to_base_table(Query *query, Index varno, AttrNumber varattno,
+						RangeTblEntry **base_rte_out, AttrNumber *base_attno_out)
+{
+	RangeTblEntry *rte;
+	int			max_depth = 20;	/* prevent infinite recursion */
+
+	while (max_depth-- > 0)
+	{
+		rte = rt_fetch(varno, query->rtable);
+
+		elog(DEBUG1, "trace_var_to_base_table: varno=%d, varattno=%d, rtekind=%d",
+			 varno, varattno, rte->rtekind);
+
+		if (rte->rtekind == RTE_RELATION && rte->relid != InvalidOid)
+		{
+			/* Found a base table */
+			*base_rte_out = rte;
+			*base_attno_out = varattno;
+			elog(DEBUG1, "trace_var_to_base_table: found base table %s, attno=%d",
+				 get_rel_name(rte->relid), varattno);
+			return true;
+		}
+		else if (rte->rtekind == RTE_SUBQUERY && rte->subquery != NULL)
+		{
+			/* Look into the subquery's target list */
+			Query	   *subquery = rte->subquery;
+			TargetEntry *tle;
+
+			if (varattno < 1 || varattno > list_length(subquery->targetList))
+			{
+				elog(DEBUG1, "trace_var_to_base_table: invalid varattno %d for subquery with %d targets",
+					 varattno, list_length(subquery->targetList));
+				return false;
+			}
+
+			tle = list_nth_node(TargetEntry, subquery->targetList, varattno - 1);
+
+			if (!IsA(tle->expr, Var))
+			{
+				elog(DEBUG1, "trace_var_to_base_table: subquery target is not a Var (node type %d)",
+					 nodeTag(tle->expr));
+				return false;
+			}
+
+			/* Follow the Var into the subquery */
+			Var		   *v = (Var *) tle->expr;
+
+			varno = v->varno;
+			varattno = v->varattno;
+			query = subquery;
+		}
+		else
+		{
+			elog(DEBUG1, "trace_var_to_base_table: unsupported RTE kind %d", rte->rtekind);
+			return false;
+		}
+	}
+
+	elog(DEBUG1, "trace_var_to_base_table: exceeded max depth");
+	return false;
+}
+
 
 /*
  * check_group_by_preserves_uniqueness
@@ -1273,9 +1369,80 @@ check_group_by_preserves_uniqueness(Query *query, List **uniqueness_preservation
 					group_cols = underlying_cols;
 					elog(DEBUG1, "check_group_by_preserves_uniqueness: using underlying base relation and remapped columns");
 				}
+				else if (underlying_rte->rtekind == RTE_SUBQUERY)
+				{
+					/*
+					 * The GROUP BY references a subquery column. Trace each
+					 * groupexpr through the subquery to find the base table.
+					 */
+					RangeTblEntry *traced_rte = NULL;
+					Bitmapset  *traced_cols = NULL;
+					bool		trace_ok = true;
+					ListCell   *grp_lc2;
+
+					elog(DEBUG1, "check_group_by_preserves_uniqueness: tracing through subquery");
+
+					foreach(grp_lc2, base_rte->groupexprs)
+					{
+						Node	   *expr = (Node *) lfirst(grp_lc2);
+
+						if (IsA(expr, Var))
+						{
+							Var		   *v = (Var *) expr;
+							RangeTblEntry *col_base_rte;
+							AttrNumber	col_base_attno;
+
+							if (trace_var_to_base_table(query, v->varno, v->varattno,
+														&col_base_rte, &col_base_attno))
+							{
+								if (traced_rte == NULL)
+								{
+									traced_rte = col_base_rte;
+								}
+								else if (traced_rte != col_base_rte)
+								{
+									elog(DEBUG1, "check_group_by_preserves_uniqueness: groupexprs trace to different base tables");
+									trace_ok = false;
+									break;
+								}
+								traced_cols = bms_add_member(traced_cols, col_base_attno);
+							}
+							else
+							{
+								elog(DEBUG1, "check_group_by_preserves_uniqueness: failed to trace groupexpr to base table");
+								trace_ok = false;
+								break;
+							}
+						}
+						else
+						{
+							trace_ok = false;
+							break;
+						}
+					}
+
+					if (trace_ok && traced_rte != NULL)
+					{
+						base_rte = traced_rte;
+						base_rteid = traced_rte->rteid;
+						bms_free(group_cols);
+						bms_free(underlying_cols);
+						group_cols = traced_cols;
+						elog(DEBUG1, "check_group_by_preserves_uniqueness: traced to base table %s",
+							 get_rel_name(base_rte->relid));
+					}
+					else
+					{
+						elog(DEBUG1, "check_group_by_preserves_uniqueness: could not trace subquery to base table");
+						bms_free(traced_cols);
+						bms_free(underlying_cols);
+						bms_free(group_cols);
+						return false;
+					}
+				}
 				else
 				{
-					elog(DEBUG1, "check_group_by_preserves_uniqueness: underlying RTE is not a base relation");
+					elog(DEBUG1, "check_group_by_preserves_uniqueness: underlying RTE is not a base relation or subquery");
 					bms_free(underlying_cols);
 					bms_free(group_cols);
 					return false;

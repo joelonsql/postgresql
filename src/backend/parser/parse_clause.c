@@ -1571,6 +1571,19 @@ transformFromClauseItem(ParseState *pstate, Node *n,
 		Assert(res_colindex == list_length(nsitem->p_names->colnames));
 
 		/*
+		 * For FK joins, copy the FK column properties to the join RTE.
+		 */
+		if (j->fkJoin && IsA(j->fkJoin, ForeignKeyJoinNode))
+		{
+			ForeignKeyJoinNode *fkjn = (ForeignKeyJoinNode *) j->fkJoin;
+
+			nsitem->p_rte->fkColsUnique = fkjn->fkColsUnique;
+			nsitem->p_rte->fkColsNotNull = fkjn->fkColsNotNull;
+			nsitem->p_rte->uniquenessPreservation = fkjn->uniquenessPreservation;
+			nsitem->p_rte->functionalDependencies = fkjn->functionalDependencies;
+		}
+
+		/*
 		 * Save a link to the JoinExpr in the proper element of p_joinexprs.
 		 * Since we maintain that list lazily, it may be necessary to fill in
 		 * empty entries before we can add the JoinExpr in the right place.
