@@ -731,6 +731,64 @@ SELECT
 FROM customers AS c
 JOIN addresses AS a FOR KEY (id) <- c (address_id);
 
+--
+-- Test NOT NULL constraint tracking for various join types
+-- Create simple test tables for these tests
+--
+CREATE TABLE t1_nn (t1_id INTEGER PRIMARY KEY);
+CREATE TABLE t2_nn (
+    t2_id INTEGER PRIMARY KEY,
+    t2_t1_id_nn INTEGER NOT NULL REFERENCES t1_nn(t1_id),
+    t2_t1_id_nullable INTEGER REFERENCES t1_nn(t1_id)
+);
+
+INSERT INTO t1_nn VALUES (1), (2), (3);
+INSERT INTO t2_nn VALUES (10, 1, 1), (20, 2, NULL);
+
+-- Test 1: LEFT JOIN where referencing is on inner side (right)
+-- DROP NOT NULL should fail because the view depends on NOT NULL
+CREATE VIEW v_left_ref_inner AS
+SELECT * FROM t1_nn LEFT JOIN t2_nn FOR KEY (t2_t1_id_nn) -> t1_nn (t1_id);
+ALTER TABLE t2_nn ALTER COLUMN t2_t1_id_nn DROP NOT NULL; -- should fail
+DROP VIEW v_left_ref_inner;
+
+-- Test 2: LEFT JOIN where referencing is on outer side (left)
+-- DROP NOT NULL should succeed because left side is preserved
+CREATE VIEW v_left_ref_outer AS
+SELECT * FROM t2_nn LEFT JOIN t1_nn FOR KEY (t1_id) <- t2_nn (t2_t1_id_nn);
+ALTER TABLE t2_nn ALTER COLUMN t2_t1_id_nn DROP NOT NULL; -- should succeed
+ALTER TABLE t2_nn ALTER COLUMN t2_t1_id_nn SET NOT NULL; -- restore
+
+-- Test 3: RIGHT JOIN where referencing is on inner side (left)
+-- DROP NOT NULL should fail because the view depends on NOT NULL
+CREATE VIEW v_right_ref_inner AS
+SELECT * FROM t2_nn RIGHT JOIN t1_nn FOR KEY (t1_id) <- t2_nn (t2_t1_id_nn);
+ALTER TABLE t2_nn ALTER COLUMN t2_t1_id_nn DROP NOT NULL; -- should fail
+DROP VIEW v_right_ref_inner;
+
+-- Test 4: RIGHT JOIN where referencing is on outer side (right)
+-- DROP NOT NULL should succeed because right side is preserved
+CREATE VIEW v_right_ref_outer AS
+SELECT * FROM t1_nn RIGHT JOIN t2_nn FOR KEY (t2_t1_id_nn) -> t1_nn (t1_id);
+ALTER TABLE t2_nn ALTER COLUMN t2_t1_id_nn DROP NOT NULL; -- should succeed
+ALTER TABLE t2_nn ALTER COLUMN t2_t1_id_nn SET NOT NULL; -- restore
+
+-- Test 5: FULL JOIN - DROP NOT NULL should always succeed
+-- Both sides are preserved in a FULL JOIN
+CREATE VIEW v_full_1 AS
+SELECT * FROM t1_nn FULL JOIN t2_nn FOR KEY (t2_t1_id_nn) -> t1_nn (t1_id);
+ALTER TABLE t2_nn ALTER COLUMN t2_t1_id_nn DROP NOT NULL; -- should succeed
+ALTER TABLE t2_nn ALTER COLUMN t2_t1_id_nn SET NOT NULL; -- restore
+
+CREATE VIEW v_full_2 AS
+SELECT * FROM t2_nn FULL JOIN t1_nn FOR KEY (t1_id) <- t2_nn (t2_t1_id_nn);
+ALTER TABLE t2_nn ALTER COLUMN t2_t1_id_nn DROP NOT NULL; -- should succeed
+ALTER TABLE t2_nn ALTER COLUMN t2_t1_id_nn SET NOT NULL; -- restore
+
+-- Cleanup views for outer join NOT NULL tests
+DROP VIEW v_left_ref_outer, v_right_ref_outer, v_full_1, v_full_2;
+DROP TABLE t2_nn, t1_nn;
+
 CREATE TABLE customer_addresses
 (
     customer_id INTEGER NOT NULL,

@@ -344,16 +344,45 @@ transformAndValidateForeignKeyJoin(ParseState *pstate, JoinExpr *join,
 	join->quals = build_fk_join_on_clause(pstate, referencing_rel->p_nscolumns, referencing_attnums, referenced_rel->p_nscolumns, referenced_attnums);
 
 	/*
-	 * For inner joins (and the inner side of outer joins in certain
-	 * configurations), the row preservation guarantee depends on the
-	 * referencing columns being NOT NULL.  Collect the NOT NULL constraint
-	 * OIDs so we can record dependencies on them.
+	 * For inner joins (and the inner side of outer joins), the row
+	 * preservation guarantee depends on the referencing columns being NOT
+	 * NULL.  Collect the NOT NULL constraint OIDs so we can record
+	 * dependencies on them.
+	 *
+	 * We need NOT NULL dependencies when the referencing table is on the
+	 * "inner" side of a join (the side that can have rows filtered out):
+	 * - INNER JOIN: both sides can be filtered, so always need NOT NULL
+	 * - LEFT JOIN: right side is inner, track if referencing is on right
+	 * - RIGHT JOIN: left side is inner, track if referencing is on left
+	 * - FULL JOIN: both sides preserved, no NOT NULL dependency needed
 	 */
-	if (join->jointype == JOIN_INNER)
 	{
-		(void) is_referencing_cols_not_null(referencing_relid,
-											referencing_base_attnums,
-											&notNullConstraints);
+		bool		need_not_null_deps = false;
+
+		switch (join->jointype)
+		{
+			case JOIN_INNER:
+				need_not_null_deps = true;
+				break;
+			case JOIN_LEFT:
+				/* Left join: right side is inner, track if referencing is on right */
+				need_not_null_deps = (referencing_arg == join->rarg);
+				break;
+			case JOIN_RIGHT:
+				/* Right join: left side is inner, track if referencing is on left */
+				need_not_null_deps = (referencing_arg == join->larg);
+				break;
+			case JOIN_FULL:
+				/* Full join: both sides preserved, no NOT NULL dependency needed */
+				break;
+		}
+
+		if (need_not_null_deps)
+		{
+			(void) is_referencing_cols_not_null(referencing_relid,
+												referencing_base_attnums,
+												&notNullConstraints);
+		}
 	}
 
 	fkjn_node = makeNode(ForeignKeyJoinNode);
