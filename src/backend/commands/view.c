@@ -637,7 +637,21 @@ revalidateDependentViews(Oid viewOid)
 
 			PG_TRY();
 			{
-				(void) parse_sub_analyze((Node *) parsetree->stmt, pstate, NULL, false, 0);
+				Query  *query;
+
+				query = parse_sub_analyze((Node *) parsetree->stmt, pstate, NULL, false, 0);
+
+				/*
+				 * Only run rewrite-phase FK join validation if the view
+				 * actually contains FK joins.  Calling fireRIRrules on
+				 * views without FK joins is unnecessary and can fail on
+				 * recursive view definitions.
+				 */
+				if (queryHasFKJoins(query))
+				{
+					query = fireRIRrules(query, NIL);
+					validateForeignKeyJoins(query);
+				}
 			}
 			PG_CATCH();
 			{

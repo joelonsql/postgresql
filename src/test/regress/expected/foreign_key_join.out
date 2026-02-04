@@ -705,9 +705,7 @@ FROM q2 JOIN q4 FOR KEY (q4_c3, q4_c4) -> q2 (q2_c1, q2_c2);
 
 WITH RECURSIVE q1 AS (SELECT c1 FROM t1 UNION SELECT c1 FROM q1)
 SELECT * FROM q1 JOIN t2 FOR KEY (c3) -> q1 (c1);
-ERROR:  foreign key joins involving this type of relation are not supported
-LINE 2: SELECT * FROM q1 JOIN t2 FOR KEY (c3) -> q1 (c1);
-                                 ^
+ERROR:  foreign key joins with recursive CTEs are not supported
 --
 -- Test VIEWs
 --
@@ -851,8 +849,6 @@ SELECT * FROM t2 WHERE c3 > 0;
 -- invalid since v1 is filtered and is the referenced table
 SELECT * FROM v1 JOIN t2 FOR KEY (c3) -> v1 (c1);
 ERROR:  foreign key join violation
-LINE 1: SELECT * FROM v1 JOIN t2 FOR KEY (c3) -> v1 (c1);
-                                 ^
 DETAIL:  referenced relation does not preserve all rows
 -- OK, filtering allowed since v2 is the referencing table
 SELECT * FROM t1 JOIN v2 FOR KEY (c3) -> t1 (c1);
@@ -865,8 +861,6 @@ SELECT * FROM t1 JOIN v2 FOR KEY (c3) -> t1 (c1);
 -- also invalid, since v1 is filtered and is the referenced table
 SELECT * FROM v1 JOIN v2 FOR KEY (c3) -> v1 (c1);
 ERROR:  foreign key join violation
-LINE 1: SELECT * FROM v1 JOIN v2 FOR KEY (c3) -> v1 (c1);
-                                 ^
 DETAIL:  referenced relation does not preserve all rows
 -- also invalid, filters uisng a having clause
 SELECT * FROM
@@ -875,22 +869,16 @@ SELECT * FROM
 ) AS u
 JOIN t2 FOR KEY (c3) -> u (c1);
 ERROR:  foreign key join violation
-LINE 5: JOIN t2 FOR KEY (c3) -> u (c1);
-                ^
 DETAIL:  referenced relation does not preserve all rows
 -- invalid, since u is filtered and is the referenced table
 SELECT * FROM (SELECT c1 FROM t1 LIMIT 1) AS u
 JOIN t2 FOR KEY (c3) -> u (c1);
 ERROR:  foreign key join violation
-LINE 2: JOIN t2 FOR KEY (c3) -> u (c1);
-                ^
 DETAIL:  referenced relation does not preserve all rows
 -- invalid, since u is filtered and is the referenced table
 SELECT * FROM (SELECT c1 FROM t1 OFFSET 1) AS u
 JOIN t2 FOR KEY (c3) -> u (c1);
 ERROR:  foreign key join violation
-LINE 2: JOIN t2 FOR KEY (c3) -> u (c1);
-                ^
 DETAIL:  referenced relation does not preserve all rows
 WITH q2 AS
 (
@@ -913,8 +901,6 @@ FROM
 ) AS q1
 JOIN t7 FOR KEY (c15, c16) -> q1 (c9, c10);
 ERROR:  foreign key join violation
-LINE 20: JOIN t7 FOR KEY (c15, c16) -> q1 (c9, c10);
-                 ^
 DETAIL:  referenced relation does not preserve all rows
 --
 -- Test allowed joins not affecting uniqueness
@@ -963,8 +949,6 @@ FROM
 ) AS q1
 JOIN t7 FOR KEY (c15, c16) -> q1 (c9, c10);
 ERROR:  foreign key join violation
-LINE 17: JOIN t7 FOR KEY (c15, c16) -> q1 (c9, c10);
-                 ^
 DETAIL:  referenced relation does not preserve uniqueness of keys
 SELECT
     q1.c19,
@@ -983,8 +967,6 @@ FROM
 ) AS q1
 JOIN t9 FOR KEY (c21, c22) -> q1 (c17, c18);
 ERROR:  foreign key join violation
-LINE 16: JOIN t9 FOR KEY (c21, c22) -> q1 (c17, c18);
-                 ^
 DETAIL:  referenced relation does not preserve all rows
 --
 -- Test revalidation of views
@@ -1176,8 +1158,6 @@ LANGUAGE sql
 RETURN (1, 2);
 SELECT * FROM t1 JOIN t2() FOR KEY (c3, c4) -> t1 (c1, c2);
 ERROR:  foreign key joins involving this type of relation are not supported
-LINE 1: SELECT * FROM t1 JOIN t2() FOR KEY (c3, c4) -> t1 (c1, c2);
-                                   ^
 SELECT * FROM t1 JOIN t2 FOR KEY (c3, c4) -> t1 (c1, c5);
 ERROR:  column "c5" does not exist in referenced table
 LINE 1: SELECT * FROM t1 JOIN t2 FOR KEY (c3, c4) -> t1 (c1, c5);
@@ -1213,8 +1193,6 @@ DROP VIEW v1;
 CREATE VIEW v1 AS SELECT c1+0 AS c1_1, c1 AS c1_2, c2 AS c2_1, c2 AS c2_2 FROM t1;
 SELECT * FROM v1 JOIN t2 FOR KEY (c3, c4) -> v1 (c1_1, c2_1);
 ERROR:  target entry "c1_1" is an expression, not a direct column reference
-LINE 1: SELECT * FROM v1 JOIN t2 FOR KEY (c3, c4) -> v1 (c1_1, c2_1)...
-                                 ^
 SELECT * FROM t1 JOIN
 (
     SELECT c3, c4 FROM t2
@@ -1222,16 +1200,12 @@ SELECT * FROM t1 JOIN
     SELECT c3, c4 FROM t2
 ) AS u FOR KEY (c3, c4) -> t1 (c1, c2);
 ERROR:  foreign key joins involving set operations are not supported
-LINE 6: ) AS u FOR KEY (c3, c4) -> t1 (c1, c2);
-               ^
 SELECT * FROM
 (
     SELECT c1, c2 FROM t1 WHERE c2 > 0
 ) AS u
 JOIN t2 FOR KEY (c3, c4) -> u (c1, c2);
 ERROR:  foreign key join violation
-LINE 5: JOIN t2 FOR KEY (c3, c4) -> u (c1, c2);
-                ^
 DETAIL:  referenced relation does not preserve all rows
 SELECT *
 FROM t1
@@ -1269,8 +1243,6 @@ JOIN
     JOIN t10 AS t10_2 FOR KEY (c23, c24) <- t10 (c25, c26)
 ) AS q1 FOR KEY (c23, c24) -> t1 (c1, c2);
 ERROR:  all key columns must belong to the same table
-LINE 7:         t10_2.c24
-                ^
 --
 -- Test materialized views (not supported yet)
 --
@@ -1278,8 +1250,6 @@ CREATE MATERIALIZED VIEW mv1 AS
 SELECT c1, c2 FROM t1;
 SELECT * FROM mv1 JOIN t2 FOR KEY (c3, c4) -> mv1 (c1, c2);
 ERROR:  foreign key joins involving this type of relation are not supported
-LINE 1: SELECT * FROM mv1 JOIN t2 FOR KEY (c3, c4) -> mv1 (c1, c2);
-                                  ^
 DETAIL:  This operation is not supported for materialized views.
 DROP MATERIALIZED VIEW mv1;
 --
@@ -1386,9 +1356,7 @@ JOIN
 (
     t16 JOIN t17 FOR KEY (b_id, b_id2) -> t16 (id, id2)
 ) FOR KEY (a_id, a_id2) -> t15 (id2, id); -- error
-ERROR:  there is no foreign key constraint on table "<unnamed derived table>" (a_id, a_id2) referencing table "t15" (id2, id)
-LINE 6: ) FOR KEY (a_id, a_id2) -> t15 (id2, id);
-          ^
+ERROR:  there is no foreign key constraint on table "t16" (a_id, a_id2) referencing table "t15" (id2, id)
 SELECT *
 FROM t15
 JOIN
@@ -1513,8 +1481,6 @@ FROM
     RIGHT JOIN shipments FOR KEY (id) <- orders (shipment_id)
 ) AS q JOIN packages FOR KEY (shipment_id) -> q (shipment_id);
 ERROR:  foreign key join violation
-LINE 15: ) AS q JOIN packages FOR KEY (shipment_id) -> q (shipment_id...
-                              ^
 DETAIL:  referenced relation does not preserve uniqueness of keys
 --
 -- TODO: RLS policy equivalence check

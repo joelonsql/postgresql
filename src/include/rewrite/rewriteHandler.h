@@ -18,6 +18,7 @@
 #include "utils/relcache.h"
 
 extern List *QueryRewrite(Query *parsetree);
+extern Query *fireRIRrules(Query *parsetree, List *activeRIRs);
 extern void AcquireRewriteLocks(Query *parsetree,
 								bool forExecute,
 								bool forUpdatePushedDown);

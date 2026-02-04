@@ -115,8 +115,6 @@ SELECT * FROM
     GROUP BY t1_id
 ) q JOIN t3 FOR KEY (t3_t1_id) -> q (t1_id);
 ERROR:  foreign key join violation
-LINE 7: ) q JOIN t3 FOR KEY (t3_t1_id) -> q (t1_id);
-                    ^
 DETAIL:  referenced relation does not preserve all rows
 -- error: foreign key joins not supported for these relations
 -- HAVING not allowed on referenced side of foreign key join
@@ -129,8 +127,6 @@ SELECT * FROM
     HAVING COUNT(*) > 1
 ) q JOIN t3 FOR KEY (t3_t1_id) -> q (t1_id);
 ERROR:  foreign key join violation
-LINE 8: ) q JOIN t3 FOR KEY (t3_t1_id) -> q (t1_id);
-                    ^
 DETAIL:  referenced relation does not preserve all rows
 -- ok since q is not the referenced side
 -- at the referencing side of a foreign key join,
@@ -164,8 +160,6 @@ SELECT q.expr_result FROM
     GROUP BY t1.t1_id + 1
 ) q JOIN t3 FOR KEY (t3_t1_id) -> q (expr_result);
 ERROR:  GROUP BY column 1 is not a simple column reference
-LINE 7: ) q JOIN t3 FOR KEY (t3_t1_id) -> q (expr_result);
-                    ^
 CREATE TABLE t4
 (
     t4_id_1 INT NOT NULL,
@@ -197,6 +191,4 @@ SELECT * FROM
     GROUP BY t4a.t4_id_1, t4b.t4_id_2
 ) q JOIN t5 FOR KEY (t5_t4_id_1, t5_t4_id_2) -> q (t4_id_1, t4_id_2);
 ERROR:  all key columns must belong to the same table
-LINE 8: ) q JOIN t5 FOR KEY (t5_t4_id_1, t5_t4_id_2) -> q (t4_id_1, ...
-                    ^
 DROP TABLE t1, t2, t3, t4, t5;

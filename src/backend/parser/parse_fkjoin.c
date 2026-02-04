@@ -18,7 +18,6 @@
 #include "access/genam.h"
 #include "access/htup_details.h"
 #include "access/table.h"
-#include "access/xact.h"
 #include "catalog/pg_constraint.h"
 #include "nodes/bitmapset.h"
 #include "nodes/makefuncs.h"
@@ -32,56 +31,102 @@
 #include "rewrite/rewriteHandler.h"
 #include "utils/array.h"
 #include "utils/fmgroids.h"
+#include "utils/hsearch.h"
 #include "utils/lsyscache.h"
 #include "utils/rel.h"
 #include "utils/syscache.h"
 
-typedef struct QueryStack
+/*
+ * FKJoinFuncDep - Represents a functional dependency between base tables
+ *
+ * This is used during FK join validation to track which base table indices
+ * are functionally dependent on others.
+ */
+typedef struct FKJoinFuncDep
 {
-	struct QueryStack *parent;
-	Query	   *query;
-} QueryStack;
+	NodeTag		type;
+	int			determinant;	/* base table index of determinant */
+	int			dependent;		/* base table index of dependent */
+} FKJoinFuncDep;
 
+/*
+ * RTEBaseIndexEntry - Hash table entry mapping RTE pointer to base index
+ *
+ * The RTE pointer is used as the hash key because the same RTE object
+ * is reached whether we traverse via jointree enumeration or drill-down.
+ */
+typedef struct RTEBaseIndexEntry
+{
+	RangeTblEntry *rte;			/* hash key */
+	int			base_idx;		/* assigned base table index */
+} RTEBaseIndexEntry;
+
+/*
+ * FKJoinValidationContext - Context for FK join validation passes
+ *
+ * This structure is used during FK join validation that runs after
+ * view expansion (fireRIRrules).
+ */
+typedef struct FKJoinValidationContext
+{
+	int			next_base_index;		/* Counter for base table enumeration */
+	Bitmapset  *uniqueness_preservation;/* Set of base indices preserving uniqueness */
+	List	   *functional_dependencies;/* List of FKJoinFuncDep */
+	Query	   *query;					/* The current query being validated */
+	List	   *query_stack;			/* Stack of ancestor queries (for CTE lookup) */
+	HTAB	   *rte_to_base_index;		/* RTE* -> base index mapping */
+} FKJoinValidationContext;
+
+/* Forward declarations for static functions */
 static Node *build_fk_join_on_clause(ParseState *pstate,
 									 ParseNamespaceColumn *l_nscols, List *l_attnums,
 									 ParseNamespaceColumn *r_nscols, List *r_attnums);
 static Oid	find_foreign_key(Oid referencing_relid, Oid referenced_relid,
 							 List *referencing_attnums, List *referenced_attnums);
 static char *column_list_to_string(const List *columns);
-static RangeTblEntry *drill_down_to_base_rel(ParseState *pstate, RangeTblEntry *rte,
-											 List *attnos, List **base_attnums,
-											 int location, QueryStack *query_stack);
-static CommonTableExpr *find_cte_for_rte(ParseState *pstate, QueryStack *query_stack,
-										 RangeTblEntry *rte);
-static RangeTblEntry *drill_down_to_base_rel_query(ParseState *pstate, Query *query,
-												   List *attnos, List **base_attnums,
-												   int location, QueryStack *query_stack);
-
-static bool check_group_by_preserves_uniqueness(Query *query, List **uniqueness_preservation);
+static char *attnum_list_to_string(Oid relid, List *attnums);
+static bool subquery_has_cte_ref(RangeTblEntry *rte);
+static RangeTblEntry *drill_down_to_base_rel(List *query_stack, RangeTblEntry *rte,
+											 List *attnos, List **base_attnums);
+static RangeTblEntry *drill_down_to_base_rel_query(List *query_stack, Query *subquery,
+												   List *attnos, List **base_attnums);
 static bool check_unique_index_covers_columns(Relation rel, Bitmapset *columns);
 static bool is_referencing_cols_unique(Oid referencing_relid, List *referencing_base_attnums);
 static bool is_referencing_cols_not_null(Oid referencing_relid, List *referencing_base_attnums,
 										 List **notNullConstraints);
-static List *update_uniqueness_preservation(List *referencing_uniqueness_preservation,
-											List *referenced_uniqueness_preservation,
-											RTEId *referencing_id,
-											bool fk_cols_unique);
+
+/* Validation pass functions */
+static void fkjoin_enumerate_and_compute(Node *jtnode, FKJoinValidationContext *context,
+										 Bitmapset **uniqueness_out,
+										 List **funcdeps_out);
+
+/* Helper functions for functional dependencies */
+static FKJoinFuncDep *makeFKJoinFuncDep(int determinant, int dependent);
+static bool has_self_dependency(List *funcdeps, int base_idx);
+static Bitmapset *update_uniqueness_preservation(Bitmapset *referencing_up,
+												 Bitmapset *referenced_up,
+												 int referencing_base_idx,
+												 bool fk_cols_unique);
 static List *update_functional_dependencies(List *referencing_fds,
-											RTEId *referencing_id,
+											int referencing_base_idx,
 											List *referenced_fds,
-											RTEId *referenced_id,
+											int referenced_base_idx,
 											bool fk_cols_not_null,
 											JoinType join_type,
 											ForeignKeyDirection fk_dir);
-static void analyze_join_tree(ParseState *pstate, Node *n,
-							  Query *query,
-							  RTEId *rte_id,
-							  List **uniqueness_preservation,
-							  List **functional_dependencies,
-							  bool *found,
-							  int location,
-							  QueryStack *query_stack);
 
+/*
+ * transformAndValidateForeignKeyJoin
+ *		Transform a foreign key join clause during parsing.
+ *
+ * This function handles the parsing phase of FK joins:
+ * - Validates that the FK constraint exists in pg_constraint
+ * - Builds the ON clause (equality conditions)
+ * - Creates ForeignKeyJoinNode with constraint OID
+ *
+ * The actual validation of uniqueness preservation and functional dependencies
+ * is deferred to validateForeignKeyJoins(), which runs after view expansion.
+ */
 void
 transformAndValidateForeignKeyJoin(ParseState *pstate, JoinExpr *join,
 								   ParseNamespaceItem *r_nsitem,
@@ -98,27 +143,19 @@ transformAndValidateForeignKeyJoin(ParseState *pstate, JoinExpr *join,
 			   *other_rel = NULL;
 	List	   *referencing_cols,
 			   *referenced_cols;
-	List	   *referencing_uniqueness_preservation = NIL;
-	List	   *referencing_functional_dependencies = NIL;
-	List	   *referenced_uniqueness_preservation = NIL;
-	List	   *referenced_functional_dependencies = NIL;
 	Node	   *referencing_arg;
-	Node	   *referenced_arg;
+
 	List	   *referencing_base_attnums;
 	List	   *referenced_base_attnums;
 	Oid			fkoid;
 	ForeignKeyJoinNode *fkjn_node;
 	List	   *referencing_attnums = NIL;
 	List	   *referenced_attnums = NIL;
-	Oid			referencing_relid;
-	Oid			referenced_relid;
-	RTEId	   *referenced_id;
-	bool		found_fd = false;
-	bool		referencing_found = false;
-	bool		referenced_found = false;
-	bool		referenced_is_base_table = false;
+	Oid			referencing_relid = InvalidOid;
+	Oid			referenced_relid = InvalidOid;
 	List	   *notNullConstraints = NIL;
 
+	/* Find the referenced relation in the left namespace */
 	foreach(lc, l_namespace)
 	{
 		ParseNamespaceItem *nsi = (ParseNamespaceItem *) lfirst(lc);
@@ -145,6 +182,7 @@ transformAndValidateForeignKeyJoin(ParseState *pstate, JoinExpr *join,
 				 errmsg("number of referencing and referenced columns for foriegn key disagree"),
 				 parser_errposition(pstate, fkjn->location)));
 
+	/* Determine which side is referencing and which is referenced */
 	if (fkjn->fkdir == FKDIR_FROM)
 	{
 		referencing_rel = other_rel;
@@ -152,7 +190,6 @@ transformAndValidateForeignKeyJoin(ParseState *pstate, JoinExpr *join,
 		referencing_cols = fkjn->refCols;
 		referenced_cols = fkjn->localCols;
 		referencing_arg = join->larg;
-		referenced_arg = join->rarg;
 	}
 	else
 	{
@@ -160,13 +197,13 @@ transformAndValidateForeignKeyJoin(ParseState *pstate, JoinExpr *join,
 		referencing_rel = r_nsitem;
 		referenced_cols = fkjn->refCols;
 		referencing_cols = fkjn->localCols;
-		referenced_arg = join->larg;
 		referencing_arg = join->rarg;
 	}
 
 	referencing_rte = rt_fetch(referencing_rel->p_rtindex, pstate->p_rtable);
 	referenced_rte = rt_fetch(referenced_rel->p_rtindex, pstate->p_rtable);
 
+	/* Resolve column names to attribute numbers for referencing side */
 	foreach(lc, referencing_cols)
 	{
 		char	   *ref_colname = strVal(lfirst(lc));
@@ -200,6 +237,7 @@ transformAndValidateForeignKeyJoin(ParseState *pstate, JoinExpr *join,
 		referencing_attnums = lappend_int(referencing_attnums, col_index + 1);
 	}
 
+	/* Resolve column names to attribute numbers for referenced side */
 	foreach(lc, referenced_cols)
 	{
 		char	   *ref_colname = strVal(lfirst(lc));
@@ -233,124 +271,66 @@ transformAndValidateForeignKeyJoin(ParseState *pstate, JoinExpr *join,
 		referenced_attnums = lappend_int(referenced_attnums, col_index + 1);
 	}
 
-	base_referencing_rte = drill_down_to_base_rel(pstate, referencing_rte,
-												  referencing_attnums,
-												  &referencing_base_attnums,
-												  fkjn->location, NULL);
-	base_referenced_rte = drill_down_to_base_rel(pstate, referenced_rte,
-												 referenced_attnums,
-												 &referenced_base_attnums,
-												 fkjn->location, NULL);
-
-	referencing_relid = base_referencing_rte->relid;
-	referenced_relid = base_referenced_rte->relid;
-	referenced_id = base_referenced_rte->rteid;
-
-	Assert(referencing_relid != InvalidOid && referenced_relid != InvalidOid);
-
 	/*
-	 * Check if referenced relation is a base table at same query level.
-	 * Base tables always preserve their own uniqueness and rows, so we can
-	 * skip the uniqueness/FD checks for them. These checks are only needed
-	 * for derived tables (subqueries, views, CTEs) where the preservation
-	 * properties may have been lost due to joins or filtering.
+	 * Check if either relation is a CTE or JOIN.  These can't be validated
+	 * during parse because we don't have the full query context to resolve
+	 * them.  The FK constraint will be validated during the rewrite phase
+	 * (after fireRIRrules).
 	 */
-	if (referenced_rte->rtekind == RTE_RELATION && referenced_rte->relid != InvalidOid)
-	{
-		Relation	rel = table_open(referenced_rte->relid, AccessShareLock);
-
-		if (rel->rd_rel->relkind == RELKIND_RELATION ||
-			rel->rd_rel->relkind == RELKIND_PARTITIONED_TABLE)
-		{
-			referenced_is_base_table = true;
-		}
-		table_close(rel, AccessShareLock);
-	}
-
-	fkoid = find_foreign_key(referencing_relid, referenced_relid,
-							 referencing_base_attnums, referenced_base_attnums);
-
-	if (fkoid == InvalidOid)
-		ereport(ERROR,
-				(errcode(ERRCODE_UNDEFINED_OBJECT),
-				 errmsg("there is no foreign key constraint on table \"%s\" (%s) referencing table \"%s\" (%s)",
-						referencing_rte->alias ? referencing_rte->alias->aliasname :
-						(referencing_rte->relid == InvalidOid) ? "<unnamed derived table>" :
-						get_rel_name(referencing_rte->relid),
-						column_list_to_string(referencing_cols),
-						referenced_rte->alias ? referenced_rte->alias->aliasname :
-						(referenced_rte->relid == InvalidOid) ? "<unnamed derived table>" :
-						get_rel_name(referenced_rte->relid),
-						column_list_to_string(referenced_cols)),
-				 parser_errposition(pstate, fkjn->location)));
-
-	analyze_join_tree(pstate, referencing_arg, NULL, referencing_rte->rteid, &referencing_uniqueness_preservation, &referencing_functional_dependencies, &referencing_found, fkjn->location, NULL);
-
-	/* Only analyze referenced side for derived tables - base tables always preserve uniqueness/rows */
-	if (!referenced_is_base_table)
-		analyze_join_tree(pstate, referenced_arg, NULL, referenced_rte->rteid, &referenced_uniqueness_preservation, &referenced_functional_dependencies, &referenced_found, fkjn->location, NULL);
-
-	/*
-	 * Check uniqueness preservation - only for derived tables.
-	 * Base tables always preserve their own uniqueness.
-	 */
-	if (!referenced_is_base_table &&
-		!list_member(referenced_uniqueness_preservation, referenced_id))
-	{
-		ereport(ERROR,
-				(errcode(ERRCODE_INVALID_FOREIGN_KEY),
-				 errmsg("foreign key join violation"),
-				 errdetail("referenced relation does not preserve uniqueness of keys"),
-				 parser_errposition(pstate, fkjn->location)));
-	}
-
-	/*
-	 * Check functional dependencies - looking for (referenced_id,
-	 * referenced_id) pairs
-	 */
-	for (int i = 0; i < list_length(referenced_functional_dependencies); i += 2)
-	{
-		RTEId	   *fd_dep = (RTEId *) list_nth(referenced_functional_dependencies, i);
-		RTEId	   *fd_dcy = (RTEId *) list_nth(referenced_functional_dependencies, i + 1);
-
-		if (equal(fd_dep, referenced_id) && equal(fd_dcy, referenced_id))
-		{
-			found_fd = true;
-			break;
-		}
-	}
-
-	/*
-	 * Check functional dependencies - only for derived tables.
-	 * Base tables always preserve all their rows.
-	 */
-	if (!referenced_is_base_table && !found_fd)
+	if (referencing_rte->rtekind == RTE_CTE || referenced_rte->rtekind == RTE_CTE ||
+		referencing_rte->rtekind == RTE_JOIN || referenced_rte->rtekind == RTE_JOIN ||
+		subquery_has_cte_ref(referencing_rte) || subquery_has_cte_ref(referenced_rte))
 	{
 		/*
-		 * This check ensures that the referenced relation is not filtered
-		 * (e.g., by WHERE, LIMIT, OFFSET, HAVING, RLS). Foreign key joins
-		 * require the referenced side to represent the complete set of rows
-		 * from the underlying table(s). The presence of a functional
-		 * dependency (referenced_id, referenced_id) indicates this row
-		 * preservation property.
+		 * Skip FK constraint lookup for CTEs/JOINs during parse.
+		 * Also skip when a subquery contains CTE references, since
+		 * drill_down cannot resolve CTEs without the full query context.
+		 * Still set fkoid to InvalidOid so it gets validated later.
 		 */
-		ereport(ERROR,
-				(errcode(ERRCODE_INVALID_FOREIGN_KEY),
-				 errmsg("foreign key join violation"),
-				 errdetail("referenced relation does not preserve all rows"),
-				 parser_errposition(pstate, fkjn->location)));
+		fkoid = InvalidOid;
+	}
+	else
+	{
+		/* Drill down to find the base relations */
+		base_referencing_rte = drill_down_to_base_rel(NULL, referencing_rte,
+													  referencing_attnums,
+													  &referencing_base_attnums);
+		base_referenced_rte = drill_down_to_base_rel(NULL, referenced_rte,
+													 referenced_attnums,
+													 &referenced_base_attnums);
+
+		referencing_relid = base_referencing_rte->relid;
+		referenced_relid = base_referenced_rte->relid;
+
+		Assert(referencing_relid != InvalidOid && referenced_relid != InvalidOid);
+
+		/* Verify the FK constraint exists */
+		fkoid = find_foreign_key(referencing_relid, referenced_relid,
+								 referencing_base_attnums, referenced_base_attnums);
+
+		if (fkoid == InvalidOid)
+			ereport(ERROR,
+					(errcode(ERRCODE_UNDEFINED_OBJECT),
+					 errmsg("there is no foreign key constraint on table \"%s\" (%s) referencing table \"%s\" (%s)",
+							referencing_rte->alias ? referencing_rte->alias->aliasname :
+							(referencing_rte->relid == InvalidOid) ? "<unnamed derived table>" :
+							get_rel_name(referencing_rte->relid),
+							column_list_to_string(referencing_cols),
+							referenced_rte->alias ? referenced_rte->alias->aliasname :
+							(referenced_rte->relid == InvalidOid) ? "<unnamed derived table>" :
+							get_rel_name(referenced_rte->relid),
+							column_list_to_string(referenced_cols)),
+					 parser_errposition(pstate, fkjn->location)));
 	}
 
-	join->quals = build_fk_join_on_clause(pstate, referencing_rel->p_nscolumns, referencing_attnums, referenced_rel->p_nscolumns, referenced_attnums);
+	/* Build the ON clause for the join */
+	join->quals = build_fk_join_on_clause(pstate,
+										  referencing_rel->p_nscolumns, referencing_attnums,
+										  referenced_rel->p_nscolumns, referenced_attnums);
 
 	/*
-	 * For inner joins (and the inner side of outer joins), the row
-	 * preservation guarantee depends on the referencing columns being NOT
-	 * NULL.  Collect the NOT NULL constraint OIDs so we can record
-	 * dependencies on them.
-	 *
-	 * We need NOT NULL dependencies when the referencing table is on the
-	 * "inner" side of a join (the side that can have rows filtered out):
+	 * Collect NOT NULL constraint dependencies when the referencing table
+	 * is on the "inner" side of a join:
 	 * - INNER JOIN: both sides can be filtered, so always need NOT NULL
 	 * - LEFT JOIN: right side is inner, track if referencing is on right
 	 * - RIGHT JOIN: left side is inner, track if referencing is on left
@@ -365,19 +345,18 @@ transformAndValidateForeignKeyJoin(ParseState *pstate, JoinExpr *join,
 				need_not_null_deps = true;
 				break;
 			case JOIN_LEFT:
-				/* Left join: right side is inner, track if referencing is on right */
 				need_not_null_deps = (referencing_arg == join->rarg);
 				break;
 			case JOIN_RIGHT:
-				/* Right join: left side is inner, track if referencing is on left */
 				need_not_null_deps = (referencing_arg == join->larg);
 				break;
 			case JOIN_FULL:
-				/* Full join: both sides preserved, no NOT NULL dependency needed */
+				break;
+			default:
 				break;
 		}
 
-		if (need_not_null_deps)
+		if (need_not_null_deps && referencing_relid != InvalidOid)
 		{
 			(void) is_referencing_cols_not_null(referencing_relid,
 												referencing_base_attnums,
@@ -385,6 +364,7 @@ transformAndValidateForeignKeyJoin(ParseState *pstate, JoinExpr *join,
 		}
 	}
 
+	/* Create the ForeignKeyJoinNode */
 	fkjn_node = makeNode(ForeignKeyJoinNode);
 	fkjn_node->fkdir = fkjn->fkdir;
 	fkjn_node->referencingVarno = referencing_rel->p_rtindex;
@@ -397,221 +377,537 @@ transformAndValidateForeignKeyJoin(ParseState *pstate, JoinExpr *join,
 	join->fkJoin = (Node *) fkjn_node;
 }
 
-static void
-analyze_join_tree(ParseState *pstate, Node *n,
-				  Query *query,
-				  RTEId *rte_id,
-				  List **uniqueness_preservation,
-				  List **functional_dependencies,
-				  bool *found,
-				  int location,
-				  QueryStack *query_stack)
+/*
+ * validateForeignKeyJoins
+ *		Validate FK joins after view expansion (fireRIRrules).
+ *
+ * This function enumerates base tables and computes uniqueness_preservation
+ * and functional_dependencies for each node in the join tree. FK join
+ * constraints are validated during enumeration when we have access to
+ * child properties and can correlate them via the RTE->base_idx hash table.
+ */
+void
+validateForeignKeyJoins(Query *query)
 {
-	RangeTblEntry *rte;
-	Query	   *inner_query = NULL;
-	List	   *referencing_uniqueness_preservation = NIL;
-	List	   *referencing_functional_dependencies = NIL;
-	List	   *referenced_uniqueness_preservation = NIL;
-	List	   *referenced_functional_dependencies = NIL;
-	List	   *referencing_base_attnums;
-	List	   *referenced_base_attnums;
-	RangeTblEntry *base_referencing_rte;
-	RangeTblEntry *base_referenced_rte;
-	Oid			referencing_relid;
-	RTEId	   *referencing_id;
-	RTEId	   *referenced_id;
-	bool		referencing_found = false;
-	bool		referenced_found = false;
+	FKJoinValidationContext context;
+	Bitmapset  *uniqueness = NULL;
+	List	   *funcdeps = NIL;
+	HASHCTL		hash_ctl;
 
-	switch (nodeTag(n))
+	/* Only validate SELECT queries with a join tree */
+	if (query->commandType != CMD_SELECT)
+		return;
+
+	if (query->jointree == NULL || query->jointree->fromlist == NIL)
+		return;
+
+	/* Initialize validation context */
+	context.next_base_index = 0;
+	context.uniqueness_preservation = NULL;
+	context.functional_dependencies = NIL;
+	context.query = query;
+	context.query_stack = list_make1(query);	/* Start with top-level query */
+
+	/* Create hash table for RTE -> base index mapping */
+	memset(&hash_ctl, 0, sizeof(hash_ctl));
+	hash_ctl.keysize = sizeof(RangeTblEntry *);
+	hash_ctl.entrysize = sizeof(RTEBaseIndexEntry);
+	hash_ctl.hcxt = CurrentMemoryContext;
+	context.rte_to_base_index = hash_create("FK Join RTE to Base Index",
+											32,
+											&hash_ctl,
+											HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
+
+	/*
+	 * Bottom-up enumeration, property computation, and validation.
+	 * Process the from-list to compute uniqueness_preservation and
+	 * functional_dependencies. FK joins are validated during this pass.
+	 */
+	if (list_length(query->jointree->fromlist) == 1)
 	{
-		case T_JoinExpr:
-			{
-				JoinExpr   *join = (JoinExpr *) n;
-				List	   *rtable;
-				Node	   *referencing_arg;
-				Node	   *referenced_arg;
-				RangeTblEntry *referencing_rte;
-				RangeTblEntry *referenced_rte;
-				ForeignKeyJoinNode *fkjn = castNode(ForeignKeyJoinNode, join->fkJoin);
-				bool		fk_cols_unique;
-				bool		fk_cols_not_null;
+		fkjoin_enumerate_and_compute(linitial(query->jointree->fromlist),
+									 &context, &uniqueness, &funcdeps);
+	}
+	else
+	{
+		/* Multiple from-list items - process each */
+		ListCell   *lc;
 
-				if (query)
-					rtable = query->rtable;
-				else
-					rtable = pstate->p_rtable;
+		foreach(lc, query->jointree->fromlist)
+		{
+			Bitmapset  *item_uniqueness = NULL;
+			List	   *item_funcdeps = NIL;
 
-				if (fkjn->fkdir == FKDIR_FROM)
-				{
-					referencing_arg = join->larg;
-					referenced_arg = join->rarg;
-				}
-				else
-				{
-					referenced_arg = join->larg;
-					referencing_arg = join->rarg;
-				}
+			fkjoin_enumerate_and_compute(lfirst(lc), &context,
+										 &item_uniqueness, &item_funcdeps);
 
-				referencing_rte = rt_fetch(fkjn->referencingVarno, rtable);
-				referenced_rte = rt_fetch(fkjn->referencedVarno, rtable);
+			/* Merge results - cross-product doesn't preserve uniqueness */
+			uniqueness = bms_union(uniqueness, item_uniqueness);
+			funcdeps = list_concat(funcdeps, item_funcdeps);
+		}
+	}
 
-				analyze_join_tree(pstate, referencing_arg, query, rte_id, &referencing_uniqueness_preservation, &referencing_functional_dependencies, &referencing_found, location, query_stack);
-				analyze_join_tree(pstate, referenced_arg, query, rte_id, &referenced_uniqueness_preservation, &referenced_functional_dependencies, &referenced_found, location, query_stack);
+	/* Clean up hash table */
+	hash_destroy(context.rte_to_base_index);
+}
 
-				base_referencing_rte = drill_down_to_base_rel(pstate, referencing_rte,
-															  fkjn->referencingAttnums,
-															  &referencing_base_attnums,
-															  location, query_stack);
-				base_referenced_rte = drill_down_to_base_rel(pstate, referenced_rte,
-															 fkjn->referencedAttnums,
-															 &referenced_base_attnums,
-															 location, query_stack);
+/*
+ * jtnode_has_fk_joins
+ *		Check if a join tree node contains any FK join nodes.
+ */
+static bool
+jtnode_has_fk_joins(Node *jtnode)
+{
+	if (jtnode == NULL)
+		return false;
 
-				referencing_relid = base_referencing_rte->relid;
-				referencing_id = base_referencing_rte->rteid;
-				referenced_id = base_referenced_rte->rteid;
+	if (IsA(jtnode, JoinExpr))
+	{
+		JoinExpr   *j = (JoinExpr *) jtnode;
 
-				fk_cols_unique = is_referencing_cols_unique(referencing_relid, referencing_base_attnums);
-				fk_cols_not_null = is_referencing_cols_not_null(referencing_relid, referencing_base_attnums, NULL);
+		if (j->fkJoin != NULL)
+			return true;
+		if (jtnode_has_fk_joins(j->larg))
+			return true;
+		if (jtnode_has_fk_joins(j->rarg))
+			return true;
+	}
+	else if (IsA(jtnode, FromExpr))
+	{
+		FromExpr   *f = (FromExpr *) jtnode;
+		ListCell   *lc;
 
-				*uniqueness_preservation = update_uniqueness_preservation(
-																		  referencing_uniqueness_preservation,
-																		  referenced_uniqueness_preservation,
-																		  referencing_id,
-																		  fk_cols_unique
-					);
-				*functional_dependencies = update_functional_dependencies(
-																		  referencing_functional_dependencies,
-																		  referencing_id,
-																		  referenced_functional_dependencies,
-																		  referenced_id,
-																		  fk_cols_not_null,
-																		  join->jointype,
-																		  fkjn->fkdir
-					);
+		foreach(lc, f->fromlist)
+		{
+			if (jtnode_has_fk_joins(lfirst(lc)))
+				return true;
+		}
+	}
+	else if (IsA(jtnode, RangeTblRef))
+	{
+		/* Leaf node, no FK joins here */
+	}
 
-				/* Set found based on whether rte_id was in either subtree or matches either relation */
-				if (referencing_found || referenced_found ||
-					equal(referencing_rte->rteid, rte_id) || equal(referenced_rte->rteid, rte_id))
-				{
-					*found = true;
-				}
+	return false;
+}
 
-			}
-			break;
+/*
+ * queryHasFKJoins
+ *		Check if a query contains any FK join nodes in its join tree.
+ *
+ * This is used to avoid expensive view revalidation (fireRIRrules +
+ * validateForeignKeyJoins) for views that don't use FK joins.
+ */
+bool
+queryHasFKJoins(Query *query)
+{
+	if (query == NULL || query->jointree == NULL)
+		return false;
 
+	return jtnode_has_fk_joins((Node *) query->jointree);
+}
+
+/*
+ * fkjoin_enumerate_and_compute
+ *		Bottom-up pass: enumerate base tables and compute properties.
+ *
+ * For each node in the join tree:
+ * - RangeTblRef: If it's a base table, assign a local index and set initial
+ *   uniqueness preservation and functional dependencies.
+ * - JoinExpr: Recursively process children, then merge properties based on
+ *   join type and FK constraints.
+ */
+static void
+fkjoin_enumerate_and_compute(Node *jtnode, FKJoinValidationContext *context,
+							 Bitmapset **uniqueness_out,
+							 List **funcdeps_out)
+{
+	*uniqueness_out = NULL;
+	*funcdeps_out = NIL;
+
+	if (jtnode == NULL)
+		return;
+
+	switch (nodeTag(jtnode))
+	{
 		case T_RangeTblRef:
 			{
-				RangeTblRef *rtr = (RangeTblRef *) n;
-				int			rtindex = rtr->rtindex;
+				RangeTblRef *rtr = (RangeTblRef *) jtnode;
+				RangeTblEntry *rte = rt_fetch(rtr->rtindex, context->query->rtable);
 
-				/* Use the appropriate range table for lookups */
-				if (query)
-					rte = rt_fetch(rtindex, query->rtable);
-				else
-					rte = rt_fetch(rtindex, pstate->p_rtable);
-
-				/* Process the referenced RTE */
-				switch (rte->rtekind)
+				if (rte->rtekind == RTE_RELATION)
 				{
-					case RTE_RELATION:
-						{
-							Relation	rel;
+					Relation	rel = table_open(rte->relid, AccessShareLock);
 
-							/* Open the relation to check its type */
-							rel = table_open(rte->relid, AccessShareLock);
+					if (rel->rd_rel->relkind == RELKIND_RELATION ||
+						rel->rd_rel->relkind == RELKIND_PARTITIONED_TABLE)
+					{
+						/* Base table: assign index and set initial properties */
+						int			base_idx = context->next_base_index++;
+						RTEBaseIndexEntry *entry;
+						bool		found;
 
-							if (rel->rd_rel->relkind == RELKIND_VIEW)
-							{
-								inner_query = get_view_query(rel);
-							}
-							else if (rel->rd_rel->relkind == RELKIND_RELATION ||
-									 rel->rd_rel->relkind == RELKIND_PARTITIONED_TABLE)
-							{
-								*uniqueness_preservation = list_make1(rte->rteid);
+						/* Store mapping from RTE pointer to base index */
+						entry = hash_search(context->rte_to_base_index,
+											&rte,
+											HASH_ENTER,
+											&found);
+						entry->rte = rte;
+						entry->base_idx = base_idx;
 
-								/*
-								 * Check if filtered by WHERE/OFFSET/LIMIT/HAVING.
-								 */
-								if (!query || (!query->jointree->quals &&
-											   !query->limitOffset &&
-											   !query->limitCount &&
-											   !query->havingQual))
-									*functional_dependencies = list_make2(rte->rteid, rte->rteid);
-							}
+						*uniqueness_out = bms_add_member(*uniqueness_out, base_idx);
+						*funcdeps_out = list_make1(makeFKJoinFuncDep(base_idx, base_idx));
+					}
+					else if (rel->rd_rel->relkind == RELKIND_VIEW)
+					{
+						/*
+						 * View: views should have been expanded by fireRIRrules.
+						 * If we still see a view here, it's an internal error.
+						 */
+						elog(ERROR, "unexpected view in FK join validation after fireRIRrules");
+					}
 
-							/* Close the relation */
-							table_close(rel, AccessShareLock);
-						}
-						break;
-
-					case RTE_SUBQUERY:
-						inner_query = rte->subquery;
-						break;
-
-					case RTE_CTE:
-						{
-							CommonTableExpr *cte;
-
-							cte = find_cte_for_rte(pstate, query_stack, rte);
-							if (!cte)
-								elog(ERROR, "could not find CTE \"%s\" (analyze_join_tree)", rte->ctename);
-
-							if (!cte->cterecursive && IsA(cte->ctequery, Query))
-								inner_query = (Query *) cte->ctequery;
-						}
-						break;
-
-					default:
-						ereport(ERROR,
-								(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-								 errmsg("foreign key joins involving this RTE kind are not supported"),
-								 parser_errposition(pstate, location)));
-						break;
+					table_close(rel, AccessShareLock);
 				}
-
-				/* Common path for processing any inner query */
-				if (inner_query != NULL)
+				else if (rte->rtekind == RTE_SUBQUERY)
 				{
 					/*
-					 * Traverse the inner query if it has a single fromlist
-					 * item
+					 * Subquery: recursively validate and propagate properties.
+					 * For now, we conservatively don't preserve uniqueness
+					 * through subqueries unless they're simple enough.
 					 */
-					if (inner_query->jointree && inner_query->jointree->fromlist &&
-						list_length(inner_query->jointree->fromlist) == 1)
-					{
-						QueryStack	new_stack = {.parent=query_stack, .query=inner_query};
+					Query	   *subquery = rte->subquery;
 
-						analyze_join_tree(pstate,
-										  (Node *) linitial(inner_query->jointree->fromlist),
-										  inner_query, rte_id, uniqueness_preservation, functional_dependencies, found, location,
-										  &new_stack);
+					if (subquery->jointree &&
+						subquery->jointree->fromlist &&
+						list_length(subquery->jointree->fromlist) == 1 &&
+						!subquery->distinctClause &&
+						!subquery->groupClause &&
+						!subquery->groupingSets &&
+						!subquery->hasTargetSRFs)
+					{
+						FKJoinValidationContext subcontext;
+
+						subcontext.next_base_index = context->next_base_index;
+						subcontext.uniqueness_preservation = NULL;
+						subcontext.functional_dependencies = NIL;
+						subcontext.query = subquery;
+						/* Push subquery onto front of stack for CTE lookups */
+						subcontext.query_stack = lcons(subquery, list_copy(context->query_stack));
+						/* Share the hash table with parent context */
+						subcontext.rte_to_base_index = context->rte_to_base_index;
+
+						fkjoin_enumerate_and_compute(linitial(subquery->jointree->fromlist),
+													 &subcontext,
+													 uniqueness_out,
+													 funcdeps_out);
+
+						context->next_base_index = subcontext.next_base_index;
+
+						/* If subquery has WHERE clause, remove self-dependencies */
+						if (subquery->jointree->quals != NULL ||
+							subquery->limitOffset != NULL ||
+							subquery->limitCount != NULL ||
+							subquery->havingQual != NULL)
+						{
+							ListCell   *lc;
+							List	   *filtered_fds = NIL;
+
+							foreach(lc, *funcdeps_out)
+							{
+								FKJoinFuncDep *fd = (FKJoinFuncDep *) lfirst(lc);
+
+								if (fd->determinant != fd->dependent)
+									filtered_fds = lappend(filtered_fds, fd);
+							}
+							*funcdeps_out = filtered_fds;
+						}
+					}
+					else if (subquery->groupClause &&
+							 !subquery->distinctClause &&
+							 !subquery->groupingSets &&
+							 !subquery->hasTargetSRFs &&
+							 subquery->jointree &&
+							 subquery->jointree->fromlist &&
+							 list_length(subquery->jointree->fromlist) == 1)
+					{
+						/*
+						 * GROUP BY case: First enumerate the subquery contents
+						 * to populate the hash table, then check if GROUP BY
+						 * columns form a unique key AND the base table rows
+						 * are preserved before the GROUP BY.
+						 */
+						FKJoinValidationContext subcontext;
+						Bitmapset  *sub_uniqueness = NULL;
+						List	   *sub_funcdeps = NIL;
+						Bitmapset  *group_cols = NULL;
+						Index		group_varno = 0;
+						ListCell   *lc;
+						bool		all_simple = true;
+
+						/* First, enumerate subquery contents to populate hash table */
+						subcontext.next_base_index = context->next_base_index;
+						subcontext.uniqueness_preservation = NULL;
+						subcontext.functional_dependencies = NIL;
+						subcontext.query = subquery;
+						subcontext.query_stack = lcons(subquery, list_copy(context->query_stack));
+						subcontext.rte_to_base_index = context->rte_to_base_index;
+
+						fkjoin_enumerate_and_compute(linitial(subquery->jointree->fromlist),
+													 &subcontext,
+													 &sub_uniqueness,
+													 &sub_funcdeps);
+
+						context->next_base_index = subcontext.next_base_index;
+
+						/* If subquery has WHERE/LIMIT/HAVING, rows are not preserved */
+						if (subquery->jointree->quals != NULL ||
+							subquery->limitOffset != NULL ||
+							subquery->limitCount != NULL ||
+							subquery->havingQual != NULL)
+						{
+							ListCell   *fd_lc;
+							List	   *filtered_fds = NIL;
+
+							foreach(fd_lc, sub_funcdeps)
+							{
+								FKJoinFuncDep *fd = (FKJoinFuncDep *) lfirst(fd_lc);
+
+								if (fd->determinant != fd->dependent)
+									filtered_fds = lappend(filtered_fds, fd);
+							}
+							sub_funcdeps = filtered_fds;
+						}
+
+						/* Analyze GROUP BY columns */
+						foreach(lc, subquery->groupClause)
+						{
+							SortGroupClause *sgc = lfirst_node(SortGroupClause, lc);
+							TargetEntry *tle = NULL;
+							ListCell   *tlc;
+
+							/* Find the target entry with matching tleSortGroupRef */
+							foreach(tlc, subquery->targetList)
+							{
+								tle = (TargetEntry *) lfirst(tlc);
+								if (tle->ressortgroupref == sgc->tleSortGroupRef)
+									break;
+								tle = NULL;
+							}
+
+							if (tle == NULL || !IsA(tle->expr, Var))
+							{
+								all_simple = false;
+								break;
+							}
+
+							{
+								Var		   *v = (Var *) tle->expr;
+
+								if (group_varno == 0)
+									group_varno = v->varno;
+								else if (group_varno != v->varno)
+								{
+									all_simple = false;
+									break;
+								}
+
+								group_cols = bms_add_member(group_cols, v->varattno);
+							}
+						}
 
 						/*
-						 * If the inner query has GROUP BY, check if it
-						 * preserves uniqueness. If it does, add the current
-						 * RTE to uniqueness preservation.
+						 * GROUP BY preserves uniqueness and rows only if:
+						 * 1. GROUP BY columns form a unique key on the base table
+						 * 2. That base table's rows were preserved before GROUP BY
+						 *    (indicated by having a self-dependency in sub_funcdeps)
 						 */
-						if (inner_query->groupClause)
+						if (all_simple && group_varno > 0)
 						{
-							elog(DEBUG1, "analyze_join_tree: found GROUP BY in inner query, checking uniqueness preservation");
-							if (check_group_by_preserves_uniqueness(inner_query, uniqueness_preservation))
+							RangeTblEntry *group_rte = rt_fetch(group_varno, subquery->rtable);
+							RangeTblEntry *base_group_rte = NULL;
+							Bitmapset  *base_group_cols = NULL;
+
+							if (group_rte->rtekind == RTE_RELATION &&
+								group_rte->relid != InvalidOid)
 							{
-								/*
-								 * GROUP BY preserves uniqueness, the function
-								 * has updated uniqueness_preservation
-								 */
-								elog(DEBUG1, "analyze_join_tree: GROUP BY preserves uniqueness");
+								base_group_rte = group_rte;
+								base_group_cols = group_cols;
 							}
-							else
+							else if (group_rte->rtekind == RTE_GROUP)
 							{
 								/*
-								 * GROUP BY does not preserve uniqueness,
-								 * clear the list
+								 * In modern PG, GROUP BY columns point to
+								 * RTE_GROUP. Follow group expressions to find
+								 * the actual base table columns.
 								 */
-								elog(DEBUG1, "analyze_join_tree: GROUP BY does not preserve uniqueness, clearing uniqueness preservation");
-								*uniqueness_preservation = NIL;
+								int			base_varno = 0;
+								Bitmapset  *resolved_cols = NULL;
+								bool		group_resolved = true;
+								int			col;
+
+								col = -1;
+								while ((col = bms_next_member(group_cols, col)) >= 0)
+								{
+									Node	   *expr;
+									Var		   *gvar;
+
+									if (col <= 0 || col > list_length(group_rte->groupexprs))
+									{
+										group_resolved = false;
+										break;
+									}
+
+									expr = (Node *) list_nth(group_rte->groupexprs, col - 1);
+									if (!IsA(expr, Var))
+									{
+										group_resolved = false;
+										break;
+									}
+
+									gvar = (Var *) expr;
+									if (base_varno == 0)
+										base_varno = gvar->varno;
+									else if (base_varno != gvar->varno)
+									{
+										group_resolved = false;
+										break;
+									}
+									resolved_cols = bms_add_member(resolved_cols, gvar->varattno);
+								}
+
+								if (group_resolved && base_varno > 0)
+								{
+									RangeTblEntry *resolved_rte = rt_fetch(base_varno, subquery->rtable);
+
+									if (resolved_rte->rtekind == RTE_RELATION &&
+										resolved_rte->relid != InvalidOid)
+									{
+										base_group_rte = resolved_rte;
+										base_group_cols = resolved_cols;
+									}
+								}
+							}
+
+							if (base_group_rte != NULL)
+							{
+								Relation	rel = table_open(base_group_rte->relid, AccessShareLock);
+								bool		has_unique_key = check_unique_index_covers_columns(rel, base_group_cols);
+
+								table_close(rel, AccessShareLock);
+
+								if (has_unique_key)
+								{
+									RTEBaseIndexEntry *entry;
+
+									entry = hash_search(context->rte_to_base_index,
+														&base_group_rte,
+														HASH_FIND,
+														NULL);
+									if (entry != NULL)
+									{
+										/*
+										 * GROUP BY on a unique key always preserves
+										 * uniqueness. Propagate the base table's
+										 * uniqueness regardless of row preservation.
+										 */
+										*uniqueness_out = bms_add_member(*uniqueness_out,
+																		 entry->base_idx);
+
+										/*
+										 * Row preservation (self-dependency) is only
+										 * propagated if the base table's rows were
+										 * preserved before the GROUP BY.
+										 */
+										if (has_self_dependency(sub_funcdeps,
+															   entry->base_idx))
+										{
+											*funcdeps_out = list_make1(makeFKJoinFuncDep(entry->base_idx,
+																						 entry->base_idx));
+										}
+									}
+								}
+							}
+						}
+
+						bms_free(group_cols);
+					}
+				}
+				else if (rte->rtekind == RTE_CTE)
+				{
+					/*
+					 * CTE: find the CTE definition and enumerate its contents.
+					 * This is needed to populate the hash table with base RTEs.
+					 */
+					CommonTableExpr *cte = NULL;
+					ListCell   *qlc;
+
+					/* Search through query stack for the CTE */
+					foreach(qlc, context->query_stack)
+					{
+						Query	   *search_query = lfirst_node(Query, qlc);
+						ListCell   *clc;
+
+						foreach(clc, search_query->cteList)
+						{
+							CommonTableExpr *c = (CommonTableExpr *) lfirst(clc);
+
+							if (strcmp(c->ctename, rte->ctename) == 0)
+							{
+								cte = c;
+								break;
+							}
+						}
+
+						if (cte != NULL)
+							break;
+					}
+
+					if (cte != NULL && !cte->cterecursive)
+					{
+						Query	   *ctequery = castNode(Query, cte->ctequery);
+
+						if (ctequery->jointree &&
+							ctequery->jointree->fromlist &&
+							list_length(ctequery->jointree->fromlist) == 1 &&
+							!ctequery->distinctClause &&
+							!ctequery->groupClause &&
+							!ctequery->groupingSets &&
+							!ctequery->hasTargetSRFs)
+						{
+							FKJoinValidationContext subcontext;
+
+							subcontext.next_base_index = context->next_base_index;
+							subcontext.uniqueness_preservation = NULL;
+							subcontext.functional_dependencies = NIL;
+							subcontext.query = ctequery;
+							subcontext.query_stack = lcons(ctequery, list_copy(context->query_stack));
+							subcontext.rte_to_base_index = context->rte_to_base_index;
+
+							fkjoin_enumerate_and_compute(linitial(ctequery->jointree->fromlist),
+														 &subcontext,
+														 uniqueness_out,
+														 funcdeps_out);
+
+							context->next_base_index = subcontext.next_base_index;
+
+							/* If CTE query has WHERE clause, remove self-dependencies */
+							if (ctequery->jointree->quals != NULL ||
+								ctequery->limitOffset != NULL ||
+								ctequery->limitCount != NULL ||
+								ctequery->havingQual != NULL)
+							{
+								ListCell   *fd_lc;
+								List	   *filtered_fds = NIL;
+
+								foreach(fd_lc, *funcdeps_out)
+								{
+									FKJoinFuncDep *fd = (FKJoinFuncDep *) lfirst(fd_lc);
+
+									if (fd->determinant != fd->dependent)
+										filtered_fds = lappend(filtered_fds, fd);
+								}
+								*funcdeps_out = filtered_fds;
 							}
 						}
 					}
@@ -619,13 +915,450 @@ analyze_join_tree(ParseState *pstate, Node *n,
 			}
 			break;
 
+		case T_JoinExpr:
+			{
+				JoinExpr   *join = (JoinExpr *) jtnode;
+				Bitmapset  *left_uniqueness = NULL;
+				List	   *left_funcdeps = NIL;
+				Bitmapset  *right_uniqueness = NULL;
+				List	   *right_funcdeps = NIL;
+
+				/* Recursively process children */
+				fkjoin_enumerate_and_compute(join->larg, context,
+											 &left_uniqueness, &left_funcdeps);
+				fkjoin_enumerate_and_compute(join->rarg, context,
+											 &right_uniqueness, &right_funcdeps);
+
+				if (join->fkJoin != NULL)
+				{
+					/* FK join: apply FK-specific property merging and validation */
+					ForeignKeyJoinNode *fkjn = castNode(ForeignKeyJoinNode, join->fkJoin);
+					RangeTblEntry *referencing_rte;
+					RangeTblEntry *referenced_rte;
+					RangeTblEntry *base_referencing_rte;
+					RangeTblEntry *base_referenced_rte;
+					List	   *referencing_base_attnums;
+					List	   *referenced_base_attnums;
+					Oid			referencing_relid;
+					bool		fk_cols_unique;
+					bool		fk_cols_not_null;
+					Bitmapset  *referencing_uniqueness;
+					Bitmapset  *referenced_uniqueness;
+					List	   *referencing_funcdeps;
+					List	   *referenced_funcdeps;
+					int			referencing_base_idx;
+					int			referenced_base_idx;
+					RTEBaseIndexEntry *ref_entry;
+					RTEBaseIndexEntry *refing_entry;
+
+					referencing_rte = rt_fetch(fkjn->referencingVarno, context->query->rtable);
+					referenced_rte = rt_fetch(fkjn->referencedVarno, context->query->rtable);
+
+					/* Drill down to base relations using query stack */
+					base_referencing_rte = drill_down_to_base_rel(context->query_stack,
+																  referencing_rte,
+																  fkjn->referencingAttnums,
+																  &referencing_base_attnums);
+					base_referenced_rte = drill_down_to_base_rel(context->query_stack,
+																 referenced_rte,
+																 fkjn->referencedAttnums,
+																 &referenced_base_attnums);
+
+					referencing_relid = base_referencing_rte->relid;
+
+					/*
+					 * If the FK constraint was deferred during parse (e.g.
+					 * because a CTE or JOIN RTE couldn't be resolved then),
+					 * verify it now that we can drill down to base tables.
+					 */
+					if (fkjn->constraint == InvalidOid)
+					{
+						Oid		fkoid;
+
+						fkoid = find_foreign_key(base_referencing_rte->relid,
+												 base_referenced_rte->relid,
+												 referencing_base_attnums,
+												 referenced_base_attnums);
+						if (fkoid == InvalidOid)
+							ereport(ERROR,
+									(errcode(ERRCODE_UNDEFINED_OBJECT),
+									 errmsg("there is no foreign key constraint on table \"%s\" (%s) referencing table \"%s\" (%s)",
+											get_rel_name(base_referencing_rte->relid),
+											attnum_list_to_string(base_referencing_rte->relid, referencing_base_attnums),
+											get_rel_name(base_referenced_rte->relid),
+											attnum_list_to_string(base_referenced_rte->relid, referenced_base_attnums))));
+					}
+
+					/* Determine which side is referencing/referenced */
+					if (fkjn->fkdir == FKDIR_FROM)
+					{
+						referencing_uniqueness = left_uniqueness;
+						referencing_funcdeps = left_funcdeps;
+						referenced_uniqueness = right_uniqueness;
+						referenced_funcdeps = right_funcdeps;
+					}
+					else
+					{
+						referencing_uniqueness = right_uniqueness;
+						referencing_funcdeps = right_funcdeps;
+						referenced_uniqueness = left_uniqueness;
+						referenced_funcdeps = left_funcdeps;
+					}
+
+					/*
+					 * Look up base indices from hash table using RTE pointers.
+					 * The same RTE object is reached via both enumeration and
+					 * drill-down, so the hash lookup gives us the correct index.
+					 */
+					ref_entry = hash_search(context->rte_to_base_index,
+											&base_referenced_rte,
+											HASH_FIND,
+											NULL);
+					refing_entry = hash_search(context->rte_to_base_index,
+											   &base_referencing_rte,
+											   HASH_FIND,
+											   NULL);
+
+					if (ref_entry == NULL)
+						ereport(ERROR,
+								(errcode(ERRCODE_INTERNAL_ERROR),
+								 errmsg("base RTE for referenced relation not found in mapping")));
+					if (refing_entry == NULL)
+						ereport(ERROR,
+								(errcode(ERRCODE_INTERNAL_ERROR),
+								 errmsg("base RTE for referencing relation not found in mapping")));
+
+					referenced_base_idx = ref_entry->base_idx;
+					referencing_base_idx = refing_entry->base_idx;
+
+					/*
+					 * Validate FK join constraints:
+					 * 1. Referenced side must preserve uniqueness of keys
+					 * 2. Referenced side must preserve all rows (self-dependency)
+					 *
+					 * When the referenced table is a direct base table
+					 * (RTE_RELATION), its PK/UNIQUE constraints are inherently
+					 * valid regardless of what other joins have been applied.
+					 * After fireRIRrules, remaining RTE_RELATION entries are
+					 * genuine base tables (views are already expanded).
+					 */
+					{
+						bool	need_derived_checks =
+							(referenced_rte->rtekind != RTE_RELATION);
+
+						if (need_derived_checks)
+						{
+							if (!bms_is_member(referenced_base_idx,
+											   referenced_uniqueness))
+							{
+								ereport(ERROR,
+										(errcode(ERRCODE_INVALID_FOREIGN_KEY),
+										 errmsg("foreign key join violation"),
+										 errdetail("referenced relation does not preserve uniqueness of keys")));
+							}
+
+							if (!has_self_dependency(referenced_funcdeps,
+													 referenced_base_idx))
+							{
+								ereport(ERROR,
+										(errcode(ERRCODE_INVALID_FOREIGN_KEY),
+										 errmsg("foreign key join violation"),
+										 errdetail("referenced relation does not preserve all rows")));
+							}
+						}
+					}
+
+					/* Check FK column properties */
+					fk_cols_unique = is_referencing_cols_unique(referencing_relid,
+																referencing_base_attnums);
+					fk_cols_not_null = is_referencing_cols_not_null(referencing_relid,
+																	referencing_base_attnums,
+																	NULL);
+
+					/* Update uniqueness preservation */
+					*uniqueness_out = update_uniqueness_preservation(referencing_uniqueness,
+																	 referenced_uniqueness,
+																	 referencing_base_idx,
+																	 fk_cols_unique);
+
+					/* Update functional dependencies */
+					*funcdeps_out = update_functional_dependencies(referencing_funcdeps,
+																   referencing_base_idx,
+																   referenced_funcdeps,
+																   referenced_base_idx,
+																   fk_cols_not_null,
+																   join->jointype,
+																   fkjn->fkdir);
+				}
+				else
+				{
+					/* Non-FK join: conservative merge */
+					switch (join->jointype)
+					{
+						case JOIN_INNER:
+							/* Inner join: both sides must match, uniqueness preserved */
+							*uniqueness_out = bms_union(left_uniqueness, right_uniqueness);
+							/* Functional dependencies broken unless it's a special case */
+							*funcdeps_out = NIL;
+							break;
+
+						case JOIN_LEFT:
+							/* Left join preserves left side rows */
+							*uniqueness_out = bms_union(left_uniqueness, right_uniqueness);
+							*funcdeps_out = list_copy(left_funcdeps);
+							break;
+
+						case JOIN_RIGHT:
+							/* Right join preserves right side rows */
+							*uniqueness_out = bms_union(left_uniqueness, right_uniqueness);
+							*funcdeps_out = list_copy(right_funcdeps);
+							break;
+
+						case JOIN_FULL:
+							/* Full join preserves both sides */
+							*uniqueness_out = bms_union(left_uniqueness, right_uniqueness);
+							*funcdeps_out = list_concat(list_copy(left_funcdeps),
+														list_copy(right_funcdeps));
+							break;
+
+						default:
+							*uniqueness_out = bms_union(left_uniqueness, right_uniqueness);
+							*funcdeps_out = NIL;
+							break;
+					}
+				}
+			}
+			break;
+
+		case T_FromExpr:
+			{
+				FromExpr   *f = (FromExpr *) jtnode;
+				ListCell   *lc;
+
+				/* Process all from-list items */
+				foreach(lc, f->fromlist)
+				{
+					Bitmapset  *item_uniqueness = NULL;
+					List	   *item_funcdeps = NIL;
+
+					fkjoin_enumerate_and_compute(lfirst(lc), context,
+												 &item_uniqueness, &item_funcdeps);
+
+					*uniqueness_out = bms_union(*uniqueness_out, item_uniqueness);
+					*funcdeps_out = list_concat(*funcdeps_out, item_funcdeps);
+				}
+
+				/* WHERE clause breaks row preservation */
+				if (f->quals != NULL)
+				{
+					ListCell   *lc2;
+					List	   *filtered_fds = NIL;
+
+					foreach(lc2, *funcdeps_out)
+					{
+						FKJoinFuncDep *fd = (FKJoinFuncDep *) lfirst(lc2);
+
+						if (fd->determinant != fd->dependent)
+							filtered_fds = lappend(filtered_fds, fd);
+					}
+					*funcdeps_out = filtered_fds;
+				}
+			}
+			break;
+
 		default:
-			ereport(ERROR,
-					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-					 errmsg("unsupported node type in foreign key join traversal"),
-					 parser_errposition(pstate, location)));
+			elog(ERROR, "unrecognized node type in FK join validation: %d",
+				 (int) nodeTag(jtnode));
 			break;
 	}
+}
+
+/*
+ * makeFKJoinFuncDep
+ *		Create a new FKJoinFuncDep node.
+ */
+static FKJoinFuncDep *
+makeFKJoinFuncDep(int determinant, int dependent)
+{
+	FKJoinFuncDep *fd = palloc(sizeof(FKJoinFuncDep));
+
+	fd->type = T_List;			/* Use T_List as a placeholder tag */
+	fd->determinant = determinant;
+	fd->dependent = dependent;
+
+	return fd;
+}
+
+/*
+ * has_self_dependency
+ *		Check if a base index has a self-dependency in the functional dependencies list.
+ */
+static bool
+has_self_dependency(List *funcdeps, int base_idx)
+{
+	ListCell   *lc;
+
+	foreach(lc, funcdeps)
+	{
+		FKJoinFuncDep *fd = (FKJoinFuncDep *) lfirst(lc);
+
+		if (fd->determinant == base_idx && fd->dependent == base_idx)
+			return true;
+	}
+
+	return false;
+}
+
+/*
+ * update_uniqueness_preservation
+ *		Update uniqueness preservation for an FK join.
+ *
+ * Uniqueness preservation is propagated from the referencing relation.
+ * If the FK columns form a unique key and the referencing base table
+ * preserves uniqueness, then uniqueness from the referenced relation
+ * is also added.
+ */
+static Bitmapset *
+update_uniqueness_preservation(Bitmapset *referencing_up,
+							   Bitmapset *referenced_up,
+							   int referencing_base_idx,
+							   bool fk_cols_unique)
+{
+	Bitmapset  *result;
+
+	/* Start with uniqueness from the referencing relation */
+	result = bms_copy(referencing_up);
+
+	/* If FK cols are unique and referencing preserves uniqueness, add referenced */
+	if (fk_cols_unique && bms_is_member(referencing_base_idx, referencing_up))
+		result = bms_union(result, referenced_up);
+
+	return result;
+}
+
+/*
+ * update_functional_dependencies
+ *		Update functional dependencies for an FK join.
+ */
+static List *
+update_functional_dependencies(List *referencing_fds,
+							   int referencing_base_idx,
+							   List *referenced_fds,
+							   int referenced_base_idx,
+							   bool fk_cols_not_null,
+							   JoinType join_type,
+							   ForeignKeyDirection fk_dir)
+{
+	List	   *result = NIL;
+	bool		referenced_has_self_dep = false;
+	bool		referencing_preserved_due_to_outer_join = false;
+	ListCell   *lc;
+
+	/*
+	 * Step 1: Add functional dependencies from the referencing relation when
+	 * an outer join preserves the referencing relation's tuples.
+	 */
+	if ((fk_dir == FKDIR_FROM && join_type == JOIN_LEFT) ||
+		(fk_dir == FKDIR_TO && join_type == JOIN_RIGHT) ||
+		join_type == JOIN_FULL)
+	{
+		foreach(lc, referencing_fds)
+		{
+			result = lappend(result, lfirst(lc));
+		}
+		referencing_preserved_due_to_outer_join = true;
+	}
+
+	/*
+	 * Step 2: Add functional dependencies from the referenced relation when
+	 * an outer join preserves the referenced relation's tuples.
+	 */
+	if ((fk_dir == FKDIR_TO && join_type == JOIN_LEFT) ||
+		(fk_dir == FKDIR_FROM && join_type == JOIN_RIGHT) ||
+		join_type == JOIN_FULL)
+	{
+		foreach(lc, referenced_fds)
+		{
+			result = lappend(result, lfirst(lc));
+		}
+	}
+
+	/*
+	 * Step 3: If any foreign key column permits NULL values, we cannot
+	 * guarantee row preservation in an inner FK join.
+	 */
+	if (!fk_cols_not_null)
+		return result;
+
+	/*
+	 * Step 4: Verify that the referenced relation preserves all its rows -
+	 * indicated by a self-dependency.
+	 */
+	foreach(lc, referenced_fds)
+	{
+		FKJoinFuncDep *fd = (FKJoinFuncDep *) lfirst(lc);
+
+		if (fd->determinant == referenced_base_idx &&
+			fd->dependent == referenced_base_idx)
+		{
+			referenced_has_self_dep = true;
+			break;
+		}
+	}
+
+	if (!referenced_has_self_dep)
+		return result;
+
+	/*
+	 * Step 5: Preserve inherited functional dependencies from the referencing
+	 * relation.
+	 */
+	if (!referencing_preserved_due_to_outer_join)
+	{
+		foreach(lc, referencing_fds)
+		{
+			FKJoinFuncDep *fd = (FKJoinFuncDep *) lfirst(lc);
+
+			if (fd->dependent == referencing_base_idx)
+			{
+				ListCell   *lc2;
+
+				foreach(lc2, referencing_fds)
+				{
+					FKJoinFuncDep *fd2 = (FKJoinFuncDep *) lfirst(lc2);
+
+					if (fd2->determinant == fd->determinant)
+						result = lappend(result, fd2);
+				}
+			}
+		}
+	}
+
+	/*
+	 * Step 6: Establish transitive functional dependencies.
+	 */
+	foreach(lc, referencing_fds)
+	{
+		FKJoinFuncDep *fd = (FKJoinFuncDep *) lfirst(lc);
+
+		if (fd->dependent == referencing_base_idx)
+		{
+			ListCell   *lc2;
+
+			foreach(lc2, referenced_fds)
+			{
+				FKJoinFuncDep *fd2 = (FKJoinFuncDep *) lfirst(lc2);
+
+				if (fd2->determinant == referenced_base_idx)
+				{
+					result = lappend(result,
+									 makeFKJoinFuncDep(fd->determinant, fd2->dependent));
+				}
+			}
+		}
+	}
+
+	return result;
 }
 
 /*
@@ -766,7 +1499,6 @@ find_foreign_key(Oid referencing_relid, Oid referenced_relid,
 	return fkoid;
 }
 
-
 /*
  * column_list_to_string
  *		Converts a list of column names to a comma-separated string
@@ -796,50 +1528,74 @@ column_list_to_string(const List *columns)
 }
 
 /*
- * find_cte_for_rte
- *              Locate the CTE referenced by an RTE either in the supplied
- *              stack of queries or in the ParseState's namespace.
+ * attnum_list_to_string
+ *		Converts a list of attribute numbers to a comma-separated column name string
  */
-static CommonTableExpr *
-find_cte_for_rte(ParseState *pstate, QueryStack *query_stack, RangeTblEntry *rte)
+static char *
+attnum_list_to_string(Oid relid, List *attnums)
 {
-	Index		levelsup = rte->ctelevelsup;
+	StringInfoData string;
+	ListCell   *lc;
+	bool		first = true;
 
-	Assert(rte->rtekind == RTE_CTE);
+	initStringInfo(&string);
 
-	for (QueryStack *qs = query_stack; qs; qs = qs->parent)
+	foreach(lc, attnums)
 	{
-		if (levelsup == 0)
-		{
-			ListCell   *lc;
+		AttrNumber	attnum = lfirst_int(lc);
+		char	   *attname = get_attname(relid, attnum, false);
 
-			foreach(lc, qs->query->cteList)
-			{
-				CommonTableExpr *cte = castNode(CommonTableExpr, lfirst(lc));
+		if (!first)
+			appendStringInfoString(&string, ", ");
 
-				if (strcmp(cte->ctename, rte->ctename) == 0)
-					return cte;
-			}
+		appendStringInfoString(&string, attname);
 
-			/* shouldn't happen */
-			elog(ERROR, "could not find CTE \"%s\"", rte->ctename);
-		}
-		levelsup--;
+		first = false;
 	}
 
-	return GetCTEForRTE(pstate, rte, levelsup - rte->ctelevelsup);
+	return string.data;
+}
+
+/*
+ * subquery_has_cte_ref
+ *		Check if a subquery RTE (recursively) references any CTEs.
+ *		Used to defer FK validation during parse when CTE context is unavailable.
+ */
+static bool
+subquery_has_cte_ref(RangeTblEntry *rte)
+{
+	ListCell   *lc;
+
+	if (rte->rtekind != RTE_SUBQUERY)
+		return false;
+
+	foreach(lc, rte->subquery->rtable)
+	{
+		RangeTblEntry *sub_rte = lfirst_node(RangeTblEntry, lc);
+
+		if (sub_rte->rtekind == RTE_CTE)
+			return true;
+		if (subquery_has_cte_ref(sub_rte))
+			return true;
+	}
+
+	return false;
 }
 
 /*
  * drill_down_to_base_rel
  *		Resolves the base relation from a potentially derived relation
+ *
+ * query_stack is a list of Query nodes representing the query hierarchy,
+ * with the innermost (current) query first and parent queries following.
+ * This is needed for CTE lookups which may reference CTEs in parent queries.
  */
 static RangeTblEntry *
-drill_down_to_base_rel(ParseState *pstate, RangeTblEntry *rte,
-					   List *attnums, List **base_attnums,
-					   int location, QueryStack *query_stack)
+drill_down_to_base_rel(List *query_stack, RangeTblEntry *rte,
+					   List *attnums, List **base_attnums)
 {
 	RangeTblEntry *base_rte = NULL;
+	Query	   *query = query_stack ? linitial_node(Query, query_stack) : NULL;
 
 	switch (rte->rtekind)
 	{
@@ -850,12 +1606,10 @@ drill_down_to_base_rel(ParseState *pstate, RangeTblEntry *rte,
 				switch (rel->rd_rel->relkind)
 				{
 					case RELKIND_VIEW:
-						base_rte = drill_down_to_base_rel_query(pstate,
+						base_rte = drill_down_to_base_rel_query(query_stack,
 																get_view_query(rel),
 																attnums,
-																base_attnums,
-																location,
-																query_stack);
+																base_attnums);
 						break;
 
 					case RELKIND_RELATION:
@@ -868,8 +1622,7 @@ drill_down_to_base_rel(ParseState *pstate, RangeTblEntry *rte,
 						ereport(ERROR,
 								(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 								 errmsg("foreign key joins involving this type of relation are not supported"),
-								 errdetail_relkind_not_supported(rel->rd_rel->relkind),
-								 parser_errposition(pstate, location)));
+								 errdetail_relkind_not_supported(rel->rd_rel->relkind)));
 				}
 
 				table_close(rel, AccessShareLock);
@@ -877,32 +1630,8 @@ drill_down_to_base_rel(ParseState *pstate, RangeTblEntry *rte,
 			break;
 
 		case RTE_SUBQUERY:
-			base_rte = drill_down_to_base_rel_query(pstate, rte->subquery,
-													attnums, base_attnums,
-													location, query_stack);
-			break;
-
-		case RTE_CTE:
-			{
-				CommonTableExpr *cte;
-
-				cte = find_cte_for_rte(pstate, query_stack, rte);
-				if (!cte)
-					elog(ERROR, "could not find CTE \"%s\" (drill_down_to_base_rel)", rte->ctename);
-
-				if (cte->cterecursive)
-					ereport(ERROR,
-							(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-							 errmsg("foreign key joins involving this type of relation are not supported"),
-							 parser_errposition(pstate, location)));
-
-				base_rte = drill_down_to_base_rel_query(pstate,
-														castNode(Query, cte->ctequery),
-														attnums,
-														base_attnums,
-														location,
-														query_stack);
-			}
+			base_rte = drill_down_to_base_rel_query(query_stack, rte->subquery,
+												   attnums, base_attnums);
 			break;
 
 		case RTE_JOIN:
@@ -921,87 +1650,65 @@ drill_down_to_base_rel(ParseState *pstate, RangeTblEntry *rte,
 					if (!IsA(node, Var))
 						ereport(ERROR,
 								(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-								 errmsg("foreign key joins require direct column references, found expression"),
-								 parser_errposition(pstate, location)));
+								 errmsg("foreign key joins require direct column references, found expression")));
 
 					var = castNode(Var, node);
 
-					/* Check that all columns map to the same rte */
 					if (next_rtindex == 0)
 						next_rtindex = var->varno;
 					else if (next_rtindex != var->varno)
 						ereport(ERROR,
 								(errcode(ERRCODE_UNDEFINED_TABLE),
-								 errmsg("all key columns must belong to the same table"),
-								 parser_errposition(pstate, location)));
+								 errmsg("all key columns must belong to the same table")));
 
 					next_attnums = lappend_int(next_attnums, var->varattno);
 				}
 
 				Assert(next_rtindex != 0);
 
-				base_rte = drill_down_to_base_rel(pstate,
-												  rt_fetch(next_rtindex, (query_stack ? query_stack->query->rtable : pstate->p_rtable)),
-												  next_attnums,
-												  base_attnums,
-												  location,
-												  query_stack);
-
+				if (query)
+					base_rte = drill_down_to_base_rel(query_stack,
+													  rt_fetch(next_rtindex, query->rtable),
+													  next_attnums,
+													  base_attnums);
+				else
+					ereport(ERROR,
+							(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+							 errmsg("cannot resolve join RTE without query context")));
 			}
 			break;
 
 		case RTE_GROUP:
 			{
-				/*
-				 * RTE_GROUP represents a GROUP BY operation. We need to map
-				 * the requested columns to the underlying relation being
-				 * grouped. The GROUP BY expressions should be available in
-				 * rte->groupexprs.
-				 */
 				int			next_rtindex = 0;
 				List	   *next_attnums = NIL;
 				ListCell   *lc;
 
-				/*
-				 * For RTE_GROUP, we need to find which base relation the
-				 * requested columns come from. The groupexprs list should
-				 * contain Vars pointing to the underlying relation.
-				 */
 				foreach(lc, attnums)
 				{
 					int			attno = lfirst_int(lc);
 					Var		   *var = NULL;
 					Node	   *expr;
 
-					/*
-					 * For RTE_GROUP, the attribute number corresponds to the
-					 * position in the groupexprs list (1-based). Get the
-					 * expression at that position.
-					 */
 					if (attno > 0 && attno <= list_length(rte->groupexprs))
 					{
 						expr = (Node *) list_nth(rte->groupexprs, attno - 1);
 
 						if (IsA(expr, Var))
-						{
 							var = (Var *) expr;
-						}
 					}
 
 					if (!var)
 						ereport(ERROR,
 								(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-								 errmsg("GROUP BY column %d is not a simple column reference", attno),
-								 parser_errposition(pstate, location)));
+								 errmsg("GROUP BY column %d is not a simple column reference", attno)));
 
-					/* Check that all columns map to the same rte */
 					if (next_rtindex == 0)
 						next_rtindex = var->varno;
 					else if (next_rtindex != var->varno)
 						ereport(ERROR,
 								(errcode(ERRCODE_UNDEFINED_TABLE),
-								 errmsg("all key columns must belong to the same table"),
-								 parser_errposition(pstate, location)));
+								 errmsg("all key columns must belong to the same table")));
 
 					next_attnums = lappend_int(next_attnums, var->varattno);
 				}
@@ -1009,24 +1716,91 @@ drill_down_to_base_rel(ParseState *pstate, RangeTblEntry *rte,
 				if (next_rtindex == 0)
 					ereport(ERROR,
 							(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-							 errmsg("no valid columns found in GROUP BY for foreign key join"),
-							 parser_errposition(pstate, location)));
+							 errmsg("no valid columns found in GROUP BY for foreign key join")));
 
-				base_rte = drill_down_to_base_rel(pstate,
-												  rt_fetch(next_rtindex, (query_stack ? query_stack->query->rtable : pstate->p_rtable)),
-												  next_attnums,
-												  base_attnums,
-												  location,
-												  query_stack);
+				if (query)
+					base_rte = drill_down_to_base_rel(query_stack,
+													  rt_fetch(next_rtindex, query->rtable),
+													  next_attnums,
+													  base_attnums);
+				else
+					ereport(ERROR,
+							(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+							 errmsg("cannot resolve GROUP RTE without query context")));
+			}
+			break;
 
+		case RTE_CTE:
+			{
+				/*
+				 * For CTE references, we need to find the CTE definition
+				 * and drill down through its query.
+				 *
+				 * During parse (when query_stack is NULL), CTEs cannot be
+				 * resolved and are handled specially by the caller.
+				 */
+				CommonTableExpr *cte = NULL;
+				ListCell   *qlc;
+
+				if (query_stack == NIL)
+					ereport(ERROR,
+							(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+							 errmsg("foreign key join with CTE \"%s\" requires query context",
+									rte->ctename),
+							 errhint("CTE-based foreign key joins are validated during query rewrite.")));
+
+				/*
+				 * Search through all queries in the stack for the CTE.
+				 * We search all levels because the drill-down path may differ
+				 * from the parse-time query hierarchy that set ctelevelsup.
+				 */
+				foreach(qlc, query_stack)
+				{
+					Query	   *search_query = lfirst_node(Query, qlc);
+					ListCell   *clc;
+
+					foreach(clc, search_query->cteList)
+					{
+						CommonTableExpr *c = (CommonTableExpr *) lfirst(clc);
+
+						if (strcmp(c->ctename, rte->ctename) == 0)
+						{
+							cte = c;
+							break;
+						}
+					}
+
+					if (cte != NULL)
+						break;
+				}
+
+				if (cte == NULL)
+					ereport(ERROR,
+							(errcode(ERRCODE_UNDEFINED_OBJECT),
+							 errmsg("CTE \"%s\" not found in query hierarchy",
+									rte->ctename)));
+
+				/* Recursive CTEs are not supported */
+				if (cte->cterecursive)
+					ereport(ERROR,
+							(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+							 errmsg("foreign key joins with recursive CTEs are not supported")));
+
+				/*
+				 * After parse analysis, ctequery is a Query node.
+				 * Drill down through it like a subquery, preserving the
+				 * query stack for potential nested CTE references.
+				 */
+				base_rte = drill_down_to_base_rel_query(query_stack,
+														castNode(Query, cte->ctequery),
+														attnums, base_attnums);
 			}
 			break;
 
 		default:
 			ereport(ERROR,
 					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-					 errmsg("foreign key joins involving this type of relation are not supported"),
-					 parser_errposition(pstate, location)));
+					 errmsg("foreign key joins involving this type of relation are not supported")));
 	}
 
 	return base_rte;
@@ -1035,42 +1809,35 @@ drill_down_to_base_rel(ParseState *pstate, RangeTblEntry *rte,
 /*
  * drill_down_to_base_rel_query
  *		Resolves the base relation from a query
+ *
+ * query_stack is the parent query stack (for CTE lookups).
+ * We push subquery onto the front when drilling down.
  */
 static RangeTblEntry *
-drill_down_to_base_rel_query(ParseState *pstate, Query *query,
-							 List *attnums, List **base_attnums,
-							 int location, QueryStack *query_stack)
+drill_down_to_base_rel_query(List *query_stack, Query *subquery,
+							 List *attnums, List **base_attnums)
 {
 	int			next_rtindex = 0;
 	List	   *next_attnums = NIL;
 	ListCell   *lc;
 	RangeTblEntry *result;
-	QueryStack	new_stack = {.parent=query_stack, .query=query};
+	List	   *new_stack;
 
-	if (query->setOperations != NULL)
+	if (subquery->setOperations != NULL)
 	{
 		ereport(ERROR,
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-				 errmsg("foreign key joins involving set operations are not supported"),
-				 parser_errposition(pstate, location)));
+				 errmsg("foreign key joins involving set operations are not supported")));
 	}
 
-	/*
-	 * We allow GROUP BY if the grouping preserves uniqueness, but we check
-	 * this in analyze_join_tree where we build uniqueness preservation info.
-	 *
-	 * DISTINCT is still fatal here – once duplicates are removed there is
-	 * no way to re-establish determinism for FK-checking.
-	 */
-	if (query->commandType != CMD_SELECT ||
-		query->distinctClause ||
-		query->groupingSets ||
-		query->hasTargetSRFs)
+	if (subquery->commandType != CMD_SELECT ||
+		subquery->distinctClause ||
+		subquery->groupingSets ||
+		subquery->hasTargetSRFs)
 	{
 		ereport(ERROR,
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-				 errmsg("foreign key joins not supported for these relations"),
-				 parser_errposition(pstate, location)));
+				 errmsg("foreign key joins not supported for these relations")));
 	}
 
 	foreach(lc, attnums)
@@ -1079,29 +1846,25 @@ drill_down_to_base_rel_query(ParseState *pstate, Query *query,
 		TargetEntry *matching_tle;
 		Var		   *var;
 
-		matching_tle = list_nth(query->targetList, attno - 1);
+		matching_tle = list_nth(subquery->targetList, attno - 1);
 
 		if (!IsA(matching_tle->expr, Var))
 		{
 			ereport(ERROR,
 					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 					 errmsg("target entry \"%s\" is an expression, not a direct column reference",
-							matching_tle->resname),
-					 parser_errposition(pstate, location)));
+							matching_tle->resname)));
 		}
 
 		var = castNode(Var, matching_tle->expr);
 
-		/* Check that all columns map to the same rte */
 		if (next_rtindex == 0)
 			next_rtindex = var->varno;
 		else if (next_rtindex != var->varno)
 		{
 			ereport(ERROR,
 					(errcode(ERRCODE_UNDEFINED_TABLE),
-					 errmsg("all key columns must belong to the same table"),
-					 parser_errposition(pstate,
-										exprLocation((Node *) matching_tle->expr))));
+					 errmsg("all key columns must belong to the same table")));
 		}
 
 		next_attnums = lappend_int(next_attnums, var->varattno);
@@ -1109,225 +1872,11 @@ drill_down_to_base_rel_query(ParseState *pstate, Query *query,
 
 	Assert(next_rtindex != 0);
 
-	result = drill_down_to_base_rel(pstate, rt_fetch(next_rtindex, query->rtable), next_attnums,
-									base_attnums, location, &new_stack);
+	/* Push this subquery onto the query stack for nested CTE lookups */
+	new_stack = lcons(subquery, list_copy(query_stack));
 
-	return result;
-}
-
-
-
-/*
- * check_group_by_preserves_uniqueness
- *		Check if a GROUP BY clause preserves uniqueness by verifying that
- *		the GROUP BY columns form a unique key in the underlying base table.
- *		If uniqueness is preserved, adds the base table's rteid to the
- *		uniqueness_preservation list.
- */
-static bool
-check_group_by_preserves_uniqueness(Query *query, List **uniqueness_preservation)
-{
-	ListCell   *lc;
-	Bitmapset  *group_cols = NULL;
-	Index		group_varno = 0;
-	RangeTblEntry *base_rte = NULL;
-	Relation	rel;
-	bool		result = false;
-	RTEId	   *base_rteid = NULL;
-
-	elog(DEBUG1, "check_group_by_preserves_uniqueness: entering");
-
-	/* Must have GROUP BY clause */
-	if (!query->groupClause)
-	{
-		elog(DEBUG1, "check_group_by_preserves_uniqueness: no GROUP BY clause");
-		return false;
-	}
-
-	/*
-	 * Build bitmapset of GROUP BY columns and find which relation they belong
-	 * to
-	 */
-	elog(DEBUG1, "check_group_by_preserves_uniqueness: processing %d GROUP BY clauses", list_length(query->groupClause));
-	foreach(lc, query->groupClause)
-	{
-		SortGroupClause *sgc = lfirst_node(SortGroupClause, lc);
-		TargetEntry *tle = list_nth_node(TargetEntry,
-										 query->targetList,
-										 sgc->tleSortGroupRef - 1);
-
-		elog(DEBUG1, "check_group_by_preserves_uniqueness: examining target entry %s", tle->resname ? tle->resname : "(unnamed)");
-
-		/* Only consider simple column references */
-		if (IsA(tle->expr, Var))
-		{
-			Var		   *v = (Var *) tle->expr;
-
-			elog(DEBUG1, "check_group_by_preserves_uniqueness: found Var with varno=%d, varattno=%d", v->varno, v->varattno);
-
-			/* All GROUP BY columns must be from the same relation */
-			if (group_varno == 0)
-				group_varno = v->varno;
-			else if (group_varno != v->varno)
-			{
-				/*
-				 * Mixed relations in GROUP BY - can't determine uniqueness
-				 * easily
-				 */
-				elog(DEBUG1, "check_group_by_preserves_uniqueness: mixed relations in GROUP BY (varno %d vs %d)", group_varno, v->varno);
-				bms_free(group_cols);
-				return false;
-			}
-
-			group_cols = bms_add_member(group_cols, v->varattno);
-		}
-		else
-		{
-			elog(DEBUG1, "check_group_by_preserves_uniqueness: GROUP BY expression is not a simple Var (node type %d)", nodeTag(tle->expr));
-		}
-	}
-
-	/* If we don't have any valid GROUP BY columns, can't preserve uniqueness */
-	if (bms_is_empty(group_cols) || group_varno == 0)
-	{
-		elog(DEBUG1, "check_group_by_preserves_uniqueness: no valid GROUP BY columns found");
-		bms_free(group_cols);
-		return false;
-	}
-
-	elog(DEBUG1, "check_group_by_preserves_uniqueness: found GROUP BY columns from varno=%d", group_varno);
-
-	/* Get the RTE for the grouped relation */
-	base_rte = rt_fetch(group_varno, query->rtable);
-
-	elog(DEBUG1, "check_group_by_preserves_uniqueness: examining RTE (rtekind=%d, relid=%u)", base_rte->rtekind, base_rte->relid);
-
-	/*
-	 * If this is an RTE_GROUP, we need to look at the underlying relation.
-	 * The GROUP BY expressions should point to the base relation that's being
-	 * grouped.
-	 */
-	if (base_rte->rtekind == RTE_GROUP)
-	{
-		elog(DEBUG1, "check_group_by_preserves_uniqueness: found RTE_GROUP, examining groupexprs");
-
-		/*
-		 * For RTE_GROUP, look at the groupexprs to find which base relation
-		 * and columns are actually being grouped.
-		 */
-		if (base_rte->groupexprs && list_length(base_rte->groupexprs) > 0)
-		{
-			ListCell   *grp_lc;
-			Index		underlying_varno = 0;
-			Bitmapset  *underlying_cols = NULL;
-
-			elog(DEBUG1, "check_group_by_preserves_uniqueness: RTE_GROUP has %d groupexprs", list_length(base_rte->groupexprs));
-
-			/* Examine each GROUP BY expression */
-			foreach(grp_lc, base_rte->groupexprs)
-			{
-				Node	   *expr = (Node *) lfirst(grp_lc);
-
-				if (IsA(expr, Var))
-				{
-					Var		   *v = (Var *) expr;
-
-					elog(DEBUG1, "check_group_by_preserves_uniqueness: groupexpr Var varno=%d, varattno=%d", v->varno, v->varattno);
-
-					/*
-					 * All expressions should reference the same underlying
-					 * relation
-					 */
-					if (underlying_varno == 0)
-						underlying_varno = v->varno;
-					else if (underlying_varno != v->varno)
-					{
-						elog(DEBUG1, "check_group_by_preserves_uniqueness: mixed varnos in groupexprs");
-						bms_free(underlying_cols);
-						bms_free(group_cols);
-						return false;
-					}
-
-					underlying_cols = bms_add_member(underlying_cols, v->varattno);
-				}
-				else
-				{
-					elog(DEBUG1, "check_group_by_preserves_uniqueness: groupexpr is not a Var");
-					bms_free(underlying_cols);
-					bms_free(group_cols);
-					return false;
-				}
-			}
-
-			if (underlying_varno > 0)
-			{
-				RangeTblEntry *underlying_rte = rt_fetch(underlying_varno, query->rtable);
-
-				elog(DEBUG1, "check_group_by_preserves_uniqueness: underlying relation varno=%d, rtekind=%d, relid=%u",
-					 underlying_varno, underlying_rte->rtekind, underlying_rte->relid);
-
-				if (underlying_rte->rtekind == RTE_RELATION && underlying_rte->relid != InvalidOid)
-				{
-					base_rte = underlying_rte;
-					base_rteid = underlying_rte->rteid;
-					/* Replace group_cols with the actual underlying columns */
-					bms_free(group_cols);
-					group_cols = underlying_cols;
-					elog(DEBUG1, "check_group_by_preserves_uniqueness: using underlying base relation and remapped columns");
-				}
-				else
-				{
-					elog(DEBUG1, "check_group_by_preserves_uniqueness: underlying RTE is not a base relation");
-					bms_free(underlying_cols);
-					bms_free(group_cols);
-					return false;
-				}
-			}
-			else
-			{
-				elog(DEBUG1, "check_group_by_preserves_uniqueness: no valid underlying varno found");
-				bms_free(underlying_cols);
-				bms_free(group_cols);
-				return false;
-			}
-		}
-		else
-		{
-			elog(DEBUG1, "check_group_by_preserves_uniqueness: RTE_GROUP has no groupexprs");
-			bms_free(group_cols);
-			return false;
-		}
-	}
-	/* Must be a base relation, not a subquery or other type */
-	else if (base_rte->rtekind != RTE_RELATION || base_rte->relid == InvalidOid)
-	{
-		elog(DEBUG1, "check_group_by_preserves_uniqueness: RTE is not a base relation (rtekind=%d, relid=%u)", base_rte->rtekind, base_rte->relid);
-		bms_free(group_cols);
-		return false;
-	}
-	else
-	{
-		/* It's already a base relation, save its rteid */
-		base_rteid = base_rte->rteid;
-	}
-
-	elog(DEBUG1, "check_group_by_preserves_uniqueness: checking uniqueness for relation %s (OID %u)", get_rel_name(base_rte->relid), base_rte->relid);
-
-	/* Check if the GROUP BY columns form a unique key */
-	rel = table_open(base_rte->relid, AccessShareLock);
-	result = check_unique_index_covers_columns(rel, group_cols);
-	table_close(rel, AccessShareLock);
-
-	elog(DEBUG1, "check_group_by_preserves_uniqueness: uniqueness check result: %s", result ? "TRUE" : "FALSE");
-
-	bms_free(group_cols);
-
-	/* If uniqueness is preserved, add the base table's rteid to the list */
-	if (result && base_rteid)
-	{
-		elog(DEBUG1, "check_group_by_preserves_uniqueness: adding base table rteid to uniqueness preservation");
-		*uniqueness_preservation = list_make1(base_rteid);
-	}
+	result = drill_down_to_base_rel(new_stack, rt_fetch(next_rtindex, subquery->rtable),
+									next_attnums, base_attnums);
 
 	return result;
 }
@@ -1343,13 +1892,8 @@ check_unique_index_covers_columns(Relation rel, Bitmapset *columns)
 	ListCell   *indexoidscan;
 	bool		result = false;
 
-	elog(DEBUG1, "check_unique_index_covers_columns: checking relation %s", RelationGetRelationName(rel));
-
-	/* Get a list of index OIDs for this relation */
 	indexoidlist = RelationGetIndexList(rel);
-	elog(DEBUG1, "check_unique_index_covers_columns: found %d indexes", list_length(indexoidlist));
 
-	/* Scan through the indexes */
 	foreach(indexoidscan, indexoidlist)
 	{
 		Oid			indexoid = lfirst_oid(indexoidscan);
@@ -1358,49 +1902,31 @@ check_unique_index_covers_columns(Relation rel, Bitmapset *columns)
 		int			nindexattrs;
 		Bitmapset  *index_cols = NULL;
 
-		/* Open the index relation */
 		indexRel = index_open(indexoid, AccessShareLock);
 		indexForm = indexRel->rd_index;
 
-		elog(DEBUG1, "check_unique_index_covers_columns: examining index %s (OID %u), unique=%s",
-			 RelationGetRelationName(indexRel), indexoid, indexForm->indisunique ? "true" : "false");
-
-		/* Skip if not a unique index */
 		if (!indexForm->indisunique)
 		{
-			elog(DEBUG1, "check_unique_index_covers_columns: skipping non-unique index %s", RelationGetRelationName(indexRel));
 			index_close(indexRel, AccessShareLock);
 			continue;
 		}
 
-		/* Build a bitmapset of the index columns */
 		nindexattrs = indexForm->indnatts;
-		elog(DEBUG1, "check_unique_index_covers_columns: index %s has %d attributes", RelationGetRelationName(indexRel), nindexattrs);
 		for (int j = 0; j < nindexattrs; j++)
 		{
 			AttrNumber	attnum = indexForm->indkey.values[j];
 
-			if (attnum > 0)		/* skip expressions */
-			{
+			if (attnum > 0)
 				index_cols = bms_add_member(index_cols, attnum);
-				elog(DEBUG1, "check_unique_index_covers_columns: index includes column %d", attnum);
-			}
 		}
 
 		index_close(indexRel, AccessShareLock);
 
-		/* Check if the index columns are a superset of our required columns */
-		elog(DEBUG1, "check_unique_index_covers_columns: checking if index covers required columns");
 		if (bms_is_subset(columns, index_cols))
 		{
-			elog(DEBUG1, "check_unique_index_covers_columns: MATCH! Index covers all required columns");
 			result = true;
 			bms_free(index_cols);
 			break;
-		}
-		else
-		{
-			elog(DEBUG1, "check_unique_index_covers_columns: index does not cover all required columns");
 		}
 
 		bms_free(index_cols);
@@ -1413,12 +1939,8 @@ check_unique_index_covers_columns(Relation rel, Bitmapset *columns)
 
 /*
  * is_referencing_cols_unique
- *      Determines if the foreign key columns in the referencing table
- *      are guaranteed to be unique by a constraint or index.
- *
- * This function checks if the columns forming the foreign key in the referencing
- * table are covered by a unique index or primary key constraint, which would
- * guarantee their uniqueness.
+ *		Determines if the foreign key columns in the referencing table
+ *		are guaranteed to be unique by a constraint or index.
  */
 static bool
 is_referencing_cols_unique(Oid referencing_relid, List *referencing_base_attnums)
@@ -1429,16 +1951,12 @@ is_referencing_cols_unique(Oid referencing_relid, List *referencing_base_attnums
 	bool		result = false;
 	int			natts;
 
-	/* Get number of attributes for validation */
 	natts = list_length(referencing_base_attnums);
 
-	/* Open the relation */
 	rel = table_open(referencing_relid, AccessShareLock);
 
-	/* Get a list of index OIDs for this relation */
 	indexoidlist = RelationGetIndexList(rel);
 
-	/* Scan through the indexes */
 	foreach(indexoidscan, indexoidlist)
 	{
 		Oid			indexoid = lfirst_oid(indexoidscan);
@@ -1448,28 +1966,23 @@ is_referencing_cols_unique(Oid referencing_relid, List *referencing_base_attnums
 		bool		matches = true;
 		ListCell   *lc;
 
-		/* Open the index relation */
 		indexRel = index_open(indexoid, AccessShareLock);
 		indexForm = indexRel->rd_index;
 
-		/* Skip if not a unique index */
 		if (!indexForm->indisunique)
 		{
 			index_close(indexRel, AccessShareLock);
 			continue;
 		}
 
-		/* For uniqueness to apply, all our columns must be in the index's key */
 		nindexattrs = indexForm->indnatts;
 
-		/* Must have same number of attributes */
 		if (natts != nindexattrs)
 		{
 			index_close(indexRel, AccessShareLock);
 			continue;
 		}
 
-		/* Check if our columns match the index columns (in any order) */
 		foreach(lc, referencing_base_attnums)
 		{
 			AttrNumber	attnum = lfirst_int(lc);
@@ -1508,16 +2021,8 @@ is_referencing_cols_unique(Oid referencing_relid, List *referencing_base_attnums
 
 /*
  * is_referencing_cols_not_null
- *      Determines if all foreign key columns in the referencing table
- *      have NOT NULL constraints.
- *
- * This function checks if each column in the foreign key has a NOT NULL
- * constraint, which is important for correct join semantics and for
- * preserving functional dependencies across joins.
- *
- * If notNullConstraints is not NULL, the function also collects the OIDs
- * of the NOT NULL constraints for each column that has one. This is used
- * to establish dependencies on those constraints.
+ *		Determines if all foreign key columns in the referencing table
+ *		have NOT NULL constraints.
  */
 static bool
 is_referencing_cols_not_null(Oid referencing_relid, List *referencing_base_attnums,
@@ -1529,30 +2034,22 @@ is_referencing_cols_not_null(Oid referencing_relid, List *referencing_base_attnu
 	bool		all_not_null = true;
 	List	   *constraints = NIL;
 
-	/* Open the relation to get its tuple descriptor */
 	rel = table_open(referencing_relid, AccessShareLock);
 	tupdesc = RelationGetDescr(rel);
 
-	/* Check each column for NOT NULL constraint */
 	foreach(lc, referencing_base_attnums)
 	{
 		AttrNumber	attnum = lfirst_int(lc);
 		Form_pg_attribute attr;
 
-		/* Get attribute info - attnum is 1-based, array is 0-based */
 		attr = TupleDescAttr(tupdesc, attnum - 1);
 
-		/* Check if the column allows nulls */
 		if (!attr->attnotnull)
 		{
 			all_not_null = false;
 			break;
 		}
 
-		/*
-		 * If requested, look up the NOT NULL constraint OID for this column.
-		 * We only do this if all columns so far have been NOT NULL.
-		 */
 		if (notNullConstraints != NULL)
 		{
 			HeapTuple	conTup;
@@ -1568,10 +2065,8 @@ is_referencing_cols_not_null(Oid referencing_relid, List *referencing_base_attnu
 		}
 	}
 
-	/* Close the relation */
 	table_close(rel, AccessShareLock);
 
-	/* Return the collected constraint OIDs if all columns are NOT NULL */
 	if (notNullConstraints != NULL)
 	{
 		if (all_not_null)
@@ -1584,217 +2079,4 @@ is_referencing_cols_not_null(Oid referencing_relid, List *referencing_base_attnu
 	}
 
 	return all_not_null;
-}
-
-/*
- * update_uniqueness_preservation
- *      Updates the uniqueness preservation properties for a foreign key join
- *
- * This function calculates the uniqueness preservation for a join based on
- * the uniqueness preservation properties of the input relations and the
- * uniqueness of the foreign key columns.
- *
- * Uniqueness preservation is propagated from the referencing relation, and
- * if both the foreign key columns form a unique key, and the referencing
- * base table preserves uniqueness, then uniqueness preservation
- * from the referenced relation is also added.
- */
-static List *
-update_uniqueness_preservation(List *referencing_uniqueness_preservation,
-							   List *referenced_uniqueness_preservation,
-							   RTEId *referencing_id,
-							   bool fk_cols_unique)
-{
-	List	   *result = NIL;
-	bool		referencing_preserves_uniqueness;
-
-	/* Start with uniqueness preservation from the referencing relation */
-	if (referencing_uniqueness_preservation)
-		result = list_copy(referencing_uniqueness_preservation);
-
-	referencing_preserves_uniqueness = list_member(referencing_uniqueness_preservation, referencing_id);
-
-	if (fk_cols_unique && referencing_preserves_uniqueness && referenced_uniqueness_preservation)
-		result = list_concat(result, referenced_uniqueness_preservation);
-
-	return result;
-}
-
-/*
- * update_functional_dependencies
- *      Updates the functional dependencies for a foreign key join
- */
-static List *
-update_functional_dependencies(List *referencing_fds,
-							   RTEId *referencing_id,
-							   List *referenced_fds,
-							   RTEId *referenced_id,
-							   bool fk_cols_not_null,
-							   JoinType join_type,
-							   ForeignKeyDirection fk_dir)
-{
-	List	   *result = NIL;
-	bool		referenced_has_self_dep = false;
-	bool		referencing_preserved_due_to_outer_join = false;
-
-	/*
-	 * Step 1: Add functional dependencies from the referencing relation when
-	 * an outer join preserves the referencing relation's tuples.
-	 */
-	if ((fk_dir == FKDIR_FROM && join_type == JOIN_LEFT) ||
-		(fk_dir == FKDIR_TO && join_type == JOIN_RIGHT) ||
-		join_type == JOIN_FULL)
-	{
-		result = list_concat(result, referencing_fds);
-		referencing_preserved_due_to_outer_join = true;
-	}
-
-	/*
-	 * Step 2: Add functional dependencies from the referenced relation when
-	 * an outer join preserves the referenced relation's tuples.
-	 */
-	if ((fk_dir == FKDIR_TO && join_type == JOIN_LEFT) ||
-		(fk_dir == FKDIR_FROM && join_type == JOIN_RIGHT) ||
-		join_type == JOIN_FULL)
-	{
-		result = list_concat(result, referenced_fds);
-	}
-
-	/*
-	 * In the following steps we handle functional dependencies introduced by
-	 * inner joins. Even for outer joins, we must compute these dependencies
-	 * to predict which relations will preserve all their rows in subsequent
-	 * joins. Relations that appear as determinants in functional dependencies
-	 * (det, X) are guaranteed to preserve all their rows.
-	 */
-
-	/*
-	 * Step 3: If any foreign key column permits NULL values, we cannot
-	 * guarantee at compile time that all rows will be preserved in an inner
-	 * foreign key join. In this case, we cannot derive additional functional
-	 * dependencies and cannot infer which other relations will preserve all
-	 * their rows.
-	 */
-	if (!fk_cols_not_null)
-		return result;
-
-	/*
-	 * Step 4: Verify that the referenced relation preserves all its rows -
-	 * indicated by a self-dependency (referenced_id → referenced_id). This
-	 * self-dependency confirms that the referenced relation is a determinant
-	 * relation that preserves all its rows. Without this guarantee, we cannot
-	 * derive additional functional dependencies.
-	 */
-	for (int i = 0; i < list_length(referenced_fds); i += 2)
-	{
-		RTEId	   *det = list_nth(referenced_fds, i);
-		RTEId	   *dep = list_nth(referenced_fds, i + 1);
-
-		if (equal(det, referenced_id) && equal(dep, referenced_id))
-		{
-			referenced_has_self_dep = true;
-			break;
-		}
-	}
-
-	if (!referenced_has_self_dep)
-		return result;
-
-	/*
-	 * Step 5: Preserve inherited functional dependencies from the referencing
-	 * relation. Skip if the referencing relation is already fully preserved
-	 * by an outer join.
-	 *
-	 * At this point, we know that referencing_id will be preserved in the
-	 * join. We include all functional dependencies where referencing_id
-	 * appears as the dependent attribute (X → referencing_id). This
-	 * maintains the property that all determinant relations (X) will continue
-	 * to preserve all their rows after the join.
-	 */
-	if (!referencing_preserved_due_to_outer_join)
-	{
-		for (int i = 0; i < list_length(referencing_fds); i += 2)
-		{
-			RTEId	   *referencing_det = list_nth(referencing_fds, i);
-			RTEId	   *referencing_dep = list_nth(referencing_fds, i + 1);
-
-			if (equal(referencing_dep, referencing_id))
-			{
-				for (int j = 0; j < list_length(referencing_fds); j += 2)
-				{
-					RTEId	   *source_det = list_nth(referencing_fds, j);
-					RTEId	   *source_dep = list_nth(referencing_fds, j + 1);
-
-					if (equal(source_det, referencing_det))
-					{
-						result = lappend(result, source_det);
-						result = lappend(result, source_dep);
-					}
-				}
-			}
-		}
-	}
-
-	/*
-	 * Step 6: Establish transitive functional dependencies by applying the
-	 * transitivity axiom across the foreign key relationship.
-	 *
-	 * By the Armstrong's axioms of functional dependencies, specifically
-	 * transitivity: If X → Y and Y → Z, then X → Z
-	 *
-	 * In our context, for each pair of dependencies: - X → referencing_id
-	 * (from referencing relation) - referenced_id → Z (from referenced
-	 * relation)
-	 *
-	 * We derive the transitive dependency: - X → Z
-	 *
-	 * This identifies that relation X is a determinant relation that will
-	 * preserve all its rows, and it now functionally determines relation Z as
-	 * well.
-	 *
-	 * This operation can be conceptualized as a join between two sets of
-	 * dependencies:
-	 *
-	 * SELECT referencing_fds.det AS new_det, referenced_fds.dep AS new_dep
-	 * FROM referencing_fds JOIN referenced_fds ON referencing_fds.dep =
-	 * referencing_id AND referenced_fds.det = referenced_id
-	 *
-	 * In formal set notation: Let R = {(X, Y)} be the set of referencing
-	 * functional dependencies Let S = {(A, B)} be the set of referenced
-	 * functional dependencies Let r = referencing_id Let s = referenced_id
-	 *
-	 * The new transitive dependencies are defined as:
-	 *
-	 * T = {(X, B) | (X, r) ∈ R ∧ (s, B) ∈ S}
-	 *
-	 * The correctness of this derivation relies on the fact that
-	 * referenced_id is preserved in this join (as verified in previous
-	 * steps). This preservation ensures that for each value of determinant X
-	 * that functionally determines referencing_id, there exists precisely one
-	 * value of dependent B associated with referenced_id, thereby
-	 * establishing X as a determinant relation that preserves all its rows
-	 * and functionally determines B.
-	 */
-	for (int i = 0; i < list_length(referencing_fds); i += 2)
-	{
-		RTEId	   *referencing_det = list_nth(referencing_fds, i);
-		RTEId	   *referencing_dep = list_nth(referencing_fds, i + 1);
-
-		if (equal(referencing_dep, referencing_id))
-		{
-			for (int j = 0; j < list_length(referenced_fds); j += 2)
-			{
-				RTEId	   *referenced_det = list_nth(referenced_fds, j);
-				RTEId	   *referenced_dep = list_nth(referenced_fds, j + 1);
-
-				if (equal(referenced_det, referenced_id))
-				{
-					result = lappend(result, referencing_det);
-					result = lappend(result, referenced_dep);
-				}
-			}
-		}
-	}
-
-	return result;
 }

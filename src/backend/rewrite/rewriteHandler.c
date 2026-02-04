@@ -33,6 +33,7 @@
 #include "optimizer/optimizer.h"
 #include "parser/analyze.h"
 #include "parser/parse_coerce.h"
+#include "parser/parse_fkjoin.h"
 #include "parser/parse_relation.h"
 #include "parser/parsetree.h"
 #include "rewrite/rewriteDefine.h"
@@ -94,7 +95,7 @@ static void markQueryForLocking(Query *qry, Node *jtnode,
 								bool pushedDown);
 static List *matchLocks(CmdType event, Relation relation,
 						int varno, Query *parsetree, bool *hasUpdate);
-static Query *fireRIRrules(Query *parsetree, List *activeRIRs);
+Query *fireRIRrules(Query *parsetree, List *activeRIRs);
 static Bitmapset *adjust_view_column_set(Bitmapset *cols, List *targetlist);
 static Node *expand_generated_columns_internal(Node *node, Relation rel, int rt_index,
 											   RangeTblEntry *rte, int result_relation);
@@ -1990,7 +1991,7 @@ fireRIRonSubLink(Node *node, fireRIRonSubLink_context *context)
  * activeRIRs is a list of the OIDs of views we're already processing RIR
  * rules for, used to detect/reject recursion.
  */
-static Query *
+Query *
 fireRIRrules(Query *parsetree, List *activeRIRs)
 {
 	int			origResultRelation = parsetree->resultRelation;
@@ -4600,6 +4601,10 @@ QueryRewrite(Query *parsetree)
 		Query	   *query = (Query *) lfirst(l);
 
 		query = fireRIRrules(query, NIL);
+
+		/* Validate FK joins on expanded query (after views are expanded) */
+		if (query->commandType == CMD_SELECT)
+			validateForeignKeyJoins(query);
 
 		query->queryId = input_query_id;
 
