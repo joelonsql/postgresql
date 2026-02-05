@@ -435,6 +435,9 @@ pg_stat_get_activity(PG_FUNCTION_ARGS)
 				case STATE_DISABLED:
 					values[4] = CStringGetTextDatum("disabled");
 					break;
+				case STATE_POOLED:
+					values[4] = CStringGetTextDatum("pooled");
+					break;
 				case STATE_UNDEFINED:
 					nulls[4] = true;
 					break;

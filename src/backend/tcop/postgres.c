@@ -67,6 +67,8 @@
 #include "storage/proc.h"
 #include "storage/procsignal.h"
 #include "storage/sinval.h"
+#include "postmaster/backend_pool.h"
+#include "tcop/backend_reuse.h"
 #include "tcop/backend_startup.h"
 #include "tcop/fastpath.h"
 #include "tcop/pquery.h"
@@ -4972,6 +4974,21 @@ PostgresMain(const char *dbname, const char *username)
 				/* FALLTHROUGH */
 
 			case PqMsg_Terminate:
+
+				/*
+				 * Try to enter the pooled state for backend reuse.
+				 * If successful, we got a new client and should resume
+				 * the main loop.
+				 */
+				if (MyPoolSocket != PGINVALID_SOCKET && !am_walsender)
+				{
+					if (BackendEnterPooledState())
+					{
+						send_ready_for_query = true;
+						continue;
+					}
+					/* Fall through to exit if pooling failed */
+				}
 
 				/*
 				 * Reset whereToSendOutput to prevent ereport from attempting

@@ -101,6 +101,7 @@
 #include "pgstat.h"
 #include "port/pg_bswap.h"
 #include "postmaster/autovacuum.h"
+#include "postmaster/backend_pool.h"
 #include "postmaster/bgworker_internals.h"
 #include "postmaster/pgarch.h"
 #include "postmaster/postmaster.h"
@@ -1710,7 +1711,15 @@ ServerLoop(void)
 				ClientSocket s;
 
 				if (AcceptConnection(events[i].fd, &s) == STATUS_OK)
-					BackendStartup(&s);
+				{
+					/*
+					 * Try to assign the connection to a pooled backend
+					 * first.  If no pooled backend is available, fork a
+					 * new one.
+					 */
+					if (!BackendPoolAssignConnection(&s))
+						BackendStartup(&s);
+				}
 
 				/* We no longer need the open socket in this process */
 				if (s.sock != PGINVALID_SOCKET)
@@ -2631,6 +2640,10 @@ CleanupBackend(PMChild *bp,
 	bp_bgworker_notify = bp->bgworker_notify;
 	bp_bkend_type = bp->bkend_type;
 	rw = bp->rw;
+
+	/* Remove from backend pool and close the postmaster's socketpair end */
+	BackendPoolRemove(bp_pid);
+
 	if (!ReleasePostmasterChildSlot(bp))
 	{
 		/*
@@ -3558,6 +3571,7 @@ BackendStartup(ClientSocket *client_sock)
 	pid_t		pid;
 	BackendStartupData startup_data;
 	CAC_state	cac;
+	int			sv[2] = {PGINVALID_SOCKET, PGINVALID_SOCKET};
 
 	/*
 	 * Capture time that Postmaster got a socket from accept (for logging
@@ -3596,6 +3610,26 @@ BackendStartup(ClientSocket *client_sock)
 		}
 	}
 
+	/*
+	 * Create a Unix socketpair for backend reuse.  The postmaster keeps
+	 * sv[0] and passes sv[1] to the child.  When a client disconnects,
+	 * the backend waits on sv[1] for a new client socket from the postmaster.
+	 *
+	 * Only create the socketpair for regular backends (not dead-end children).
+	 */
+	if (cac == CAC_OK)
+	{
+		if (socketpair(AF_UNIX, SOCK_STREAM, 0, sv) < 0)
+		{
+			ereport(LOG,
+					(errmsg("could not create socketpair for backend pool: %m")));
+			/* Not fatal -- we just won't be able to reuse this backend */
+			sv[0] = PGINVALID_SOCKET;
+			sv[1] = PGINVALID_SOCKET;
+		}
+	}
+	startup_data.pool_socket = sv[1];
+
 	/* Pass down canAcceptConnections state */
 	startup_data.canAcceptConnections = cac;
 	bn->rw = NULL;
@@ -3610,6 +3644,11 @@ BackendStartup(ClientSocket *client_sock)
 	{
 		/* in parent, fork failed */
 		int			save_errno = errno;
+
+		if (sv[0] != PGINVALID_SOCKET)
+			closesocket(sv[0]);
+		if (sv[1] != PGINVALID_SOCKET)
+			closesocket(sv[1]);
 
 		(void) ReleasePostmasterChildSlot(bn);
 		errno = save_errno;
@@ -3626,10 +3665,24 @@ BackendStartup(ClientSocket *client_sock)
 							 (int) pid, (int) client_sock->sock)));
 
 	/*
+	 * Close the child's end of the socketpair in the postmaster.
+	 */
+	if (sv[1] != PGINVALID_SOCKET)
+		closesocket(sv[1]);
+
+	/*
 	 * Everything's been successful, it's safe to add this backend to our list
 	 * of backends.
 	 */
 	bn->pid = pid;
+
+	/*
+	 * Register the backend in the pool.  The postmaster keeps sv[0] for
+	 * sending new client sockets later.
+	 */
+	if (sv[0] != PGINVALID_SOCKET)
+		BackendPoolRegister(pid, bn->child_slot, InvalidOid, sv[0]);
+
 	return STATUS_OK;
 }
 

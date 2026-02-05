@@ -70,10 +70,10 @@
 #include "utils/syscache.h"
 #include "utils/timeout.h"
 
-static HeapTuple GetDatabaseTuple(const char *dbname);
-static HeapTuple GetDatabaseTupleByOid(Oid dboid);
-static void PerformAuthentication(Port *port);
-static void CheckMyDatabase(const char *name, bool am_superuser, bool override_allow_connections);
+HeapTuple GetDatabaseTuple(const char *dbname);
+HeapTuple GetDatabaseTupleByOid(Oid dboid);
+void PerformAuthentication(Port *port);
+void CheckMyDatabase(const char *name, bool am_superuser, bool override_allow_connections);
 static void ShutdownPostgres(int code, Datum arg);
 static void StatementTimeoutHandler(void);
 static void LockTimeoutHandler(void);
@@ -83,8 +83,8 @@ static void IdleSessionTimeoutHandler(void);
 static void IdleStatsUpdateTimeoutHandler(void);
 static void ClientCheckTimeoutHandler(void);
 static bool ThereIsAtLeastOneRole(void);
-static void process_startup_options(Port *port, bool am_superuser);
-static void process_settings(Oid databaseid, Oid roleid);
+void process_startup_options(Port *port, bool am_superuser);
+void process_settings(Oid databaseid, Oid roleid);
 
 
 /*** InitPostgres support ***/
@@ -101,7 +101,7 @@ static void process_settings(Oid databaseid, Oid roleid);
  * cache file, and so we can do an indexscan.  criticalSharedRelcachesBuilt
  * tells whether we got the cached descriptors.
  */
-static HeapTuple
+HeapTuple
 GetDatabaseTuple(const char *dbname)
 {
 	HeapTuple	tuple;
@@ -144,7 +144,7 @@ GetDatabaseTuple(const char *dbname)
 /*
  * GetDatabaseTupleByOid -- as above, but search by database OID
  */
-static HeapTuple
+HeapTuple
 GetDatabaseTupleByOid(Oid dboid)
 {
 	HeapTuple	tuple;
@@ -190,7 +190,7 @@ GetDatabaseTupleByOid(Oid dboid)
  *
  * returns: nothing.  Will not return at all if there's any failure.
  */
-static void
+void
 PerformAuthentication(Port *port)
 {
 	/* This should be set already, but let's make sure */
@@ -319,7 +319,7 @@ PerformAuthentication(Port *port)
 /*
  * CheckMyDatabase -- fetch information from the pg_database entry for our DB
  */
-static void
+void
 CheckMyDatabase(const char *name, bool am_superuser, bool override_allow_connections)
 {
 	HeapTuple	tup;
@@ -1238,7 +1238,7 @@ InitPostgres(const char *in_dbname, Oid dboid,
  * Process any command-line switches and any additional GUC variable
  * settings passed in the startup packet.
  */
-static void
+void
 process_startup_options(Port *port, bool am_superuser)
 {
 	GucContext	gucctx;
@@ -1303,7 +1303,7 @@ process_startup_options(Port *port, bool am_superuser)
  * We try specific settings for the database/role combination, as well as
  * general for this database and for this user.
  */
-static void
+void
 process_settings(Oid databaseid, Oid roleid)
 {
 	Relation	relsetting;

@@ -548,6 +548,25 @@ GetAuthenticatedUserId(void)
 	return AuthenticatedUserId;
 }
 
+/*
+ * ResetAuthenticatedUserId - reset user identity for backend reuse.
+ *
+ * When a pooled backend is assigned to a new client, we need to clear
+ * the previous session's user identity so that InitializeSessionUserId()
+ * can set it up fresh for the new client.
+ */
+void
+ResetAuthenticatedUserId(void)
+{
+	AuthenticatedUserId = InvalidOid;
+	SessionUserId = InvalidOid;
+	OuterUserId = InvalidOid;
+	CurrentUserId = InvalidOid;
+	SessionUserIsSuperuser = false;
+	SetRoleIsActive = false;
+	SystemUser = NULL;
+}
+
 void
 SetAuthenticatedUserId(Oid userid)
 {

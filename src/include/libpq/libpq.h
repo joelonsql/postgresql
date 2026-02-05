@@ -71,6 +71,7 @@ extern int	AcceptConnection(pgsocket server_fd, ClientSocket *client_sock);
 extern void TouchSocketFiles(void);
 extern void RemoveSocketFiles(void);
 extern Port *pq_init(ClientSocket *client_sock);
+extern void pq_reinit(ClientSocket *client_sock);
 extern int	pq_getbytes(void *b, size_t len);
 extern void pq_startmsgread(void);
 extern void pq_endmsgread(void);

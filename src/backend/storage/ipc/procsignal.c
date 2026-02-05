@@ -220,6 +220,26 @@ ProcSignalInit(const uint8 *cancel_key, int cancel_key_len)
 }
 
 /*
+ * ProcSignalUpdateCancelKey
+ *		Update the cancel key for the current process without re-registering
+ *		the cleanup callback.  Used by backend reuse (connection pooling).
+ */
+void
+ProcSignalUpdateCancelKey(const uint8 *cancel_key, int cancel_key_len)
+{
+	ProcSignalSlot *slot = MyProcSignalSlot;
+
+	Assert(slot != NULL);
+	Assert(cancel_key_len >= 0 && cancel_key_len <= MAX_CANCEL_KEY_LENGTH);
+
+	SpinLockAcquire(&slot->pss_mutex);
+	if (cancel_key_len > 0)
+		memcpy(slot->pss_cancel_key, cancel_key, cancel_key_len);
+	slot->pss_cancel_key_len = cancel_key_len;
+	SpinLockRelease(&slot->pss_mutex);
+}
+
+/*
  * CleanupProcSignalState
  *		Remove current process from ProcSignal mechanism
  *

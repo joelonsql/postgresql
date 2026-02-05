@@ -174,6 +174,7 @@ typedef struct Port Port;
 
 extern bool load_hba(void);
 extern bool load_ident(void);
+extern void hba_clear_stale_state(void);
 extern const char *hba_authname(UserAuth auth_method);
 extern void hba_getauthmethod(Port *port);
 extern int	check_usermap(const char *usermap_name,

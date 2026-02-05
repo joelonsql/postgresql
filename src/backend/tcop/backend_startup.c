@@ -26,6 +26,7 @@
 #include "libpq/pqformat.h"
 #include "libpq/pqsignal.h"
 #include "miscadmin.h"
+#include "postmaster/backend_pool.h"
 #include "postmaster/postmaster.h"
 #include "replication/walsender.h"
 #include "storage/fd.h"
@@ -58,8 +59,8 @@ char	   *log_connections_string = NULL;
 ConnectionTiming conn_timing = {.ready_for_use = TIMESTAMP_MINUS_INFINITY};
 
 static void BackendInitialize(ClientSocket *client_sock, CAC_state cac);
-static int	ProcessSSLStartup(Port *port);
-static int	ProcessStartupPacket(Port *port, bool ssl_done, bool gss_done);
+int			ProcessSSLStartup(Port *port);
+int			ProcessStartupPacket(Port *port, bool ssl_done, bool gss_done);
 static void ProcessCancelRequestPacket(Port *port, void *pkt, int pktlen);
 static void SendNegotiateProtocolVersion(List *unrecognized_protocol_options);
 static void process_startup_packet_die(SIGNAL_ARGS);
@@ -105,6 +106,9 @@ BackendMain(const void *startup_data, size_t startup_data_len)
 	}
 #endif
 #endif
+
+	/* Save pool socket for backend reuse */
+	MyPoolSocket = bsdata->pool_socket;
 
 	/* Perform additional initialization and collect startup packet */
 	BackendInitialize(MyClientSocket, bsdata->canAcceptConnections);
@@ -397,7 +401,7 @@ BackendInitialize(ClientSocket *client_sock, CAC_state cac)
  * This happens before the startup packet so we are careful not to actually
  * read any bytes from the stream if it's not a direct SSL connection.
  */
-static int
+int
 ProcessSSLStartup(Port *port)
 {
 	int			firstbyte;
@@ -488,7 +492,7 @@ reject:
  * should make no assumption here about the order in which the client may make
  * requests.
  */
-static int
+int
 ProcessStartupPacket(Port *port, bool ssl_done, bool gss_done)
 {
 	int32		len;

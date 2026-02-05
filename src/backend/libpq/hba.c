@@ -2537,7 +2537,6 @@ check_hba(Port *port)
 	foreach(line, parsed_hba_lines)
 	{
 		hba = (HbaLine *) lfirst(line);
-
 		/* Check connection type */
 		if (hba->conntype == ctLocal)
 		{
@@ -2729,6 +2728,26 @@ load_hba(void)
 	return true;
 }
 
+/*
+ * Discard stale parsed HBA and ident data.
+ *
+ * After PostmasterContext has been deleted (which happens in
+ * PostgresMain after InitPostgres completes), the parsed_hba_context
+ * and parsed_ident_context memory contexts are already freed.  We
+ * must NULL out the pointers so that a subsequent load_hba()/load_ident()
+ * call doesn't try to MemoryContextDelete() a dangling pointer.
+ *
+ * This is used by the backend connection-reuse path, which needs to
+ * reload pg_hba.conf after PostmasterContext has been destroyed.
+ */
+void
+hba_clear_stale_state(void)
+{
+	parsed_hba_lines = NIL;
+	parsed_hba_context = NULL;
+	parsed_ident_lines = NIL;
+	parsed_ident_context = NULL;
+}
 
 /*
  * Parse one tokenised line from the ident config file and store the result in

@@ -77,7 +77,9 @@
 #include "miscadmin.h"
 #include "port/pg_bswap.h"
 #include "postmaster/postmaster.h"
+#include "storage/fd.h"
 #include "storage/ipc.h"
+#include "tcop/tcopprot.h"
 #include "utils/guc_hooks.h"
 #include "utils/memutils.h"
 
@@ -320,6 +322,131 @@ pq_init(ClientSocket *client_sock)
 	Assert(latch_pos == FeBeWaitSetLatchPos);
 
 	return port;
+}
+
+/* --------------------------------
+ *		pq_reinit - reinitialize libpq with a new client socket
+ *
+ * Used for backend reuse (connection pooling).  Updates the existing
+ * Port structure with a new client socket FD and address.
+ * --------------------------------
+ */
+void
+pq_reinit(ClientSocket *client_sock)
+{
+	Port	   *port = MyProcPort;
+	int			socket_pos PG_USED_FOR_ASSERTS_ONLY;
+	int			latch_pos PG_USED_FOR_ASSERTS_ONLY;
+
+	Assert(port != NULL);
+
+	/* Set the new socket and remote address */
+	port->sock = client_sock->sock;
+	memcpy(&port->raddr.addr, &client_sock->raddr.addr, client_sock->raddr.salen);
+	port->raddr.salen = client_sock->raddr.salen;
+
+	/* Recompute local address */
+	port->laddr.salen = sizeof(port->laddr.addr);
+	if (getsockname(port->sock,
+					(struct sockaddr *) &port->laddr.addr,
+					&port->laddr.salen) < 0)
+	{
+		ereport(LOG,
+				(errmsg("%s() failed: %m", "getsockname")));
+	}
+
+	/* Reset SSL/GSS state for the new connection */
+	port->ssl_in_use = false;
+#ifdef USE_SSL
+	port->ssl = NULL;
+	port->peer = NULL;
+	port->peer_cn = NULL;
+	port->peer_dn = NULL;
+	port->peer_cert_valid = false;
+	port->alpn_used = false;
+#endif
+#ifdef ENABLE_GSS
+	port->gss = NULL;
+#endif
+
+	/* Reset startup packet fields for the new connection */
+	if (port->database_name)
+		pfree(port->database_name);
+	port->database_name = NULL;
+	if (port->user_name)
+		pfree(port->user_name);
+	port->user_name = NULL;
+	if (port->cmdline_options)
+		pfree(port->cmdline_options);
+	port->cmdline_options = NULL;
+	if (port->application_name)
+		pfree(port->application_name);
+	port->application_name = NULL;
+	list_free_deep(port->guc_options);
+	port->guc_options = NIL;
+
+	/* Set TCP_NODELAY and SO_KEEPALIVE if it's a TCP connection */
+	if (port->laddr.addr.ss_family != AF_UNIX)
+	{
+		int			on;
+
+#ifdef TCP_NODELAY
+		on = 1;
+		if (setsockopt(port->sock, IPPROTO_TCP, TCP_NODELAY,
+					   (char *) &on, sizeof(on)) < 0)
+		{
+			ereport(LOG,
+					(errmsg("%s(%s) failed: %m", "setsockopt", "TCP_NODELAY")));
+		}
+#endif
+		on = 1;
+		if (setsockopt(port->sock, SOL_SOCKET, SO_KEEPALIVE,
+					   (char *) &on, sizeof(on)) < 0)
+		{
+			ereport(LOG,
+					(errmsg("%s(%s) failed: %m", "setsockopt", "SO_KEEPALIVE")));
+		}
+
+		(void) pq_setkeepalivesidle(tcp_keepalives_idle, port);
+		(void) pq_setkeepalivesinterval(tcp_keepalives_interval, port);
+		(void) pq_setkeepalivescount(tcp_keepalives_count, port);
+		(void) pq_settcpusertimeout(tcp_user_timeout, port);
+	}
+
+	/* Reset send/receive buffer state */
+	PqSendPointer = PqSendStart = PqRecvPointer = PqRecvLength = 0;
+	PqCommBusy = false;
+	PqCommReadingMsg = false;
+
+	/* Reserve the external FD for this socket */
+	ReserveExternalFD();
+
+	/* Set socket to non-blocking mode */
+#ifndef WIN32
+	if (!pg_set_noblock(port->sock))
+		ereport(LOG,
+				(errmsg("could not set socket to nonblocking mode: %m")));
+#endif
+
+#ifndef WIN32
+	/* Don't give the socket to any subprograms we execute */
+	if (fcntl(port->sock, F_SETFD, FD_CLOEXEC) < 0)
+		elog(LOG, "fcntl(F_SETFD) failed on socket: %m");
+#endif
+
+	/* Recreate the WaitEventSet with the new socket */
+	FeBeWaitSet = CreateWaitEventSet(NULL, FeBeWaitSetNEvents);
+	socket_pos = AddWaitEventToSet(FeBeWaitSet, WL_SOCKET_WRITEABLE,
+								   port->sock, NULL, NULL);
+	latch_pos = AddWaitEventToSet(FeBeWaitSet, WL_LATCH_SET, PGINVALID_SOCKET,
+								  MyLatch, NULL);
+	AddWaitEventToSet(FeBeWaitSet, WL_POSTMASTER_DEATH, PGINVALID_SOCKET,
+					  NULL, NULL);
+
+	Assert(socket_pos == FeBeWaitSetSocketPos);
+	Assert(latch_pos == FeBeWaitSetLatchPos);
+
+	whereToSendOutput = DestRemote;
 }
 
 /* --------------------------------

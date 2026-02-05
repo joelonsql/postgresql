@@ -31,6 +31,7 @@ typedef enum BackendState
 	STATE_FASTPATH,
 	STATE_IDLEINTRANSACTION_ABORTED,
 	STATE_DISABLED,
+	STATE_POOLED,
 } BackendState;
 
 

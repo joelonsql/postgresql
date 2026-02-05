@@ -419,6 +419,7 @@ extern Oid	GetSessionUserId(void);
 extern bool GetSessionUserIsSuperuser(void);
 extern Oid	GetAuthenticatedUserId(void);
 extern void SetAuthenticatedUserId(Oid userid);
+extern void ResetAuthenticatedUserId(void);
 extern void GetUserIdAndSecContext(Oid *userid, int *sec_context);
 extern void SetUserIdAndSecContext(Oid userid, int sec_context);
 extern bool InLocalUserIdChange(void);

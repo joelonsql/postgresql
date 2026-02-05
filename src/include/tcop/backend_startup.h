@@ -57,6 +57,12 @@ typedef struct BackendStartupData
 	 * connections.
 	 */
 	TimestampTz fork_started;
+
+	/*
+	 * Backend's end of the socketpair used for connection pooling.
+	 * The postmaster sends new client sockets over this channel.
+	 */
+	pgsocket	pool_socket;
 } BackendStartupData;
 
 /*
