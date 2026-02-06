@@ -2703,7 +2703,7 @@ sub connect_fails
 	if (defined($params{log_like}) or defined($params{log_unlike}))
 	{
 		$self->wait_for_log(
-			qr/DEBUG:  (?:00000: )?forked new client backend, pid=(\d+) socket.*DEBUG:  (?:00000: )?client backend \(PID \1\) exited with exit code \d/s,
+			qr/DEBUG:  (?:00000: )?(?:forked new client backend, pid=|backend pool: assigned connection to pooled backend pid )(\d+)[ (].*DEBUG:  (?:00000: )?client backend \(PID \1\) exited with exit code \d/s,
 			$log_location);
 
 		$self->log_check($test_name, $log_location, %params);

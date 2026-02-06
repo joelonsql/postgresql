@@ -4308,6 +4308,14 @@ PostgresMain(const char *dbname, const char *username)
 
 	pgstat_report_connect(MyDatabaseId);
 
+	/*
+	 * Update the backend pool slot with our database OID so that
+	 * BackendPoolEvictDatabase() can find us if the database is dropped
+	 * while we are transitioning to pooled state.
+	 */
+	if (MyPoolSocket != PGINVALID_SOCKET)
+		BackendPoolUpdateDatabaseId(MyProcPid, MyDatabaseId);
+
 	/* Perform initialization specific to a WAL sender process. */
 	if (am_walsender)
 		InitWalSender();

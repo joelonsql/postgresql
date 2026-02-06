@@ -52,6 +52,7 @@
 #include "mb/pg_wchar.h"
 #include "miscadmin.h"
 #include "pgstat.h"
+#include "postmaster/backend_pool.h"
 #include "postmaster/bgwriter.h"
 #include "replication/slot.h"
 #include "storage/copydir.h"
@@ -1781,6 +1782,15 @@ dropdb(const char *dbname, bool missing_ok, bool force)
 	 */
 	if (force)
 		TerminateOtherDBBackends(db_id);
+
+	/*
+	 * Evict any pooled backends connected to this database.  Pooled backends
+	 * clear MyProc->databaseId to InvalidOid so they don't block DROP
+	 * DATABASE, but they still hold the old database OID internally.  If not
+	 * evicted, they could be assigned to a new connection after the database
+	 * is recreated (same name, different OID) and FATAL.
+	 */
+	BackendPoolEvictDatabase(db_id);
 
 	/*
 	 * Check for other backends in the target database.  (Because we hold the

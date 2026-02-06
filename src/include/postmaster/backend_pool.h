@@ -40,6 +40,7 @@ typedef struct BackendPoolSlot
 	pid_t		pid;
 	ProcNumber	procNumber;
 	Oid			databaseId;		/* last connected database */
+	char		databaseName[NAMEDATALEN];	/* database name for matching */
 	pgsocket	postmasterSock;	/* postmaster's end of socketpair */
 	sig_atomic_t status;		/* BackendPoolSlotStatus */
 } BackendPoolSlot;
@@ -64,9 +65,11 @@ extern void BackendPoolShmemInit(void);
 /* Pool management (called from postmaster) */
 extern void BackendPoolRegister(pid_t pid, ProcNumber procNumber,
 								Oid dbId, pgsocket pmSock);
-extern void BackendPoolMarkPooled(pid_t pid);
+extern bool BackendPoolMarkPooled(pid_t pid, const char *dbname);
 extern void BackendPoolMarkActive(pid_t pid);
 extern void BackendPoolRemove(pid_t pid);
+extern void BackendPoolShutdown(void);
+extern void BackendPoolEvictDatabase(Oid dbId);
 extern void BackendPoolUpdateDatabaseId(pid_t pid, Oid dbId);
 extern bool BackendPoolAssignConnection(ClientSocket *client_sock);
 

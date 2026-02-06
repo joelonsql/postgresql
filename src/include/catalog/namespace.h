@@ -184,6 +184,7 @@ extern void GetTempNamespaceState(Oid *tempNamespaceId,
 extern void SetTempNamespaceState(Oid tempNamespaceId,
 								  Oid tempToastNamespaceId);
 extern void ResetTempTableNamespace(void);
+extern void ResetTempNamespaceForReuse(void);
 
 extern SearchPathMatcher *GetSearchPathMatcher(MemoryContext context);
 extern SearchPathMatcher *CopySearchPathMatcher(SearchPathMatcher *path);

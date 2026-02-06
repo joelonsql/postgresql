@@ -20,7 +20,10 @@
 
 #include "access/xact.h"
 #include "catalog/namespace.h"
+#include "common/relpath.h"
+#include "catalog/pg_database.h"
 #include "commands/async.h"
+#include "commands/event_trigger.h"
 #include "commands/prepare.h"
 #include "commands/sequence.h"
 #include "common/ip.h"
@@ -32,10 +35,13 @@
 #include "mb/pg_wchar.h"
 #include "miscadmin.h"
 #include "pgstat.h"
+#include "utils/pgstat_internal.h"
 #include "postmaster/backend_pool.h"
 #include "postmaster/interrupt.h"
 #include "postmaster/postmaster.h"
 #include "replication/walsender.h"
+#include "storage/bufmgr.h"
+#include "storage/smgr.h"
 #include "storage/ipc.h"
 #include "storage/lmgr.h"
 #include "storage/lock.h"
@@ -52,6 +58,7 @@
 #include "utils/inval.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
+#include "utils/relcache.h"
 #include "utils/portal.h"
 #include "utils/ps_status.h"
 #include "utils/snapmgr.h"
@@ -62,8 +69,8 @@
 extern int	ProcessSSLStartup(Port *port);
 extern int	ProcessStartupPacket(Port *port, bool ssl_done, bool gss_done);
 extern void PerformAuthentication(Port *port);
-extern void process_startup_options(Port *port, bool am_superuser);
 extern void process_settings(Oid databaseid, Oid roleid);
+extern HeapTuple GetDatabaseTupleByOid(Oid dboid);
 
 /*
  * Close the current client socket and clean up libpq state.
@@ -122,12 +129,20 @@ WaitForNewClient(ClientSocket *newClientSocket)
 			return false;
 		}
 
+		/* Process ProcSignalBarrier so we don't block other backends */
+		if (ProcSignalBarrierPending)
+			ProcessProcSignalBarrier();
+
 		/* Process config file reload if requested */
 		if (ConfigReloadPending)
 		{
 			ConfigReloadPending = false;
 			ProcessConfigFile(PGC_SIGHUP);
 		}
+
+		/* Log memory contexts if requested */
+		if (LogMemoryContextPending)
+			ProcessLogMemoryContextInterrupt();
 
 		/* Accept invalidation messages so we don't block the sinval queue */
 		AcceptInvalidationMessages();
@@ -192,6 +207,122 @@ AcceptNewClient(ClientSocket *newClientSocket)
 	}
 }
 
+
+/*
+ * process_startup_options_for_reuse
+ *
+ * A variant of process_startup_options() for pooled backend reuse.
+ *
+ * In a normal backend startup, session_preload_libraries haven't been loaded
+ * yet when process_startup_options runs, so custom GUCs from those libraries
+ * are still placeholder variables (PGC_USERSET context).  Placeholder GUCs
+ * accept any setting without permission checks.  When the library loads later,
+ * define_custom_variable() replaces the placeholder and reapplies the stored
+ * value with WARNING elevel, so permission failures produce warnings rather
+ * than errors.
+ *
+ * In a pooled backend, the libraries are already loaded, so custom GUCs are
+ * real variables with their actual context (e.g. PGC_SUSET).  If we use
+ * the normal process_startup_options(), permission failures raise ERROR and
+ * kill the connection.  To match the normal startup behavior, we use WARNING
+ * elevel here, so that permission failures are logged as warnings and the
+ * setting is silently ignored, just as it would be in a fresh backend.
+ */
+static void
+process_startup_options_for_reuse(Port *port, bool am_superuser)
+{
+	GucContext	gucctx;
+	ListCell   *gucopts;
+
+	gucctx = am_superuser ? PGC_SU_BACKEND : PGC_BACKEND;
+
+	/*
+	 * Process command-line switches from the startup packet (PGOPTIONS).
+	 * These are typically "-c name=value" pairs.  We parse them the same
+	 * way as process_startup_options/process_postgres_switches, but use
+	 * WARNING elevel so that permission failures don't kill the connection.
+	 */
+	if (port->cmdline_options != NULL)
+	{
+		char	  **av;
+		int			maxac;
+		int			ac;
+		int			i;
+
+		maxac = 2 + (strlen(port->cmdline_options) + 1) / 2;
+		av = palloc_array(char *, maxac);
+		ac = 0;
+		av[ac++] = "postgres";
+		pg_split_opts(av, &ac, port->cmdline_options);
+		av[ac] = NULL;
+
+		/*
+		 * Walk the split arguments looking for "-c name=value" pairs.
+		 * We handle both "-c name=value" (separate tokens) and
+		 * "-cname=value" (concatenated, as sent by psql's PGOPTIONS).
+		 * We skip other options since they are rare in PGOPTIONS and
+		 * don't have permission issues.
+		 */
+		for (i = 1; i < ac; i++)
+		{
+			char	   *optarg = NULL;
+
+			if (strcmp(av[i], "-c") == 0 && i + 1 < ac)
+			{
+				/* "-c name=value" form: argument is next token */
+				optarg = av[++i];
+			}
+			else if (strncmp(av[i], "-c", 2) == 0 && av[i][2] != '\0')
+			{
+				/* "-cname=value" form: argument follows -c directly */
+				optarg = av[i] + 2;
+			}
+
+			if (optarg != NULL)
+			{
+				char	   *name;
+				char	   *value;
+
+				ParseLongOption(optarg, &name, &value);
+				if (name && value)
+				{
+					(void) set_config_option(name, value,
+											 gucctx, PGC_S_CLIENT,
+											 GUC_ACTION_SET, true,
+											 WARNING, false);
+				}
+				if (name)
+					pfree(name);
+				if (value)
+					pfree(value);
+			}
+		}
+	}
+
+	/*
+	 * Process any additional GUC variable settings passed in the startup
+	 * packet.  These are handled the same as command-line variables, but
+	 * again with WARNING elevel.
+	 */
+	gucopts = list_head(port->guc_options);
+	while (gucopts)
+	{
+		char	   *name;
+		char	   *value;
+
+		name = lfirst(gucopts);
+		gucopts = lnext(port->guc_options, gucopts);
+
+		value = lfirst(gucopts);
+		gucopts = lnext(port->guc_options, gucopts);
+
+		(void) set_config_option(name, value,
+								 gucctx, PGC_S_CLIENT,
+								 GUC_ACTION_SET, true,
+								 WARNING, false);
+	}
+}
+
 /*
  * BackendEnterPooledState
  *
@@ -206,45 +337,175 @@ bool
 BackendEnterPooledState(void)
 {
 	ClientSocket newClientSocket;
+	char		pooledDbName[NAMEDATALEN];
+
+	/* Save the database name before ProcessStartupPacket overwrites it */
+	strlcpy(pooledDbName, MyProcPort->database_name, NAMEDATALEN);
 
 	/*
 	 * Step 1: Session cleanup (equivalent to DISCARD ALL).
 	 *
-	 * First abort any open transaction, then do cleanup that doesn't need
-	 * catalog access.
+	 * First abort any open transaction, then do cleanup.
 	 */
 	AbortOutOfAnyTransaction();
 	PortalHashTableDeleteAll();
 	DropAllPreparedStatements();
-	Async_UnlistenAll();
 	LockReleaseAll(USER_LOCKMETHOD, true);
+
+	SetSessionAuthorization(GetAuthenticatedUserId(),
+							GetAuthenticatedUserIsSuperuser());
+	SetCurrentRoleId(InvalidOid, false);
+	ResetGUCSourceForReuse("session_authorization");
+	ResetGUCSourceForReuse("role");
+	ResetSessionGUCsForReuse();
+
 	ResetAllOptions();
 	ResetPlanCache();
 	ResetSequenceCaches();
 
 	/*
-	 * ResetTempTableNamespace() needs catalog access (it drops temp tables),
-	 * so it must run inside a transaction with an active snapshot.
+	 * Reset the client connection info so PerformAuthentication can set the
+	 * authn_id again for the new client.
+	 */
+	if (MyClientConnectionInfo.authn_id)
+	{
+		pfree((void *) MyClientConnectionInfo.authn_id);
+		MyClientConnectionInfo.authn_id = NULL;
+	}
+	MyClientConnectionInfo.auth_method = 0;
+
+	/*
+	 * Async_UnlistenAll() and ResetTempTableNamespace() need a transaction
+	 * context.  Async_UnlistenAll() queues a pending UNLISTEN_ALL action
+	 * using CurTransactionContext, and ResetTempTableNamespace() needs
+	 * catalog access to drop temp tables.  The pending unlisten action is
+	 * applied when the transaction commits.
 	 */
 	SetCurrentStatementStartTimestamp();
 	StartTransactionCommand();
 	PushActiveSnapshot(GetTransactionSnapshot());
+	Async_UnlistenAll();
 	ResetTempTableNamespace();
+	ResetTempNamespaceForReuse();
 	PopActiveSnapshot();
 	CommitTransactionCommand();
 
 	/*
-	 * Step 2: Close the client socket.
+	 * Reset local buffer pool after temp tables are dropped, so the next
+	 * session can reinitialize with a potentially different temp_buffers.
+	 */
+	ResetLocalBuffers();
+
+	/*
+	 * Release smgr references so that stale file handles from this session
+	 * don't persist into the next one.  For example, ALTER DATABASE SET
+	 * TABLESPACE moves relation files, and a reused backend must not use
+	 * cached file handles from the old tablespace.
+	 *
+	 * Note: we do NOT call RelationCacheInvalidate() here because we need
+	 * MyDatabaseTableSpace to be refreshed first.  That refresh happens
+	 * during reconnection (Step 6), after which we invalidate the relcache
+	 * so entries are rebuilt with the correct tablespace.
+	 */
+	smgrreleaseall();
+
+	/*
+	 * Flush the per-backend opclass cache.  LookupOpclassInfo() caches
+	 * support procedure OIDs (from pg_amproc) and never invalidates them,
+	 * which is fine when each connection gets a fresh backend.  With
+	 * connection pooling the backend is reused, so we must invalidate
+	 * this cache to pick up any pg_amproc changes made by previous sessions.
+	 */
+	InvalidateOpClassCache();
+
+	/*
+	 * Step 2: Flush pending stats for the disconnecting session, including
+	 * the disconnect counter.  This ensures that stat consumers (e.g.,
+	 * pg_stat_database, pg_stat_io) see up-to-date values even though the
+	 * backend process doesn't actually exit.
+	 */
+	pgstat_report_disconnect(MyDatabaseId);
+	pgstat_report_stat(true);
+
+	/*
+	 * Step 3: Close the client socket.
 	 */
 	CloseClientSocket();
 
 	/*
-	 * Step 3: Update shared state to indicate we're pooled.
+	 * Step 4: Update shared state to indicate we're pooled.
+	 *
+	 * Clear databaseId so that CountOtherDBBackends() does not count this
+	 * pooled backend as an active connection.  This allows DROP DATABASE
+	 * and ALTER DATABASE to proceed while backends sit in the pool.
+	 * MyDatabaseId is kept so we can restore it when we reconnect.
 	 */
 	MyProc->roleId = InvalidOid;
+	MyProc->databaseId = InvalidOid;
 	pgstat_report_activity(STATE_POOLED, NULL);
 	set_ps_display("pooled");
-	BackendPoolMarkPooled(MyProcPid);
+
+	/*
+	 * Remove the backend from pg_stat_activity by clearing st_procpid.
+	 * This prevents tests and tools that wait for a specific PID to
+	 * disappear from pg_stat_activity from hanging indefinitely.
+	 * pgstat_bestart_final() restores it when the backend reconnects.
+	 */
+	{
+		volatile PgBackendStatus *beentry = MyBEEntry;
+
+		PGSTAT_BEGIN_WRITE_ACTIVITY(beentry);
+		beentry->st_procpid = 0;
+		PGSTAT_END_WRITE_ACTIVITY(beentry);
+	}
+
+	/*
+	 * Verify our database still exists before entering the pool.  If it
+	 * was dropped while we were cleaning up, entering the pool with a
+	 * stale database name would cause the postmaster to assign new
+	 * connections (for a recreated database with the same name) to us,
+	 * only for us to FATAL because our MyDatabaseId no longer exists.
+	 *
+	 * Use GetDatabaseTupleByOid with criticalRelcachesBuilt temporarily
+	 * cleared, same as we do in Step 6 during reconnection.
+	 */
+	{
+		HeapTuple	dbTup;
+		bool		saved_criticalRelcachesBuilt;
+
+		saved_criticalRelcachesBuilt = criticalRelcachesBuilt;
+		criticalRelcachesBuilt = false;
+
+		SetCurrentStatementStartTimestamp();
+		StartTransactionCommand();
+
+		dbTup = GetDatabaseTupleByOid(MyDatabaseId);
+
+		criticalRelcachesBuilt = saved_criticalRelcachesBuilt;
+
+		if (!HeapTupleIsValid(dbTup))
+		{
+			CommitTransactionCommand();
+			elog(DEBUG1, "database with OID %u was dropped, backend exiting instead of pooling",
+				 MyDatabaseId);
+			return false;
+		}
+		heap_freetuple(dbTup);
+		CommitTransactionCommand();
+	}
+
+	/*
+	 * Try to enter the pool.  If the pool is full, exit so that the
+	 * PGPROC slot is freed for new connections.
+	 */
+	if (!BackendPoolMarkPooled(MyProcPid, pooledDbName))
+		return false;
+
+	/*
+	 * Reset connection timing so that "connection ready" is logged for
+	 * each new client when log_connections includes setup_durations.
+	 */
+	conn_timing.ready_for_use = TIMESTAMP_MINUS_INFINITY;
 
 	/*
 	 * Step 4: Wait for a new client, process it, and loop back if needed
@@ -259,12 +520,50 @@ BackendEnterPooledState(void)
 		if (!WaitForNewClient(&newClientSocket))
 			return false;
 
+		/* Restore databaseId now that we're serving a client again */
+		MyProc->databaseId = MyDatabaseId;
 		BackendPoolMarkActive(MyProcPid);
+
+		/*
+		 * Reload the config file unconditionally before handling the new
+		 * client.  This serves two purposes:
+		 *
+		 * 1. We can't rely on ConfigReloadPending because the SIGHUP from
+		 *    the postmaster may not have been delivered yet (race between
+		 *    signal delivery and the new client arriving on the socketpair).
+		 *
+		 * 2. PGC_SU_BACKEND GUCs (like log_connections) are normally fixed
+		 *    for the lifetime of a backend and ignored during SIGHUP.
+		 *    But a pooled backend effectively starts a new session, so it
+		 *    should pick up config changes.  We set guc_apply_backend_gucs
+		 *    to allow PGC_SU_BACKEND/PGC_BACKEND values to be updated.
+		 */
+		ConfigReloadPending = false;
+		guc_apply_backend_gucs = true;
+		ProcessConfigFile(PGC_SIGHUP);
+		guc_apply_backend_gucs = false;
 
 		/*
 		 * Step 5: Reinitialize the connection with the new client socket.
 		 */
+		conn_timing.socket_create = GetCurrentTimestamp();
+		conn_timing.fork_start = conn_timing.socket_create;
+		conn_timing.fork_end = conn_timing.socket_create;
 		AcceptNewClient(&newClientSocket);
+
+		/* Log connection received, same as backend_startup.c */
+		if (log_connections & LOG_CONNECTION_RECEIPT)
+		{
+			if (MyProcPort->remote_port[0])
+				ereport(LOG,
+						(errmsg("connection received: host=%s port=%s",
+								MyProcPort->remote_host,
+								MyProcPort->remote_port)));
+			else
+				ereport(LOG,
+						(errmsg("connection received: host=%s",
+								MyProcPort->remote_host)));
+		}
 
 		/*
 		 * Process SSL/GSS handshake and startup packet.
@@ -276,64 +575,131 @@ BackendEnterPooledState(void)
 		if (status != STATUS_OK)
 		{
 			CloseClientSocket();
-			BackendPoolMarkPooled(MyProcPid);
+			MyProc->databaseId = InvalidOid;
+			if (!BackendPoolMarkPooled(MyProcPid, pooledDbName))
+				return false;
 			pgstat_report_activity(STATE_POOLED, NULL);
 			set_ps_display("pooled");
 			continue;		/* Loop back to wait for another client */
 		}
 
 		/*
-		 * Step 6: Check if the client requests a different database.
-		 * We need a transaction to look up the database name.
+		 * Replication (walsender) connections cannot be served by a
+		 * pooled backend because walsender state (MyWalSnd, replication
+		 * slots, etc.) requires dedicated initialization at process
+		 * startup.  If this somehow got through the postmaster's peek
+		 * check, exit so the postmaster will fork a proper walsender.
+		 */
+		if (am_walsender)
+		{
+			CloseClientSocket();
+			ereport(FATAL,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("replication connections cannot be served by pooled backends")));
+		}
+
+		/*
+		 * Step 6: Refresh MyDatabaseTableSpace, check if the database
+		 * still exists, and look up its name.
+		 *
+		 * MyDatabaseTableSpace may be stale if ALTER DATABASE SET
+		 * TABLESPACE ran while we were pooled.  We must refresh it
+		 * before any per-database relcache access, because relcache
+		 * entries with reltablespace=0 derive their physical path
+		 * from MyDatabaseTableSpace.
+		 *
+		 * To avoid a chicken-and-egg problem (refreshing from the
+		 * catalog needs the relcache, but the relcache needs the
+		 * correct tablespace), we temporarily clear criticalRelcachesBuilt.
+		 * This prevents RelationReloadNailed() from trying to reload
+		 * nailed catalog entries via ScanPgRelation (which would access
+		 * pg_class in the wrong tablespace).  Shared catalogs like
+		 * pg_database live in the global tablespace and are unaffected.
 		 */
 		SetCurrentStatementStartTimestamp();
-		StartTransactionCommand();
-		XactIsoLevel = XACT_READ_COMMITTED;
 
-		need_db_switch = (strcmp(MyProcPort->database_name,
-								get_database_name(MyDatabaseId)) != 0);
+		{
+			HeapTuple	dbTup;
+			bool		saved_criticalRelcachesBuilt;
+
+			saved_criticalRelcachesBuilt = criticalRelcachesBuilt;
+			criticalRelcachesBuilt = false;
+
+			StartTransactionCommand();
+			XactIsoLevel = XACT_READ_COMMITTED;
+
+			dbTup = GetDatabaseTupleByOid(MyDatabaseId);
+
+			criticalRelcachesBuilt = saved_criticalRelcachesBuilt;
+
+			if (!HeapTupleIsValid(dbTup))
+			{
+				/*
+				 * Database was dropped while we were pooled.  This is a
+				 * race condition: BackendPoolEvictDatabase() ran before
+				 * we entered the pool, but we got assigned a new client
+				 * for a recreated database with the same name.
+				 *
+				 * Close the client socket and exit.  The postmaster will
+				 * fork a fresh backend when the client retries.  We use
+				 * proc_exit(0) instead of FATAL to avoid sending an error
+				 * message to the client -- they'll see a connection reset.
+				 */
+				CommitTransactionCommand();
+				elog(LOG, "database with OID %u was dropped while backend was pooled, exiting",
+					 MyDatabaseId);
+				CloseClientSocket();
+				proc_exit(0);
+			}
+
+			{
+				Form_pg_database dbForm;
+
+				dbForm = (Form_pg_database) GETSTRUCT(dbTup);
+				MyDatabaseTableSpace = dbForm->dattablespace;
+				MyDatabaseHasLoginEventTriggers = dbForm->dathasloginevt;
+				need_db_switch = (strcmp(MyProcPort->database_name,
+										  NameStr(dbForm->datname)) != 0);
+			}
+			heap_freetuple(dbTup);
+
+			/*
+			 * Update DatabasePath to match the (potentially new) tablespace.
+			 * DatabasePath is normally set once during startup, but with
+			 * connection pooling it must be refreshed when the tablespace
+			 * changes.  Free the old path first.
+			 */
+			if (DatabasePath)
+				pfree(DatabasePath);
+			DatabasePath = NULL;
+			SetDatabasePath(GetDatabasePath(MyDatabaseId,
+											   MyDatabaseTableSpace));
+		}
+
+		/*
+		 * Now that MyDatabaseTableSpace is correct, invalidate the
+		 * relcache so that entries are rebuilt with the right tablespace.
+		 * Also release smgr references in case file paths changed.
+		 */
+		smgrreleaseall();
+		RelationCacheInvalidate(false);
 
 		if (need_db_switch)
 		{
 			/*
-			 * Database switch is not yet supported for pooled backends.
-			 * Send a FATAL error to the client so it gets a clean error
-			 * message, then close the socket and go back to the pooled
-			 * wait state for the next client.
-			 *
-			 * We cannot use ereport(FATAL) here because that would call
-			 * proc_exit(), and we want this backend to stay alive and
-			 * return to the pool.  Instead, send the error message
-			 * manually using the libpq protocol.
+			 * Database mismatch despite postmaster-side matching.  This
+			 * shouldn't normally happen, but can if the startup packet
+			 * couldn't be peeked (e.g., SSL wrapping).  Exit instead of
+			 * looping to avoid infinite assignment cycles.
 			 */
 			CommitTransactionCommand();
 
-			{
-				StringInfoData buf;
-
-				pq_beginmessage(&buf, PqMsg_ErrorResponse);
-				pq_sendbyte(&buf, PG_DIAG_SEVERITY);
-				pq_sendstring(&buf, "FATAL");
-				pq_sendbyte(&buf, PG_DIAG_SEVERITY_NONLOCALIZED);
-				pq_sendstring(&buf, "FATAL");
-				pq_sendbyte(&buf, PG_DIAG_SQLSTATE);
-				pq_sendstring(&buf, "08006");
-				pq_sendbyte(&buf, PG_DIAG_MESSAGE_PRIMARY);
-				pq_sendstring(&buf, psprintf(
-					"connection to database \"%s\" failed: "
-					"pooled backend is connected to a different database",
-					MyProcPort->database_name));
-				pq_sendbyte(&buf, '\0');	/* terminator */
-				pq_endmessage(&buf);
-				pq_flush();
-			}
-
-			/* Close client and return to pooled state */
-			CloseClientSocket();
-			BackendPoolMarkPooled(MyProcPid);
-			pgstat_report_activity(STATE_POOLED, NULL);
-			set_ps_display("pooled");
-			continue;		/* Loop back to wait for another client */
+			ereport(FATAL,
+					(errcode(ERRCODE_CONNECTION_FAILURE),
+					 errmsg("connection to database \"%s\" failed: "
+							"pooled backend is connected to database \"%s\"",
+							MyProcPort->database_name,
+							pooledDbName)));
 		}
 
 		/*
@@ -357,7 +723,9 @@ BackendEnterPooledState(void)
 		/*
 		 * Step 8: Authenticate the new client and set up the session.
 		 */
+		conn_timing.auth_start = GetCurrentTimestamp();
 		PerformAuthentication(MyProcPort);
+		conn_timing.auth_end = GetCurrentTimestamp();
 
 		/*
 		 * Reset user identity state from previous session so that
@@ -365,12 +733,23 @@ BackendEnterPooledState(void)
 		 */
 		ResetAuthenticatedUserId();
 		InitializeSessionUserId(MyProcPort->user_name, InvalidOid, false);
+
+		/* Initialize SYSTEM_USER for the new client session */
+		if (MyClientConnectionInfo.authn_id)
+			InitializeSystemUser(MyClientConnectionInfo.authn_id,
+								 hba_authname(MyClientConnectionInfo.auth_method));
+
 		am_superuser = superuser();
 
 		InvalidateCatalogSnapshot();
 		BackendPoolUpdateDatabaseId(MyProcPid, MyDatabaseId);
 
-		process_startup_options(MyProcPort, am_superuser);
+		/*
+		 * MyDatabaseTableSpace and MyDatabaseHasLoginEventTriggers were
+		 * already refreshed from the catalog in Step 6 above.
+		 */
+
+		process_startup_options_for_reuse(MyProcPort, am_superuser);
 		process_settings(MyDatabaseId, GetSessionUserId());
 
 		/*
@@ -415,8 +794,17 @@ BackendEnterPooledState(void)
 
 	/*
 	 * Step 10: Update pgstat and ps display.
+	 *
+	 * Reinitialize the backend status entry from scratch: st_procpid,
+	 * st_clientaddr, etc.  pgstat_bestart_initial() sets st_procpid =
+	 * MyProcPid (which we zeroed when entering the pool), updates the
+	 * client address from the new MyProcPort, and resets activity
+	 * timestamps.  pgstat_bestart_security() refreshes SSL/GSS state.
+	 * pgstat_bestart_final() fills in databaseid, userid, appname.
 	 */
 	pgstat_report_connect(MyDatabaseId);
+	pgstat_bestart_initial();
+	pgstat_bestart_security();
 	pgstat_bestart_final();
 
 	{
@@ -433,10 +821,11 @@ BackendEnterPooledState(void)
 		pfree(ps_data.data);
 	}
 
+	ResetReportedGUCOptions();
 	BeginReportingGUCOptions();
 
-	elog(DEBUG2, "backend pool: reused backend pid %d for new connection",
-		 MyProcPid);
+	/* Fire any defined login event triggers, if appropriate */
+	EventTriggerOnLogin();
 
 	return true;
 }

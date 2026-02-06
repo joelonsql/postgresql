@@ -2143,7 +2143,15 @@ process_pm_shutdown_request(void)
 			 * later state, do not change it.
 			 */
 			if (pmState == PM_RUN || pmState == PM_HOT_STANDBY)
+			{
 				connsAllowed = false;
+
+				/*
+				 * Signal pooled backends to exit.  They are not serving
+				 * any client, so there is no work to drain.
+				 */
+				BackendPoolShutdown();
+			}
 			else if (pmState == PM_STARTUP || pmState == PM_RECOVERY)
 			{
 				/* There should be no clients, so proceed to stop children */

@@ -371,6 +371,7 @@ extern Size BufferManagerShmemSize(void);
 
 /* in localbuf.c */
 extern void AtProcExit_LocalBuffers(void);
+extern void ResetLocalBuffers(void);
 
 /* in freelist.c */
 

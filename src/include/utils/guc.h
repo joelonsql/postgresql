@@ -433,6 +433,9 @@ extern int	NewGUCNestLevel(void);
 extern void RestrictSearchPath(void);
 extern void AtEOXact_GUC(bool isCommit, int nestLevel);
 extern void BeginReportingGUCOptions(void);
+extern void ResetReportedGUCOptions(void);
+extern void ResetGUCSourceForReuse(const char *name);
+extern void ResetSessionGUCsForReuse(void);
 extern void ReportChangedGUCOptions(void);
 extern void ParseLongOption(const char *string, char **name, char **value);
 extern const char *get_config_unit_name(int flags);
@@ -509,5 +512,12 @@ extern void GUC_check_errcode(int sqlerrcode);
 #define GUC_check_errhint \
 	pre_format_elog_string(errno, TEXTDOMAIN), \
 	GUC_check_errhint_string = format_elog_string
+
+/*
+ * When true, ProcessConfigFile will apply PGC_SU_BACKEND/PGC_BACKEND GUC
+ * changes in existing backends.  Used by pooled backends to pick up config
+ * changes when reused for a new client.
+ */
+extern bool guc_apply_backend_gucs;
 
 #endif							/* GUC_H */

@@ -1807,6 +1807,37 @@ LookupOpclassInfo(Oid operatorClassOid,
 }
 
 /*
+ * InvalidateOpClassCache
+ *		Mark all entries in the per-backend opclass cache as invalid.
+ *
+ * This forces the next LookupOpclassInfo() call for each opclass to
+ * re-read the data from pg_opclass and pg_amproc.  Needed when a pooled
+ * backend is reused, because another session (or even our own prior
+ * session) may have modified pg_amproc entries via direct catalog updates.
+ *
+ * The OpClassCache comment says "there is no provision for flushing the
+ * cache" because in normal operation opclass support procs never change.
+ * However, with server-side connection pooling, a backend can be reused
+ * across multiple client sessions, and the test suite exercises raw
+ * UPDATE pg_amproc scenarios that require the cache to be refreshed.
+ */
+void
+InvalidateOpClassCache(void)
+{
+	HASH_SEQ_STATUS status;
+	OpClassCacheEnt *opcentry;
+
+	if (OpClassCache == NULL)
+		return;
+
+	hash_seq_init(&status, OpClassCache);
+	while ((opcentry = (OpClassCacheEnt *) hash_seq_search(&status)) != NULL)
+	{
+		opcentry->valid = false;
+	}
+}
+
+/*
  * Fill in the TableAmRoutine for a relation
  *
  * relation's rd_amhandler must be valid already.

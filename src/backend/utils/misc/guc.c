@@ -83,6 +83,9 @@ char	   *GUC_check_errmsg_string;
 char	   *GUC_check_errdetail_string;
 char	   *GUC_check_errhint_string;
 
+/* When true, SIGHUP processing applies PGC_SU_BACKEND/PGC_BACKEND changes */
+bool		guc_apply_backend_gucs = false;
+
 
 /*
  * Unit conversion tables.
@@ -2002,6 +2005,163 @@ set_guc_source(struct config_generic *gconf, GucSource newsource)
 
 
 /*
+ * ResetGUCSourceForReuse - reset a GUC's source for backend reuse.
+ *
+ * When a pooled backend is being reused, GUCs like session_authorization
+ * and role need their source and reset_source reset to PGC_S_DEFAULT so
+ * the reconnection flow can properly re-initialize them.
+ *
+ * These GUCs have GUC_NO_RESET_ALL, so ResetAllOptions() skips them.
+ * Without this reset, stale sources from a previous session would block
+ * the new session's initialization:
+ *
+ * - session_authorization is set by InitializeSessionUserId() with
+ *   PGC_S_OVERRIDE, which needs to override the previous value.
+ *
+ * - role is set to "none" by the ugly hack in set_config_option_ext()
+ *   with PGC_S_DYNAMIC_DEFAULT, so that process_settings() can then
+ *   apply ALTER ROLE SET values with PGC_S_USER.  If the previous
+ *   session left role's source at PGC_S_CLIENT (from -c options) or
+ *   PGC_S_USER (from process_settings), neither the ugly hack nor
+ *   process_settings could override it.
+ *
+ * We also reset reset_source so that the next session can properly
+ * establish the reset state (preventing stale reset_val from causing
+ * RESET to revert to wrong values from a previous session).
+ */
+void
+ResetGUCSourceForReuse(const char *name)
+{
+	struct config_generic *record;
+
+	record = find_option(name, false, true, WARNING);
+	if (record == NULL)
+		return;
+
+	set_guc_source(record, PGC_S_DEFAULT);
+	record->reset_source = PGC_S_DEFAULT;
+}
+
+
+/*
+ * ResetSessionGUCsForReuse
+ *		Reset GUCs that were set by per-database/per-user settings or
+ *		client startup options back to their boot_val defaults.
+ *
+ * When a backend is reused from the connection pool, GUCs set by sources
+ * in the range [PGC_S_GLOBAL .. PGC_S_CLIENT] (per-database settings,
+ * per-user settings, startup packet options, etc.) persist from the
+ * previous session.  These sources also set makeDefault=true, which
+ * corrupts the reset_val so that even RESET won't produce the right
+ * answer.  ResetAllOptions() only handles source > PGC_S_OVERRIDE
+ * (i.e. SET commands), so it misses these.
+ *
+ * For each affected GUC we use set_config_option() to set it to its
+ * boot_val at PGC_S_OVERRIDE, which properly runs check/assign hooks.
+ * Then we fix up reset_val/reset_source/reset_extra to match the boot_val
+ * by calling set_config_option() a second time with makeDefault=true,
+ * which installs the value as both current and default.  Finally, the
+ * caller's ProcessConfigFile(PGC_SIGHUP) will re-apply postgresql.conf
+ * settings on top.
+ *
+ * Must be called outside any transaction, before ResetAllOptions().
+ */
+void
+ResetSessionGUCsForReuse(void)
+{
+	dlist_mutable_iter iter;
+
+	dlist_foreach_modify(iter, &guc_nondef_list)
+	{
+		struct config_generic *gconf = dlist_container(struct config_generic,
+													   nondef_link, iter.cur);
+		const char *boot_val_str;
+
+		/* Only reset user-settable GUCs */
+		if (gconf->context != PGC_SUSET &&
+			gconf->context != PGC_USERSET)
+			continue;
+
+		/* Respect GUC_NO_RESET_ALL */
+		if (gconf->flags & GUC_NO_RESET_ALL)
+			continue;
+
+		/*
+		 * Target GUCs whose source or reset_source is in the range
+		 * [PGC_S_GLOBAL .. PGC_S_CLIENT].  These are set by
+		 * process_settings() (per-database/user) or startup packet options,
+		 * and their reset_val may be corrupted by makeDefault=true.
+		 */
+		if (gconf->source < PGC_S_GLOBAL &&
+			gconf->reset_source < PGC_S_GLOBAL)
+			continue;
+		if (gconf->source > PGC_S_CLIENT &&
+			gconf->reset_source > PGC_S_CLIENT)
+			continue;
+
+		Assert(gconf->stack == NULL);
+
+		/*
+		 * Determine the boot_val as a string for set_config_option().
+		 */
+		switch (gconf->vartype)
+		{
+			case PGC_BOOL:
+				boot_val_str = gconf->_bool.boot_val ? "on" : "off";
+				break;
+			case PGC_INT:
+				{
+					static char buf[32];
+
+					snprintf(buf, sizeof(buf), "%d", gconf->_int.boot_val);
+					boot_val_str = buf;
+					break;
+				}
+			case PGC_REAL:
+				{
+					static char buf[64];
+
+					snprintf(buf, sizeof(buf), "%g", gconf->_real.boot_val);
+					boot_val_str = buf;
+					break;
+				}
+			case PGC_STRING:
+				boot_val_str = gconf->_string.boot_val;
+				break;
+			case PGC_ENUM:
+				boot_val_str = config_enum_lookup_by_value(
+					gconf, gconf->_enum.boot_val);
+				break;
+			default:
+				continue;
+		}
+
+		/*
+		 * Use set_config_option with PGC_S_OVERRIDE to force the value
+		 * regardless of current source priority, and makeDefault=true so
+		 * that reset_val is also set to boot_val (undoing any corruption
+		 * from the previous session's makeDefault=true settings).
+		 */
+		(void) set_config_option(gconf->name,
+								 boot_val_str,
+								 PGC_SUSET,
+								 PGC_S_OVERRIDE,
+								 GUC_ACTION_SET,
+								 true,	/* makeDefault */
+								 WARNING,
+								 false);
+
+		/*
+		 * Now demote source back to PGC_S_DEFAULT so the GUC is truly at
+		 * default and ProcessConfigFile / process_settings can override it.
+		 */
+		set_guc_source(gconf, PGC_S_DEFAULT);
+		gconf->reset_source = PGC_S_DEFAULT;
+	}
+}
+
+
+/*
  * push_old_value
  *		Push previous state during transactional assignment to a GUC variable.
  */
@@ -2451,6 +2611,32 @@ BeginReportingGUCOptions(void)
 
 		if (conf->flags & GUC_REPORT)
 			ReportGUCOption(conf);
+	}
+}
+
+/*
+ * ResetReportedGUCOptions
+ *		Clear last_reported for all GUC_REPORT variables so that the next
+ *		BeginReportingGUCOptions call will re-send all ParameterStatus
+ *		messages.  This is needed when a pooled backend gets a new client,
+ *		because the new client has never seen the parameter values.
+ */
+void
+ResetReportedGUCOptions(void)
+{
+	HASH_SEQ_STATUS status;
+	GUCHashEntry *hentry;
+
+	hash_seq_init(&status, guc_hashtab);
+	while ((hentry = (GUCHashEntry *) hash_seq_search(&status)) != NULL)
+	{
+		struct config_generic *conf = hentry->gucvar;
+
+		if ((conf->flags & GUC_REPORT) && conf->last_reported != NULL)
+		{
+			guc_free(conf->last_reported);
+			conf->last_reported = NULL;
+		}
 	}
 }
 
@@ -3441,7 +3627,8 @@ set_config_with_handle(const char *name, config_handle *handle,
 				 * started it. is_reload will be true when either situation
 				 * applies.
 				 */
-				if (IsUnderPostmaster && changeVal && !is_reload)
+				if (IsUnderPostmaster && changeVal && !is_reload &&
+					!guc_apply_backend_gucs)
 					return -1;
 			}
 			else if (context != PGC_POSTMASTER &&

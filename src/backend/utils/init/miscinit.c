@@ -447,6 +447,7 @@ ChangeToDataDir(void)
  * ----------------------------------------------------------------
  */
 static Oid	AuthenticatedUserId = InvalidOid;
+static bool AuthenticatedUserIsSuperuser = false;
 static Oid	SessionUserId = InvalidOid;
 static Oid	OuterUserId = InvalidOid;
 static Oid	CurrentUserId = InvalidOid;
@@ -559,6 +560,7 @@ void
 ResetAuthenticatedUserId(void)
 {
 	AuthenticatedUserId = InvalidOid;
+	AuthenticatedUserIsSuperuser = false;
 	SessionUserId = InvalidOid;
 	OuterUserId = InvalidOid;
 	CurrentUserId = InvalidOid;
@@ -568,7 +570,7 @@ ResetAuthenticatedUserId(void)
 }
 
 void
-SetAuthenticatedUserId(Oid userid)
+SetAuthenticatedUserId(Oid userid, bool is_superuser)
 {
 	Assert(OidIsValid(userid));
 
@@ -577,9 +579,25 @@ SetAuthenticatedUserId(Oid userid)
 
 	AuthenticatedUserId = userid;
 
+	/*
+	 * Remember the superuser state at authentication time.  We need this
+	 * for backend reuse, where we must restore the original identity
+	 * without catalog access.
+	 */
+	AuthenticatedUserIsSuperuser = is_superuser;
+
 	/* Also mark our PGPROC entry with the authenticated user id */
 	/* (We assume this is an atomic store so no lock is needed) */
 	MyProc->roleId = userid;
+}
+
+/*
+ * GetAuthenticatedUserIsSuperuser - was the authenticated user a superuser?
+ */
+bool
+GetAuthenticatedUserIsSuperuser(void)
+{
+	return AuthenticatedUserIsSuperuser;
 }
 
 
@@ -785,7 +803,7 @@ InitializeSessionUserId(const char *rolename, Oid roleid,
 	rname = NameStr(rform->rolname);
 	is_superuser = rform->rolsuper;
 
-	SetAuthenticatedUserId(roleid);
+	SetAuthenticatedUserId(roleid, is_superuser);
 
 	/*
 	 * Set SessionUserId and related variables, including "role", via the GUC

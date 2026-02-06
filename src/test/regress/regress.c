@@ -39,6 +39,7 @@
 #include "parser/parse_coerce.h"
 #include "port/atomics.h"
 #include "postmaster/postmaster.h"	/* for MAX_BACKENDS */
+#include "storage/procarray.h"
 #include "storage/spin.h"
 #include "tcop/tcopprot.h"
 #include "utils/array.h"
@@ -488,11 +489,21 @@ wait_pid(PG_FUNCTION_ARGS)
 
 	while (kill(pid, 0) == 0)
 	{
+		PGPROC	   *proc = BackendPidGetProc(pid);
+
+		/*
+		 * Also consider the process "gone" if it has entered the pooled
+		 * state (backend reuse).  Pooled backends have databaseId set to
+		 * InvalidOid since they are no longer serving a client.
+		 */
+		if (proc != NULL && proc->databaseId == InvalidOid)
+			break;
+
 		CHECK_FOR_INTERRUPTS();
 		pg_usleep(50000);
 	}
 
-	if (errno != ESRCH)
+	if (kill(pid, 0) != 0 && errno != ESRCH)
 		elog(ERROR, "could not check PID %d liveness: %m", pid);
 
 	PG_RETURN_VOID();

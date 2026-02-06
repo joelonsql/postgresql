@@ -55,6 +55,13 @@ static HTAB *LocalBufHash = NULL;
 /* number of local buffers pinned at least once */
 static int	NLocalPinnedBuffers = 0;
 
+/* State for GetLocalBufferStorage's block allocator */
+static char *cur_block = NULL;
+static int	next_buf_in_block = 0;
+static int	num_bufs_in_block = 0;
+static int	total_bufs_allocated = 0;
+static MemoryContext LocalBufferContext = NULL;
+
 
 static void InitLocalBuffers(void);
 static Block GetLocalBufferStorage(void);
@@ -900,12 +907,6 @@ check_temp_buffers(int *newval, void **extra, GucSource source)
 static Block
 GetLocalBufferStorage(void)
 {
-	static char *cur_block = NULL;
-	static int	next_buf_in_block = 0;
-	static int	num_bufs_in_block = 0;
-	static int	total_bufs_allocated = 0;
-	static MemoryContext LocalBufferContext = NULL;
-
 	char	   *this_buf;
 
 	Assert(total_bufs_allocated < NLocBuffer);
@@ -1019,4 +1020,61 @@ AtProcExit_LocalBuffers(void)
 	 * drop the temp rels.
 	 */
 	CheckForLocalBufferLeaks();
+}
+
+/*
+ * ResetLocalBuffers - tear down the local buffer pool for backend reuse.
+ *
+ * This must be called after all temp tables have been dropped (so no local
+ * buffers are pinned).  It frees all local buffer infrastructure so that the
+ * next session can reinitialize with a potentially different temp_buffers
+ * value.
+ */
+void
+ResetLocalBuffers(void)
+{
+	if (NLocBuffer == 0)
+		return;
+
+	CheckForLocalBufferLeaks();
+
+	/* Destroy the lookup hash table */
+	if (LocalBufHash != NULL)
+	{
+		hash_destroy(LocalBufHash);
+		LocalBufHash = NULL;
+	}
+
+	/* Free the buffer descriptor and auxiliary arrays (allocated with calloc) */
+	if (LocalBufferDescriptors != NULL)
+	{
+		free(LocalBufferDescriptors);
+		LocalBufferDescriptors = NULL;
+	}
+	if (LocalBufferBlockPointers != NULL)
+	{
+		free(LocalBufferBlockPointers);
+		LocalBufferBlockPointers = NULL;
+	}
+	if (LocalRefCount != NULL)
+	{
+		free(LocalRefCount);
+		LocalRefCount = NULL;
+	}
+
+	/* Free the actual buffer data pages */
+	if (LocalBufferContext != NULL)
+	{
+		MemoryContextDelete(LocalBufferContext);
+		LocalBufferContext = NULL;
+	}
+
+	/* Reset all state so InitLocalBuffers can run again */
+	NLocBuffer = 0;
+	nextFreeLocalBufId = 0;
+	NLocalPinnedBuffers = 0;
+	cur_block = NULL;
+	next_buf_in_block = 0;
+	num_bufs_in_block = 0;
+	total_bufs_allocated = 0;
 }

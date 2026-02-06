@@ -90,6 +90,7 @@ typedef struct FixedParallelState
 	Oid			temp_namespace_id;
 	Oid			temp_toast_namespace_id;
 	int			sec_context;
+	bool		authenticated_user_is_superuser;
 	bool		session_user_is_superuser;
 	bool		role_is_superuser;
 	PGPROC	   *parallel_leader_pgproc;
@@ -343,6 +344,7 @@ InitializeParallelDSM(ParallelContext *pcxt)
 		shm_toc_allocate(pcxt->toc, sizeof(FixedParallelState));
 	fps->database_id = MyDatabaseId;
 	fps->authenticated_user_id = GetAuthenticatedUserId();
+	fps->authenticated_user_is_superuser = GetAuthenticatedUserIsSuperuser();
 	fps->session_user_id = GetSessionUserId();
 	fps->outer_user_id = GetCurrentRoleId();
 	GetUserIdAndSecContext(&fps->current_user_id, &fps->sec_context);
@@ -1425,7 +1427,8 @@ ParallelWorkerMain(Datum main_arg)
 	 * has to happen before InitPostgres, since InitializeSessionUserId will
 	 * not set these variables.
 	 */
-	SetAuthenticatedUserId(fps->authenticated_user_id);
+	SetAuthenticatedUserId(fps->authenticated_user_id,
+						   fps->authenticated_user_is_superuser);
 	SetSessionAuthorization(fps->session_user_id,
 							fps->session_user_is_superuser);
 	SetCurrentRoleId(fps->outer_user_id, fps->role_is_superuser);

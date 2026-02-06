@@ -15,6 +15,7 @@
 #include <string.h>
 #include <getopt.h>
 #include <sys/time.h>
+#include <sys/resource.h>
 
 #include "libpq-fe.h"
 
@@ -130,6 +131,17 @@ main(int argc, char *argv[])
 			default:
 				usage(argv[0]);
 				exit(opt == '?' ? 0 : 1);
+		}
+	}
+
+	/* Raise fd limit to accommodate many idle connections */
+	{
+		struct rlimit rl;
+
+		if (getrlimit(RLIMIT_NOFILE, &rl) == 0)
+		{
+			rl.rlim_cur = rl.rlim_max;
+			setrlimit(RLIMIT_NOFILE, &rl);
 		}
 	}
 

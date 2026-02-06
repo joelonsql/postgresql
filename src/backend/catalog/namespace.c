@@ -4717,6 +4717,24 @@ ResetTempTableNamespace(void)
 		RemoveTempRelations(myTempNamespace);
 }
 
+/*
+ * ResetTempNamespaceForReuse - reset temp namespace state for backend reuse.
+ *
+ * Must be called after ResetTempTableNamespace() has dropped all temp
+ * relations (within a transaction).  This resets the backend-local state
+ * so the next session starts fresh without any temp namespace.
+ */
+void
+ResetTempNamespaceForReuse(void)
+{
+	myTempNamespace = InvalidOid;
+	myTempToastNamespace = InvalidOid;
+	myTempNamespaceSubID = InvalidSubTransactionId;
+	baseSearchPathValid = false;
+	searchPathCacheValid = false;
+	MyProc->tempNamespaceId = InvalidOid;
+}
+
 
 /*
  * Routines for handling the GUC variable 'search_path'.
