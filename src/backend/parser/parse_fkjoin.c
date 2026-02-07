@@ -433,7 +433,15 @@ analyze_join_tree(ParseState *pstate, Node *n,
 				Node	   *referenced_arg;
 				RangeTblEntry *referencing_rte;
 				RangeTblEntry *referenced_rte;
-				ForeignKeyJoinNode *fkjn = castNode(ForeignKeyJoinNode, join->fkJoin);
+				ForeignKeyJoinNode *fkjn;
+
+				if (join->fkJoin == NULL)
+					ereport(ERROR,
+							(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+							 errmsg("foreign key joins involving non-foreign-key joins are not supported"),
+							 parser_errposition(pstate, location)));
+
+				fkjn = castNode(ForeignKeyJoinNode, join->fkJoin);
 				bool		fk_cols_unique;
 				bool		fk_cols_not_null;
 

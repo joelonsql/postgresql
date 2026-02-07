@@ -1117,6 +1117,41 @@ FROM
 ) AS q JOIN packages FOR KEY (shipment_id) -> q (shipment_id);
 
 --
+-- The below query should be accepted
+--
+SELECT
+    packages.id AS package_id,
+    q.order_id,
+    q.shipment_id
+FROM
+(
+    SELECT
+        shipments.id AS shipment_id,
+        orders.id AS order_id
+    FROM shipments
+    LEFT JOIN orders FOR KEY (shipment_id) -> shipments (id)
+) AS q JOIN packages FOR KEY (shipment_id) -> q (shipment_id);
+
+--
+-- The below query should raise an error since a CROSS JOIN
+-- could produce a zero rows result if one of the tables contain
+-- zero rows.
+--
+SELECT
+    packages.id AS package_id,
+    q.order_id,
+    q.shipment_id
+FROM
+(
+    SELECT
+        shipments.id AS shipment_id,
+        orders.id AS order_id
+    FROM shipments
+    LEFT JOIN orders FOR KEY (shipment_id) -> shipments (id)
+    CROSS JOIN order_items
+) AS q JOIN packages FOR KEY (shipment_id) -> q (shipment_id);
+
+--
 -- TODO: RLS policy equivalence check
 -- Long-term ambition: If both the referencing and referenced sides of a
 -- foreign key join have equivalent RLS policies, any filtering due to RLS
