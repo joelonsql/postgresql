@@ -2295,6 +2295,18 @@ typedef struct RangeTblRef
 	int			rtindex;
 } RangeTblRef;
 
+/*
+ * FkJoinArrowDir - direction of arrow in FOR KEY join syntax
+ */
+typedef enum FkJoinArrowDir
+{
+	FK_JOIN_NONE = 0,			/* not a FK join */
+	FK_JOIN_FORWARD,			/* -> : joined table is FK side, arrow target
+								 * is PK side */
+	FK_JOIN_REVERSE,			/* <- : arrow target is FK side, joined table
+								 * is PK side */
+} FkJoinArrowDir;
+
 /*----------
  * JoinExpr - for SQL JOIN expressions
  *
@@ -2321,6 +2333,13 @@ typedef struct RangeTblRef
  * be created that refer to the outputs of the join.  The planner sometimes
  * generates JoinExprs internally; these can have rtindex = 0 if there are
  * no join alias variables referencing such joins.
+ *
+ * FK join fields: when the FOR KEY syntax is used, the parser fills in
+ * fk_arrow_dir, fk_join_cols, pk_join_cols, and fk_ref_table.  During
+ * parse analysis, the FK constraint is looked up and fk_constraint_oid
+ * is set.  The quals field is filled with the generated equi-join
+ * condition, just as for USING.  The FK-specific fields are preserved
+ * for view storage/deparse and dependency recording.
  *----------
  */
 typedef struct JoinExpr
@@ -2340,6 +2359,27 @@ typedef struct JoinExpr
 	Alias	   *alias pg_node_attr(query_jumble_ignore);
 	/* RT index assigned for join, or 0 */
 	int			rtindex;
+
+	/*
+	 * FK join fields (set when FOR KEY syntax is used, zero/NIL otherwise).
+	 * These are preserved through serialization for view storage/deparse.
+	 */
+	/* Arrow direction: FK_JOIN_NONE if not a FK join */
+	FkJoinArrowDir fk_arrow_dir pg_node_attr(query_jumble_ignore);
+	/* FK-side column names as written (List of String) */
+	List	   *fk_join_cols pg_node_attr(query_jumble_ignore);
+	/* PK-side column names as written (List of String) */
+	List	   *pk_join_cols pg_node_attr(query_jumble_ignore);
+	/* Table named after arrow (for deparse); NULL if not FK join */
+	RangeVar   *fk_ref_table pg_node_attr(query_jumble_ignore);
+	/* FK constraint OID found during analysis; InvalidOid if not FK join */
+	Oid			fk_constraint_oid pg_node_attr(query_jumble_ignore);
+	/* NOT NULL constraint OIDs for dependency tracking (List of OID) */
+	List	   *fk_notnull_oids pg_node_attr(query_jumble_ignore);
+	/* RT index of the arrow-target table (for deparse); 0 if not FK join */
+	int			fk_ref_rtindex pg_node_attr(query_jumble_ignore);
+	/* Location of FOR KEY clause, or -1 if not FK join */
+	ParseLoc	fk_location pg_node_attr(query_jumble_ignore);
 } JoinExpr;
 
 /*----------

@@ -1431,6 +1431,11 @@ transformSelectStmt(ParseState *pstate, SelectStmt *stmt,
 	/* process the FROM clause */
 	transformFromClause(pstate, stmt->fromClause);
 
+	/* copy FK join constraint dependencies to the query */
+	if (pstate->p_fk_constraint_deps != NIL)
+		qry->constraintDeps = list_concat_unique_oid(qry->constraintDeps,
+													 pstate->p_fk_constraint_deps);
+
 	/* transform targetlist */
 	qry->targetList = transformTargetList(pstate, stmt->targetList,
 										  EXPR_KIND_SELECT_TARGET);

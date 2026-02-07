@@ -34,6 +34,7 @@
 #include "parser/parse_coerce.h"
 #include "parser/parse_collate.h"
 #include "parser/parse_expr.h"
+#include "parser/parse_fk_join.h"
 #include "parser/parse_func.h"
 #include "parser/parse_oper.h"
 #include "parser/parse_relation.h"
@@ -54,8 +55,6 @@ static int	extractRemainingColumns(ParseState *pstate,
 									List **src_colnos,
 									List **res_colnames, List **res_colvars,
 									ParseNamespaceColumn *res_nscolumns);
-static Node *transformJoinUsingClause(ParseState *pstate,
-									  List *leftVars, List *rightVars);
 static Node *transformJoinOnClause(ParseState *pstate, JoinExpr *j,
 								   List *namespace);
 static ParseNamespaceItem *transformTableEntry(ParseState *pstate, RangeVar *r);
@@ -72,8 +71,6 @@ static ParseNamespaceItem *getNSItemForSpecialRelationTypes(ParseState *pstate,
 static Node *transformFromClauseItem(ParseState *pstate, Node *n,
 									 ParseNamespaceItem **top_nsitem,
 									 List **namespace);
-static Var *buildVarFromNSColumn(ParseState *pstate,
-								 ParseNamespaceColumn *nscol);
 static Node *buildMergedJoinVar(ParseState *pstate, JoinType jointype,
 								Var *l_colvar, Var *r_colvar);
 static void markRelsAsNulledBy(ParseState *pstate, Node *n, int jindex);
@@ -302,7 +299,7 @@ extractRemainingColumns(ParseState *pstate,
  *	  We are given lists of nodes representing left and right match columns.
  *	  Result is a transformed qualification expression.
  */
-static Node *
+Node *
 transformJoinUsingClause(ParseState *pstate,
 						 List *leftVars, List *rightVars)
 {
@@ -1399,6 +1396,15 @@ transformFromClauseItem(ParseState *pstate, Node *n,
 												l_usingvars,
 												r_usingvars);
 		}
+		else if (j->fk_arrow_dir != FK_JOIN_NONE)
+		{
+			/* FOR KEY join clause; validate FK and generate ON-condition */
+			j->quals = transformFkJoinClause(pstate, j,
+											 l_nsitem, r_nsitem,
+											 l_colnames, r_colnames,
+											 l_nscolumns, r_nscolumns,
+											 my_namespace);
+		}
 		else if (j->quals)
 		{
 			/* User-written ON-condition; transform it */
@@ -1635,7 +1641,7 @@ transformFromClauseItem(ParseState *pstate, Node *n,
  * Note also that no column SELECT privilege is requested here; that would
  * happen only if the column is actually referenced in the query.
  */
-static Var *
+Var *
 buildVarFromNSColumn(ParseState *pstate, ParseNamespaceColumn *nscol)
 {
 	Var		   *var;

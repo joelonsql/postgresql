@@ -22,6 +22,7 @@
 #include "nodes/makefuncs.h"
 #include "nodes/nodeFuncs.h"
 #include "parser/analyze.h"
+#include "parser/parse_fk_join.h"
 #include "rewrite/rewriteDefine.h"
 #include "rewrite/rewriteHandler.h"
 #include "rewrite/rewriteSupport.h"
@@ -211,6 +212,12 @@ DefineVirtualRelation(RangeVar *relation, List *tlist, bool replace,
 		ObjectAddressSet(address, RelationRelationId, viewOid);
 
 		recordDependencyOnCurrentExtension(&address, true);
+
+		/*
+		 * Re-validate FK joins in views that depend on this view.
+		 * A replacement view definition could break FK join guarantees.
+		 */
+		validateFkJoinView(viewOid);
 
 		/*
 		 * Seems okay, so return the OID of the pre-existing view.

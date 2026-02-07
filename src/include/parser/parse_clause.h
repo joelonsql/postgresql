@@ -52,6 +52,11 @@ extern List *addTargetToSortList(ParseState *pstate, TargetEntry *tle,
 extern Index assignSortGroupRef(TargetEntry *tle, List *tlist);
 extern bool targetIsInSortList(TargetEntry *tle, Oid sortop, List *sortList);
 
+extern Var *buildVarFromNSColumn(ParseState *pstate,
+								 ParseNamespaceColumn *nscol);
+extern Node *transformJoinUsingClause(ParseState *pstate,
+									  List *leftVars, List *rightVars);
+
 /* functions in parse_jsontable.c */
 extern ParseNamespaceItem *transformJsonTable(ParseState *pstate, JsonTable *jt);
 

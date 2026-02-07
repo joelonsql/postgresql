@@ -12638,6 +12638,170 @@ get_from_clause_item(Node *jtnode, Query *query, deparse_context *context)
 				appendStringInfo(buf, " AS %s",
 								 quote_identifier(j->join_using_alias->aliasname));
 		}
+		else if (j->fk_arrow_dir != FK_JOIN_NONE)
+		{
+			/*
+			 * FK join: use the FK constraint OID to look up current
+			 * column and table names, so deparse is correct after renames.
+			 */
+			if (OidIsValid(j->fk_constraint_oid))
+			{
+				HeapTuple	contup;
+
+				contup = SearchSysCache1(CONSTROID,
+										 ObjectIdGetDatum(j->fk_constraint_oid));
+				if (HeapTupleIsValid(contup))
+				{
+					Form_pg_constraint con = (Form_pg_constraint) GETSTRUCT(contup);
+					Datum		adatum;
+					bool		isNull;
+					ArrayType  *arr;
+					int			nkeys;
+					int16	   *conkey;
+					int16	   *confkey;
+					Oid			fk_relid = con->conrelid;
+					Oid			pk_relid = con->confrelid;
+					Oid			ref_relid;
+					int16	   *first_attnums;
+					int16	   *second_attnums;
+					Oid			first_relid;
+					Oid			second_relid;
+					const char *arrow;
+					const char *ref_relname;
+					int			i;
+
+					adatum = SysCacheGetAttr(CONSTROID, contup,
+											 Anum_pg_constraint_conkey, &isNull);
+					arr = DatumGetArrayTypeP(adatum);
+					nkeys = ARR_DIMS(arr)[0];
+					conkey = (int16 *) ARR_DATA_PTR(arr);
+
+					adatum = SysCacheGetAttr(CONSTROID, contup,
+											 Anum_pg_constraint_confkey, &isNull);
+					arr = DatumGetArrayTypeP(adatum);
+					confkey = (int16 *) ARR_DATA_PTR(arr);
+
+					if (j->fk_arrow_dir == FK_JOIN_FORWARD)
+					{
+						first_attnums = conkey;
+						first_relid = fk_relid;
+						second_attnums = confkey;
+						second_relid = pk_relid;
+						ref_relid = pk_relid;
+						arrow = " -> ";
+					}
+					else
+					{
+						first_attnums = confkey;
+						first_relid = pk_relid;
+						second_attnums = conkey;
+						second_relid = fk_relid;
+						ref_relid = fk_relid;
+						arrow = " <- ";
+					}
+
+					/* Determine ref_table name from the RTE or catalog */
+					if (j->fk_ref_rtindex > 0 &&
+						j->fk_ref_rtindex <= list_length(query->rtable))
+					{
+						RangeTblEntry *ref_rte = rt_fetch(j->fk_ref_rtindex,
+														  query->rtable);
+
+						if (ref_rte->alias)
+							ref_relname = ref_rte->alias->aliasname;
+						else
+							ref_relname = get_rel_name(ref_relid);
+					}
+					else
+						ref_relname = get_rel_name(ref_relid);
+
+					appendStringInfoString(buf, " FOR KEY (");
+					for (i = 0; i < nkeys; i++)
+					{
+						if (i > 0)
+							appendStringInfoString(buf, ", ");
+						appendStringInfoString(buf,
+							quote_identifier(get_attname(first_relid,
+														 first_attnums[i],
+														 false)));
+					}
+					appendStringInfoChar(buf, ')');
+
+					appendStringInfoString(buf, arrow);
+					appendStringInfoString(buf,
+										   quote_identifier(ref_relname));
+
+					appendStringInfoString(buf, " (");
+					for (i = 0; i < nkeys; i++)
+					{
+						if (i > 0)
+							appendStringInfoString(buf, ", ");
+						appendStringInfoString(buf,
+							quote_identifier(get_attname(second_relid,
+														 second_attnums[i],
+														 false)));
+					}
+					appendStringInfoChar(buf, ')');
+
+					ReleaseSysCache(contup);
+				}
+				else
+				{
+					/* Constraint dropped - fall back to stored names */
+					appendStringInfoString(buf, " FOR KEY (...)");
+				}
+			}
+			else
+			{
+				/* No constraint OID - fall back to stored names */
+				ListCell   *lc;
+				bool		first;
+				List	   *first_cols;
+				List	   *second_cols;
+				const char *arrow;
+
+				if (j->fk_arrow_dir == FK_JOIN_FORWARD)
+				{
+					first_cols = j->fk_join_cols;
+					second_cols = j->pk_join_cols;
+					arrow = " -> ";
+				}
+				else
+				{
+					first_cols = j->pk_join_cols;
+					second_cols = j->fk_join_cols;
+					arrow = " <- ";
+				}
+
+				appendStringInfoString(buf, " FOR KEY (");
+				first = true;
+				foreach(lc, first_cols)
+				{
+					if (!first)
+						appendStringInfoString(buf, ", ");
+					first = false;
+					appendStringInfoString(buf,
+										   quote_identifier(strVal(lfirst(lc))));
+				}
+				appendStringInfoChar(buf, ')');
+
+				appendStringInfoString(buf, arrow);
+				appendStringInfoString(buf,
+									   quote_identifier(j->fk_ref_table->relname));
+
+				appendStringInfoString(buf, " (");
+				first = true;
+				foreach(lc, second_cols)
+				{
+					if (!first)
+						appendStringInfoString(buf, ", ");
+					first = false;
+					appendStringInfoString(buf,
+										   quote_identifier(strVal(lfirst(lc))));
+				}
+				appendStringInfoChar(buf, ')');
+			}
+		}
 		else if (j->quals)
 		{
 			appendStringInfoString(buf, " ON ");

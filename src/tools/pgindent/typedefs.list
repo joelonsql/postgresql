@@ -856,6 +856,9 @@ ForeignAsyncConfigureWait_function
 ForeignAsyncNotify_function
 ForeignAsyncRequest_function
 ForeignDataWrapper
+FkColumnInfo
+FkJoinArrowDir
+FkJoinQual
 ForeignKeyCacheInfo
 ForeignKeyOptInfo
 ForeignPath

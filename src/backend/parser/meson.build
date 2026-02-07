@@ -9,6 +9,7 @@ backend_sources += files(
   'parse_cte.c',
   'parse_enr.c',
   'parse_expr.c',
+  'parse_fk_join.c',
   'parse_func.c',
   'parse_jsontable.c',
   'parse_merge.c',

@@ -348,6 +348,7 @@ less_equals		"<="
 greater_equals	">="
 less_greater	"<>"
 not_equals		"!="
+arrow_left		"<-"
 
 /*
  * "self" is the set of chars that should be returned as single-character
@@ -853,6 +854,11 @@ other			.
 					return NOT_EQUALS;
 				}
 
+{arrow_left}	{
+					SET_YYLLOC();
+					return ARROW_LEFT;
+				}
+
 {self}			{
 					SET_YYLLOC();
 					return yytext[0];
@@ -879,6 +885,20 @@ other			.
 						slashstar = dashdash;
 					if (slashstar)
 						nchars = slashstar - yytext;
+
+					/*
+					 * Special case: "<-" is the FK join reverse arrow.
+					 * We must check for it before the trailing +/- strip
+					 * below, which would otherwise reduce "<-" to just "<".
+					 */
+					if (nchars == 2 &&
+						yytext[0] == '<' && yytext[1] == '-')
+					{
+						if (nchars < yyleng)
+							yyless(nchars);
+						SET_YYLLOC();
+						return ARROW_LEFT;
+					}
 
 					/*
 					 * For SQL compatibility, '+' and '-' cannot be the
@@ -934,9 +954,9 @@ other			.
 							return yytext[0];
 						/*
 						 * Likewise, if what we have left is two chars, and
-						 * those match the tokens ">=", "<=", "=>", "<>" or
-						 * "!=", then we must return the appropriate token
-						 * rather than the generic Op.
+						 * those match the tokens ">=", "<=", "=>", "<>",
+						 * "!=", or "<-", then we must return the appropriate
+						 * token rather than the generic Op.
 						 */
 						if (nchars == 2)
 						{
@@ -950,6 +970,8 @@ other			.
 								return NOT_EQUALS;
 							if (yytext[0] == '!' && yytext[1] == '=')
 								return NOT_EQUALS;
+							if (yytext[0] == '<' && yytext[1] == '-')
+								return ARROW_LEFT;
 						}
 					}
 

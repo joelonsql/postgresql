@@ -231,6 +231,8 @@ struct ParseState
 
 	Node	   *p_last_srf;		/* most recent set-returning func/op found */
 
+	List	   *p_fk_constraint_deps;	/* FK constraint OIDs from FK joins */
+
 	/*
 	 * Optional hook functions for parser callbacks.  These are null unless
 	 * set up by the caller of make_parsestate.

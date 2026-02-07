@@ -22,6 +22,7 @@ OBJS = \
 	parse_cte.o \
 	parse_enr.o \
 	parse_expr.o \
+	parse_fk_join.o \
 	parse_func.o \
 	parse_jsontable.o \
 	parse_merge.o \

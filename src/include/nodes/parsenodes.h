@@ -649,6 +649,26 @@ typedef struct RangeSubselect
 } RangeSubselect;
 
 /*
+ * FkJoinQual - intermediate parse node for FOR KEY join qualification
+ *
+ * This node is produced by the grammar when FOR KEY (...) -> table (...)
+ * or FOR KEY (...) <- table (...) syntax is used.  It is consumed during
+ * parse analysis (transformFromClauseItem) and its contents are transferred
+ * into the JoinExpr's FK join fields.  It does not survive past analysis.
+ */
+typedef struct FkJoinQual
+{
+	pg_node_attr(no_query_jumble)
+
+	NodeTag		type;
+	List	   *fk_cols;		/* FK-side column names (List of String) */
+	List	   *pk_cols;		/* PK-side column names (List of String) */
+	RangeVar   *ref_table;		/* table named after arrow */
+	FkJoinArrowDir arrow_dir;	/* FK_JOIN_FORWARD or FK_JOIN_REVERSE */
+	ParseLoc	location;		/* token location, for error messages */
+} FkJoinQual;
+
+/*
  * RangeFunction - function call appearing in a FROM clause
  *
  * functions is a List because we use this to represent the construct

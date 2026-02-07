@@ -698,6 +698,7 @@ static Node *makeRecursiveViewSelect(char *relname, List *aliases, Node *query);
 %token <ival>	ICONST PARAM
 %token			TYPECAST DOT_DOT COLON_EQUALS EQUALS_GREATER
 %token			LESS_EQUALS GREATER_EQUALS NOT_EQUALS
+%token			ARROW_LEFT
 
 /*
  * If you want to make any keyword changes, update the keyword table in
@@ -13932,6 +13933,17 @@ joined_table:
 						n->usingClause = linitial_node(List, castNode(List, $5));
 						n->join_using_alias = lsecond_node(Alias, castNode(List, $5));
 					}
+					else if ($5 != NULL && IsA($5, FkJoinQual))
+					{
+						/* FOR KEY clause */
+						FkJoinQual *fkjq = (FkJoinQual *) $5;
+
+						n->fk_arrow_dir = fkjq->arrow_dir;
+						n->fk_join_cols = fkjq->fk_cols;
+						n->pk_join_cols = fkjq->pk_cols;
+						n->fk_ref_table = fkjq->ref_table;
+						n->fk_location = fkjq->location;
+					}
 					else
 					{
 						/* ON clause */
@@ -13953,6 +13965,17 @@ joined_table:
 						/* USING clause */
 						n->usingClause = linitial_node(List, castNode(List, $4));
 						n->join_using_alias = lsecond_node(Alias, castNode(List, $4));
+					}
+					else if ($4 != NULL && IsA($4, FkJoinQual))
+					{
+						/* FOR KEY clause */
+						FkJoinQual *fkjq = (FkJoinQual *) $4;
+
+						n->fk_arrow_dir = fkjq->arrow_dir;
+						n->fk_join_cols = fkjq->fk_cols;
+						n->pk_join_cols = fkjq->pk_cols;
+						n->fk_ref_table = fkjq->ref_table;
+						n->fk_location = fkjq->location;
 					}
 					else
 					{
@@ -14098,6 +14121,34 @@ join_qual: USING '(' name_list ')' opt_alias_clause_for_join_using
 			| ON a_expr
 				{
 					$$ = $2;
+				}
+			| FOR KEY '(' name_list ')' Op ColId '(' name_list ')'
+				{
+					FkJoinQual *n = makeNode(FkJoinQual);
+
+					if (strcmp($6, "->") != 0)
+						ereport(ERROR,
+								(errcode(ERRCODE_SYNTAX_ERROR),
+								 errmsg("expected \"->\" or \"<-\" in foreign key join clause"),
+								 parser_errposition(@6)));
+
+					n->fk_cols = $4;
+					n->pk_cols = $9;
+					n->arrow_dir = FK_JOIN_FORWARD;
+					n->ref_table = makeRangeVar(NULL, $7, @7);
+					n->location = @1;
+					$$ = (Node *) n;
+				}
+			| FOR KEY '(' name_list ')' ARROW_LEFT ColId '(' name_list ')'
+				{
+					FkJoinQual *n = makeNode(FkJoinQual);
+
+					n->fk_cols = $9;
+					n->pk_cols = $4;
+					n->arrow_dir = FK_JOIN_REVERSE;
+					n->ref_table = makeRangeVar(NULL, $7, @7);
+					n->location = @1;
+					$$ = (Node *) n;
 				}
 		;
 
