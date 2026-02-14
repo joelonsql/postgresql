@@ -66,18 +66,23 @@ static List *update_uniqueness_preservation(List *referencing_uniqueness_preserv
 											List *referenced_uniqueness_preservation,
 											RTEId *referencing_id,
 											bool fk_cols_unique);
-static List *update_functional_dependencies(List *referencing_fds,
-											RTEId *referencing_id,
-											List *referenced_fds,
-											RTEId *referenced_id,
-											bool fk_cols_not_null,
-											JoinType join_type,
-											ForeignKeyDirection fk_dir);
+static void update_row_preserving(List *referencing_chains,
+								  List *referencing_row_preserving,
+								  RTEId *referencing_id,
+								  List *referenced_chains,
+								  List *referenced_row_preserving,
+								  RTEId *referenced_id,
+								  bool fk_cols_not_null,
+								  JoinType join_type,
+								  ForeignKeyDirection fk_dir,
+								  List **result_chains,
+								  List **result_row_preserving);
 static void analyze_join_tree(ParseState *pstate, Node *n,
 							  Query *query,
 							  RTEId *rte_id,
 							  List **uniqueness_preservation,
-							  List **functional_dependencies,
+							  List **notnull_fk_chains,
+							  List **row_preserving,
 							  bool *found,
 							  int location,
 							  QueryStack *query_stack);
@@ -99,9 +104,11 @@ transformAndValidateForeignKeyJoin(ParseState *pstate, JoinExpr *join,
 	List	   *referencing_cols,
 			   *referenced_cols;
 	List	   *referencing_uniqueness_preservation = NIL;
-	List	   *referencing_functional_dependencies = NIL;
+	List	   *referencing_notnull_fk_chains = NIL;
+	List	   *referencing_row_preserving = NIL;
 	List	   *referenced_uniqueness_preservation = NIL;
-	List	   *referenced_functional_dependencies = NIL;
+	List	   *referenced_notnull_fk_chains = NIL;
+	List	   *referenced_row_preserving = NIL;
 	Node	   *referencing_arg;
 	Node	   *referenced_arg;
 	List	   *referencing_base_attnums;
@@ -113,7 +120,6 @@ transformAndValidateForeignKeyJoin(ParseState *pstate, JoinExpr *join,
 	Oid			referencing_relid;
 	Oid			referenced_relid;
 	RTEId	   *referenced_id;
-	bool		found_fd = false;
 	bool		referencing_found = false;
 	bool		referenced_found = false;
 	bool		referenced_is_base_table = false;
@@ -284,11 +290,11 @@ transformAndValidateForeignKeyJoin(ParseState *pstate, JoinExpr *join,
 						column_list_to_string(referenced_cols)),
 				 parser_errposition(pstate, fkjn->location)));
 
-	analyze_join_tree(pstate, referencing_arg, NULL, referencing_rte->rteid, &referencing_uniqueness_preservation, &referencing_functional_dependencies, &referencing_found, fkjn->location, NULL);
+	analyze_join_tree(pstate, referencing_arg, NULL, referencing_rte->rteid, &referencing_uniqueness_preservation, &referencing_notnull_fk_chains, &referencing_row_preserving, &referencing_found, fkjn->location, NULL);
 
 	/* Only analyze referenced side for derived tables - base tables always preserve uniqueness/rows */
 	if (!referenced_is_base_table)
-		analyze_join_tree(pstate, referenced_arg, NULL, referenced_rte->rteid, &referenced_uniqueness_preservation, &referenced_functional_dependencies, &referenced_found, fkjn->location, NULL);
+		analyze_join_tree(pstate, referenced_arg, NULL, referenced_rte->rteid, &referenced_uniqueness_preservation, &referenced_notnull_fk_chains, &referenced_row_preserving, &referenced_found, fkjn->location, NULL);
 
 	/*
 	 * Check uniqueness preservation - only for derived tables.
@@ -305,34 +311,17 @@ transformAndValidateForeignKeyJoin(ParseState *pstate, JoinExpr *join,
 	}
 
 	/*
-	 * Check functional dependencies - looking for (referenced_id,
-	 * referenced_id) pairs
-	 */
-	for (int i = 0; i < list_length(referenced_functional_dependencies); i += 2)
-	{
-		RTEId	   *fd_dep = (RTEId *) list_nth(referenced_functional_dependencies, i);
-		RTEId	   *fd_dcy = (RTEId *) list_nth(referenced_functional_dependencies, i + 1);
-
-		if (equal(fd_dep, referenced_id) && equal(fd_dcy, referenced_id))
-		{
-			found_fd = true;
-			break;
-		}
-	}
-
-	/*
-	 * Check functional dependencies - only for derived tables.
+	 * Check row preservation - only for derived tables.
 	 * Base tables always preserve all their rows.
 	 */
-	if (!referenced_is_base_table && !found_fd)
+	if (!referenced_is_base_table &&
+		!list_member(referenced_row_preserving, referenced_id))
 	{
 		/*
 		 * This check ensures that the referenced relation is not filtered
 		 * (e.g., by WHERE, LIMIT, OFFSET, HAVING, RLS). Foreign key joins
 		 * require the referenced side to represent the complete set of rows
-		 * from the underlying table(s). The presence of a functional
-		 * dependency (referenced_id, referenced_id) indicates this row
-		 * preservation property.
+		 * from the underlying table(s).
 		 */
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_FOREIGN_KEY),
@@ -402,7 +391,8 @@ analyze_join_tree(ParseState *pstate, Node *n,
 				  Query *query,
 				  RTEId *rte_id,
 				  List **uniqueness_preservation,
-				  List **functional_dependencies,
+				  List **notnull_fk_chains,
+				  List **row_preserving,
 				  bool *found,
 				  int location,
 				  QueryStack *query_stack)
@@ -410,9 +400,11 @@ analyze_join_tree(ParseState *pstate, Node *n,
 	RangeTblEntry *rte;
 	Query	   *inner_query = NULL;
 	List	   *referencing_uniqueness_preservation = NIL;
-	List	   *referencing_functional_dependencies = NIL;
+	List	   *referencing_notnull_fk_chains = NIL;
+	List	   *referencing_row_preserving = NIL;
 	List	   *referenced_uniqueness_preservation = NIL;
-	List	   *referenced_functional_dependencies = NIL;
+	List	   *referenced_notnull_fk_chains = NIL;
+	List	   *referenced_row_preserving = NIL;
 	List	   *referencing_base_attnums;
 	List	   *referenced_base_attnums;
 	RangeTblEntry *base_referencing_rte;
@@ -464,8 +456,8 @@ analyze_join_tree(ParseState *pstate, Node *n,
 				referencing_rte = rt_fetch(fkjn->referencingVarno, rtable);
 				referenced_rte = rt_fetch(fkjn->referencedVarno, rtable);
 
-				analyze_join_tree(pstate, referencing_arg, query, rte_id, &referencing_uniqueness_preservation, &referencing_functional_dependencies, &referencing_found, location, query_stack);
-				analyze_join_tree(pstate, referenced_arg, query, rte_id, &referenced_uniqueness_preservation, &referenced_functional_dependencies, &referenced_found, location, query_stack);
+				analyze_join_tree(pstate, referencing_arg, query, rte_id, &referencing_uniqueness_preservation, &referencing_notnull_fk_chains, &referencing_row_preserving, &referencing_found, location, query_stack);
+				analyze_join_tree(pstate, referenced_arg, query, rte_id, &referenced_uniqueness_preservation, &referenced_notnull_fk_chains, &referenced_row_preserving, &referenced_found, location, query_stack);
 
 				base_referencing_rte = drill_down_to_base_rel(pstate, referencing_rte,
 															  fkjn->referencingAttnums,
@@ -489,15 +481,18 @@ analyze_join_tree(ParseState *pstate, Node *n,
 																		  referencing_id,
 																		  fk_cols_unique
 					);
-				*functional_dependencies = update_functional_dependencies(
-																		  referencing_functional_dependencies,
-																		  referencing_id,
-																		  referenced_functional_dependencies,
-																		  referenced_id,
-																		  fk_cols_not_null,
-																		  join->jointype,
-																		  fkjn->fkdir
-					);
+				update_row_preserving(
+									 referencing_notnull_fk_chains,
+									 referencing_row_preserving,
+									 referencing_id,
+									 referenced_notnull_fk_chains,
+									 referenced_row_preserving,
+									 referenced_id,
+									 fk_cols_not_null,
+									 join->jointype,
+									 fkjn->fkdir,
+									 notnull_fk_chains,
+									 row_preserving);
 
 				/* Set found based on whether rte_id was in either subtree or matches either relation */
 				if (referencing_found || referenced_found ||
@@ -540,13 +535,14 @@ analyze_join_tree(ParseState *pstate, Node *n,
 								*uniqueness_preservation = list_make1(rte->rteid);
 
 								/*
-								 * Check if filtered by WHERE/OFFSET/LIMIT/HAVING.
+								 * Mark as row-preserving if not filtered by
+								 * WHERE/OFFSET/LIMIT/HAVING.
 								 */
 								if (!query || (!query->jointree->quals &&
 											   !query->limitOffset &&
 											   !query->limitCount &&
 											   !query->havingQual))
-									*functional_dependencies = list_make2(rte->rteid, rte->rteid);
+									*row_preserving = list_make1(rte->rteid);
 							}
 
 							/* Close the relation */
@@ -593,7 +589,7 @@ analyze_join_tree(ParseState *pstate, Node *n,
 
 						analyze_join_tree(pstate,
 										  (Node *) linitial(inner_query->jointree->fromlist),
-										  inner_query, rte_id, uniqueness_preservation, functional_dependencies, found, location,
+										  inner_query, rte_id, uniqueness_preservation, notnull_fk_chains, row_preserving, found, location,
 										  &new_stack);
 
 						/*
@@ -603,24 +599,8 @@ analyze_join_tree(ParseState *pstate, Node *n,
 						 */
 						if (inner_query->groupClause)
 						{
-							elog(DEBUG1, "analyze_join_tree: found GROUP BY in inner query, checking uniqueness preservation");
-							if (check_group_by_preserves_uniqueness(inner_query, uniqueness_preservation))
-							{
-								/*
-								 * GROUP BY preserves uniqueness, the function
-								 * has updated uniqueness_preservation
-								 */
-								elog(DEBUG1, "analyze_join_tree: GROUP BY preserves uniqueness");
-							}
-							else
-							{
-								/*
-								 * GROUP BY does not preserve uniqueness,
-								 * clear the list
-								 */
-								elog(DEBUG1, "analyze_join_tree: GROUP BY does not preserve uniqueness, clearing uniqueness preservation");
+							if (!check_group_by_preserves_uniqueness(inner_query, uniqueness_preservation))
 								*uniqueness_preservation = NIL;
-							}
 						}
 					}
 				}
@@ -1629,180 +1609,165 @@ update_uniqueness_preservation(List *referencing_uniqueness_preservation,
 }
 
 /*
- * update_functional_dependencies
- *      Updates the functional dependencies for a foreign key join
+ * update_row_preserving
+ *      Compute the row-preserving set (R) and NOT NULL FK chain set (C)
+ *      produced by a single foreign key join, given the R and C from each
+ *      input side.
+ *
+ * Three properties are tracked through the join tree (U is handled
+ * separately by update_uniqueness_preservation):
+ *
+ *   U (uniqueness_preservation) - tables whose PK/UNIQUE uniqueness is
+ *       preserved through the join tree.
+ *   R (row_preserving) - tables whose complete set of rows is guaranteed
+ *       to appear in the join result.  Stored as a plain List of RTEId*.
+ *   C (notnull_fk_chains) - pairs (A, B) with A != B meaning "A is
+ *       row-preserving and reaches B through NOT NULL FK joins".  Stored
+ *       as a flat List of alternating RTEId* pairs.
+ *
+ * Both result_chains and result_row_preserving are written as out-parameters.
  */
-static List *
-update_functional_dependencies(List *referencing_fds,
-							   RTEId *referencing_id,
-							   List *referenced_fds,
-							   RTEId *referenced_id,
-							   bool fk_cols_not_null,
-							   JoinType join_type,
-							   ForeignKeyDirection fk_dir)
+static void
+update_row_preserving(List *referencing_chains,
+					  List *referencing_row_preserving,
+					  RTEId *referencing_id,
+					  List *referenced_chains,
+					  List *referenced_row_preserving,
+					  RTEId *referenced_id,
+					  bool fk_cols_not_null,
+					  JoinType join_type,
+					  ForeignKeyDirection fk_dir,
+					  List **result_chains,
+					  List **result_row_preserving)
 {
-	List	   *result = NIL;
-	bool		referenced_has_self_dep = false;
-	bool		referencing_preserved_due_to_outer_join = false;
+	List	   *result_C = NIL;
+	List	   *result_R = NIL;
+	List	   *anchor_set = NIL;
+	List	   *target_set = NIL;
+	ListCell   *lc_anchor;
+	ListCell   *lc_target;
+	bool		preserves_referencing;
+	bool		preserves_referenced;
 
-	/*
-	 * Step 1: Add functional dependencies from the referencing relation when
-	 * an outer join preserves the referencing relation's tuples.
-	 */
-	if ((fk_dir == FKDIR_FROM && join_type == JOIN_LEFT) ||
-		(fk_dir == FKDIR_TO && join_type == JOIN_RIGHT) ||
-		join_type == JOIN_FULL)
+	/* Phase 1: Outer Join Preservation */
+	preserves_referencing = (join_type == JOIN_FULL ||
+							 (fk_dir == FKDIR_FROM && join_type == JOIN_LEFT) ||
+							 (fk_dir == FKDIR_TO && join_type == JOIN_RIGHT));
+
+	preserves_referenced = (join_type == JOIN_FULL ||
+							(fk_dir == FKDIR_TO && join_type == JOIN_LEFT) ||
+							(fk_dir == FKDIR_FROM && join_type == JOIN_RIGHT));
+
+	if (preserves_referencing)
 	{
-		result = list_concat(result, referencing_fds);
-		referencing_preserved_due_to_outer_join = true;
+		result_R = list_concat(result_R, referencing_row_preserving);
+		result_C = list_concat(result_C, referencing_chains);
+	}
+
+	if (preserves_referenced)
+	{
+		result_R = list_concat(result_R, referenced_row_preserving);
+		result_C = list_concat(result_C, referenced_chains);
 	}
 
 	/*
-	 * Step 2: Add functional dependencies from the referenced relation when
-	 * an outer join preserves the referenced relation's tuples.
+	 * We can only derive new chains across the FK relationship when the FK
+	 * columns are NOT NULL and the referenced side is row-preserving.  If
+	 * the FK columns are nullable, a referencing row with NULL FK values
+	 * won't match any referenced row.  If the referenced side is filtered
+	 * (not row-preserving), FK values might not find a match even when
+	 * non-null.
 	 */
-	if ((fk_dir == FKDIR_TO && join_type == JOIN_LEFT) ||
-		(fk_dir == FKDIR_FROM && join_type == JOIN_RIGHT) ||
-		join_type == JOIN_FULL)
+	if (!fk_cols_not_null ||
+		!list_member(referenced_row_preserving, referenced_id))
 	{
-		result = list_concat(result, referenced_fds);
+		*result_chains = result_C;
+		*result_row_preserving = result_R;
+		return;
 	}
 
 	/*
-	 * In the following steps we handle functional dependencies introduced by
-	 * inner joins. Even for outer joins, we must compute these dependencies
-	 * to predict which relations will preserve all their rows in subsequent
-	 * joins. Relations that appear as determinants in functional dependencies
-	 * (det, X) are guaranteed to preserve all their rows.
-	 */
-
-	/*
-	 * Step 3: If any foreign key column permits NULL values, we cannot
-	 * guarantee at compile time that all rows will be preserved in an inner
-	 * foreign key join. In this case, we cannot derive additional functional
-	 * dependencies and cannot infer which other relations will preserve all
-	 * their rows.
-	 */
-	if (!fk_cols_not_null)
-		return result;
-
-	/*
-	 * Step 4: Verify that the referenced relation preserves all its rows -
-	 * indicated by a self-dependency (referenced_id → referenced_id). This
-	 * self-dependency confirms that the referenced relation is a determinant
-	 * relation that preserves all its rows. Without this guarantee, we cannot
-	 * derive additional functional dependencies.
-	 */
-	for (int i = 0; i < list_length(referenced_fds); i += 2)
-	{
-		RTEId	   *det = list_nth(referenced_fds, i);
-		RTEId	   *dep = list_nth(referenced_fds, i + 1);
-
-		if (equal(det, referenced_id) && equal(dep, referenced_id))
-		{
-			referenced_has_self_dep = true;
-			break;
-		}
-	}
-
-	if (!referenced_has_self_dep)
-		return result;
-
-	/*
-	 * Step 5: Preserve inherited functional dependencies from the referencing
-	 * relation. Skip if the referencing relation is already fully preserved
-	 * by an outer join.
+	 * At this point the FK columns are NOT NULL and the referenced relation
+	 * preserves all rows.  Because every non-null FK value must find a match
+	 * in the referenced relation (that's what a foreign key constraint
+	 * guarantees), and we know the FK columns cannot be null, every
+	 * referencing row will successfully join.  This means every row that
+	 * reaches referencing_id from earlier in the join tree is preserved
+	 * through this join as well.
 	 *
-	 * At this point, we know that referencing_id will be preserved in the
-	 * join. We include all functional dependencies where referencing_id
-	 * appears as the dependent attribute (X → referencing_id). This
-	 * maintains the property that all determinant relations (X) will continue
-	 * to preserve all their rows after the join.
+	 * Build anchor_set: the set of tables that reach referencing_id via
+	 * chains, plus referencing_id itself if it is row-preserving.
 	 */
-	if (!referencing_preserved_due_to_outer_join)
+	for (int i = 0; i < list_length(referencing_chains); i += 2)
 	{
-		for (int i = 0; i < list_length(referencing_fds); i += 2)
+		RTEId	   *det = list_nth(referencing_chains, i);
+		RTEId	   *dep = list_nth(referencing_chains, i + 1);
+
+		if (equal(dep, referencing_id))
+			anchor_set = lappend(anchor_set, det);
+	}
+
+	if (list_member(referencing_row_preserving, referencing_id))
+		anchor_set = lappend(anchor_set, referencing_id);
+
+	/* Precompute target_set = {p} ∪ { Z : (p, Z) ∈ C_p } for step 3c */
+	target_set = list_make1(referenced_id);
+	for (int i = 0; i < list_length(referenced_chains); i += 2)
+	{
+		RTEId	   *det = list_nth(referenced_chains, i);
+		RTEId	   *dep = list_nth(referenced_chains, i + 1);
+
+		if (equal(det, referenced_id))
+			target_set = lappend(target_set, dep);
+	}
+
+	/*
+	 * R'_inherit: propagate row-preserving status for anchor_set members.
+	 * C'_inherit: propagate chains whose determinant is in anchor_set.
+	 *
+	 * Skip if an outer join already copied them above.
+	 *
+	 * Every member of anchor_set is guaranteed to be in R_f by the
+	 * invariant on C: each (A, f) pair in C_f implies A ∈ R_f, and f
+	 * is only added to anchor_set when f ∈ R_f (explicit guard above).
+	 */
+	if (!preserves_referencing)
+	{
+		/* R'_inherit = anchor_set */
+		result_R = list_concat(result_R, list_copy(anchor_set));
+
+		/* C'_inherit = { (A, Y) ∈ C_f : A ∈ anchor_set } */
+		for (int i = 0; i < list_length(referencing_chains); i += 2)
 		{
-			RTEId	   *referencing_det = list_nth(referencing_fds, i);
-			RTEId	   *referencing_dep = list_nth(referencing_fds, i + 1);
+			RTEId	   *det = list_nth(referencing_chains, i);
+			RTEId	   *dep = list_nth(referencing_chains, i + 1);
 
-			if (equal(referencing_dep, referencing_id))
+			if (list_member(anchor_set, det))
 			{
-				for (int j = 0; j < list_length(referencing_fds); j += 2)
-				{
-					RTEId	   *source_det = list_nth(referencing_fds, j);
-					RTEId	   *source_dep = list_nth(referencing_fds, j + 1);
-
-					if (equal(source_det, referencing_det))
-					{
-						result = lappend(result, source_det);
-						result = lappend(result, source_dep);
-					}
-				}
+				result_C = lappend(result_C, det);
+				result_C = lappend(result_C, dep);
 			}
 		}
 	}
 
 	/*
-	 * Step 6: Establish transitive functional dependencies by applying the
-	 * transitivity axiom across the foreign key relationship.
+	 * C'_extend = { (A, Y) : A ∈ anchor_set, Y ∈ target_set }
 	 *
-	 * By the Armstrong's axioms of functional dependencies, specifically
-	 * transitivity: If X → Y and Y → Z, then X → Z
-	 *
-	 * In our context, for each pair of dependencies: - X → referencing_id
-	 * (from referencing relation) - referenced_id → Z (from referenced
-	 * relation)
-	 *
-	 * We derive the transitive dependency: - X → Z
-	 *
-	 * This identifies that relation X is a determinant relation that will
-	 * preserve all its rows, and it now functionally determines relation Z as
-	 * well.
-	 *
-	 * This operation can be conceptualized as a join between two sets of
-	 * dependencies:
-	 *
-	 * SELECT referencing_fds.det AS new_det, referenced_fds.dep AS new_dep
-	 * FROM referencing_fds JOIN referenced_fds ON referencing_fds.dep =
-	 * referencing_id AND referenced_fds.det = referenced_id
-	 *
-	 * In formal set notation: Let R = {(X, Y)} be the set of referencing
-	 * functional dependencies Let S = {(A, B)} be the set of referenced
-	 * functional dependencies Let r = referencing_id Let s = referenced_id
-	 *
-	 * The new transitive dependencies are defined as:
-	 *
-	 * T = {(X, B) | (X, r) ∈ R ∧ (s, B) ∈ S}
-	 *
-	 * The correctness of this derivation relies on the fact that
-	 * referenced_id is preserved in this join (as verified in previous
-	 * steps). This preservation ensures that for each value of determinant X
-	 * that functionally determines referencing_id, there exists precisely one
-	 * value of dependent B associated with referenced_id, thereby
-	 * establishing X as a determinant relation that preserves all its rows
-	 * and functionally determines B.
+	 * Each table in anchor_set reaches referenced_id (guaranteed
+	 * row-preserving by the early return above), and transitively reaches
+	 * everything referenced_id reaches.  Form the cross product.
 	 */
-	for (int i = 0; i < list_length(referencing_fds); i += 2)
+	foreach(lc_anchor, anchor_set)
 	{
-		RTEId	   *referencing_det = list_nth(referencing_fds, i);
-		RTEId	   *referencing_dep = list_nth(referencing_fds, i + 1);
+		RTEId	   *a = (RTEId *) lfirst(lc_anchor);
 
-		if (equal(referencing_dep, referencing_id))
+		foreach(lc_target, target_set)
 		{
-			for (int j = 0; j < list_length(referenced_fds); j += 2)
-			{
-				RTEId	   *referenced_det = list_nth(referenced_fds, j);
-				RTEId	   *referenced_dep = list_nth(referenced_fds, j + 1);
-
-				if (equal(referenced_det, referenced_id))
-				{
-					result = lappend(result, referencing_det);
-					result = lappend(result, referenced_dep);
-				}
-			}
+			result_C = lappend(result_C, a);
+			result_C = lappend(result_C, (RTEId *) lfirst(lc_target));
 		}
 	}
 
-	return result;
+	*result_chains = result_C;
+	*result_row_preserving = result_R;
 }
