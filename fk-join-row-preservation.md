@@ -43,13 +43,14 @@ A join tree is built from:
 
 ### 2.2 Properties of a Node
 
-Each node `J` carries three sets computed bottom-up:
+Each node `J` carries four sets computed bottom-up:
 
 | Symbol | Name | Type | Meaning |
 |--------|------|------|---------|
 | **U** | uniqueness preservation | ⊆ T | Base tables whose primary/unique key uniqueness is preserved through the joins in J's subtree |
 | **R** | row-preserving set | ⊆ T | Base tables whose complete row set appears in J's result |
 | **C** | NOT NULL FK chains | ⊆ T × T | Binary relation where (A, B) ∈ C means A ∈ R and A reaches B through a directed path of NOT NULL FK joins, each step's referenced table being row-preserving at the time the step was processed |
+| **O** | outer rows | ⊆ T | Base tables whose columns may contain NULLs introduced by being on the inner side of an outer join within the subtree |
 
 where T is the universe of base table RTEIds in J's subtree.
 
@@ -79,12 +80,12 @@ relations — it initializes the properties as follows:
 enclosing derived relation's query has no WHERE, LIMIT, OFFSET, or
 HAVING):
 
-    U = {t},  R = {t},  C = ∅
+    U = {t},  R = {t},  C = ∅,  O = ∅
 
 **Filtered** (some enclosing derived relation applies WHERE, LIMIT,
 OFFSET, or HAVING):
 
-    U = {t},  R = ∅,  C = ∅
+    U = {t},  R = ∅,  C = ∅,  O = ∅
 
 Uniqueness is always preserved (filtering cannot break a unique
 constraint). Row preservation is lost because the enclosing query may
@@ -142,6 +143,46 @@ directly into the result:
 
 The outer join guarantee is unconditional — it does not depend on
 NOT NULL or FK properties.
+
+### Phase 1b — Outer Rows (O)
+
+Compute the outer-rows set for the combined node. This tracks which
+base tables may have "ghost" rows with NULL-filled columns introduced
+by outer joins within the subtree.
+
+**Propagate** from both inputs:
+
+    O' = O_f ∪ O_p
+
+**Clear** — the inner side of the join filters ghost rows for the
+specific base table in the FK equi-join condition. Ghost rows have
+NULLs in *all* of that table's columns (including the join column),
+so they cannot match the equi-join and are eliminated. Only the
+table named in the join condition is cleared; other tables in O
+may have NULLs in non-join columns and their ghost rows can survive:
+
+    if ¬outer_preserves(referencing, τ, δ):  O' = O' \ {f}
+    if ¬outer_preserves(referenced, τ, δ):   O' = O' \ {p}
+
+**Add** — the preserved (outer) side of an outer join introduces new
+ghost rows on the inner side. When all FK columns are NOT NULL, the
+FK guarantee ensures every referencing row matches a referenced row,
+so no ghost rows appear on the referenced side:
+
+    if outer_preserves(referenced, τ, δ):                O' = O' ∪ {f}
+    if outer_preserves(referencing, τ, δ) ∧ ¬nn:         O' = O' ∪ {p}
+
+Summary of the net effect on f and p after clear + add:
+
+| τ | f in O'? | p in O'? |
+|---|-----------|-----------|
+| INNER | cleared | cleared |
+| LEFT (referencing preserved) | cleared | added if ¬nn, else cleared |
+| LEFT (referenced preserved) | added | cleared |
+| RIGHT | mirror of LEFT | mirror of LEFT |
+| FULL | added | added if ¬nn, else inherited |
+
+(Plus any entries inherited from O_f ∪ O_p for other base tables.)
 
 ### Phase 2 — Guard Condition
 
@@ -279,6 +320,26 @@ for (p, Y) ∈ C_p extends the path through p; by the inductive
 hypothesis on J_p, the chain p → ... → Y was valid, and prepending
 the path from A through f to p preserves validity.
 
+### Outer Rows (O)
+
+- **Base case.** O = ∅ is trivially correct: a single base table has
+  no joins, so no outer join can have introduced ghost rows.
+
+- **Clear step.** When a side is inner (not preserved), the FK
+  equi-join filters rows where the join column is NULL. Ghost rows
+  for a base table have NULLs in *all* of that table's columns
+  (including the join column), so they cannot match the equi-join
+  and are eliminated. Removing the table from O is correct.
+
+- **Add step.** When a side is preserved (outer), unmatched rows from
+  the other side produce ghost rows with all-NULL columns on the
+  inner side. Adding the inner-side base table to O is correct.
+  Exception: when the FK columns carry NOT NULL constraints and the
+  referencing side is preserved, every referencing row has a non-null
+  FK value and the FK constraint guarantees a match exists. Therefore
+  no unmatched referencing rows exist and no ghost rows appear on the
+  referenced side.
+
 **Selective inheritance.** Tables in R_f that are *not* in `anchor_set`
 are correctly excluded from R'. Such a table B has no NOT NULL FK
 chain to f. An inner join on f's FK columns may drop rows of B (when
@@ -387,7 +448,7 @@ consequences follow:
 
 At the top level, `transformAndValidateForeignKeyJoin` invokes the
 recursive `analyze_join_tree` on each side of the FK join and then
-checks two conditions on the referenced side:
+checks three conditions on the referenced side:
 
 1. **p ∈ U** — the referenced base table's uniqueness is preserved
    through all joins in the referenced subtree. This ensures the
@@ -397,8 +458,13 @@ checks two conditions on the referenced side:
    in the referenced subtree's result. This ensures every valid FK
    value will find its match.
 
+3. **p ∉ O** — the referenced base table's columns are not subject
+   to NULL introduction from outer joins within the derived relation.
+   Ghost rows with NULL key columns violate the PK-like invariant
+   (unique and not null) that the FK join depends on.
+
 For base tables accessed directly (not through a derived relation),
-both conditions hold trivially and the checks are skipped.
+all three conditions hold trivially and the checks are skipped.
 
 These conditions are necessary for the FK constraint's guarantee
 ("every non-null FK value references an existing row") to hold
