@@ -226,8 +226,10 @@ SELECT q.a, q.b, q.c FROM
 ) q
 JOIN t_fk_ab FOR KEY (fk_a, fk_b) -> q (a, b)
 ORDER BY q.a, q.b;
-ERROR:  foreign key join violation
-LINE 8: JOIN t_fk_ab FOR KEY (fk_a, fk_b) -> q (a, b)
-                     ^
-DETAIL:  referenced relation does not preserve uniqueness of keys
+ a | b | c  
+---+---+----
+ 1 | 2 | 10
+ 3 | 4 | 20
+(2 rows)
+
 DROP TABLE t_fk_ab, t_pk_ab;

@@ -1406,9 +1406,9 @@ check_unique_index_covers_columns(Relation rel, Bitmapset *columns)
 
 		index_close(indexRel, AccessShareLock);
 
-		/* Check if the index columns are a superset of our required columns */
+		/* Check if GROUP BY columns cover all unique index columns */
 		elog(DEBUG1, "check_unique_index_covers_columns: checking if index covers required columns");
-		if (bms_is_subset(columns, index_cols))
+		if (bms_is_subset(index_cols, columns))
 		{
 			elog(DEBUG1, "check_unique_index_covers_columns: MATCH! Index covers all required columns");
 			result = true;
