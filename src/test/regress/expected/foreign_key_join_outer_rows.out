@@ -62,7 +62,7 @@ LEFT JOIN fko_fk_notnull FOR KEY (fk_id) -> q (ref_id);
 ERROR:  foreign key join violation
 LINE 7: LEFT JOIN fko_fk_notnull FOR KEY (fk_id) -> q (ref_id);
                                  ^
-DETAIL:  referenced relation may contain NULL values from outer joins
+DETAIL:  NULL values may be introduced into the referenced relation's key columns
 -- COUNT variant: should also error
 SELECT COUNT(*)
 FROM (
@@ -74,7 +74,7 @@ LEFT JOIN fko_fk_notnull FOR KEY (fk_id) -> q (ref_id);
 ERROR:  foreign key join violation
 LINE 7: LEFT JOIN fko_fk_notnull FOR KEY (fk_id) -> q (ref_id);
                                  ^
-DETAIL:  referenced relation may contain NULL values from outer joins
+DETAIL:  NULL values may be introduced into the referenced relation's key columns
 -- INNER FK join variant: should also error (even though NULLs happen
 -- to be filtered by equi-join, the referenced side is still invalid)
 SELECT COUNT(*)
@@ -87,7 +87,7 @@ JOIN fko_fk_notnull FOR KEY (fk_id) -> q (ref_id);
 ERROR:  foreign key join violation
 LINE 7: JOIN fko_fk_notnull FOR KEY (fk_id) -> q (ref_id);
                             ^
-DETAIL:  referenced relation may contain NULL values from outer joins
+DETAIL:  NULL values may be introduced into the referenced relation's key columns
 -- ============================================================
 -- Section C2: No false positives — referenced on preserved side
 -- ============================================================
@@ -168,7 +168,7 @@ JOIN fko_clear_d d FOR KEY (b_id) -> sub (b_id);
 ERROR:  foreign key join violation
 LINE 7: JOIN fko_clear_d d FOR KEY (b_id) -> sub (b_id);
                            ^
-DETAIL:  referenced relation may contain NULL values from outer joins
+DETAIL:  NULL values may be introduced into the referenced relation's key columns
 -- E3: LEFT JOIN followed by LEFT JOIN — b stays in O because b's side
 -- is preserved by the second LEFT JOIN.  The Clear step only fires when
 -- a side is NOT preserved (inner), so ghost rows for b survive.
@@ -183,7 +183,7 @@ JOIN fko_clear_d d FOR KEY (b_id) -> sub (b_id);
 ERROR:  foreign key join violation
 LINE 8: JOIN fko_clear_d d FOR KEY (b_id) -> sub (b_id);
                            ^
-DETAIL:  referenced relation may contain NULL values from outer joins
+DETAIL:  NULL values may be introduced into the referenced relation's key columns
 DROP TABLE fko_clear_d;
 DROP TABLE fko_clear_b;
 DROP TABLE fko_clear_c;

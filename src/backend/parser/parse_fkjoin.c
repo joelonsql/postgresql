@@ -77,16 +77,16 @@ static void update_row_preserving(List *referencing_chains,
 								  ForeignKeyDirection fk_dir,
 								  List **result_chains,
 								  List **result_row_preserving,
-								  List *referencing_outer_rows,
-								  List *referenced_outer_rows,
-								  List **result_outer_rows);
+								  List *referencing_null_injected_keys,
+								  List *referenced_null_injected_keys,
+								  List **result_null_injected_keys);
 static void analyze_join_tree(ParseState *pstate, Node *n,
 							  Query *query,
 							  RTEId *rte_id,
 							  List **uniqueness_preservation,
 							  List **notnull_fk_chains,
 							  List **row_preserving,
-							  List **outer_rows,
+							  List **null_injected_keys,
 							  bool *found,
 							  int location,
 							  QueryStack *query_stack);
@@ -110,11 +110,11 @@ transformAndValidateForeignKeyJoin(ParseState *pstate, JoinExpr *join,
 	List	   *referencing_uniqueness_preservation = NIL;
 	List	   *referencing_notnull_fk_chains = NIL;
 	List	   *referencing_row_preserving = NIL;
-	List	   *referencing_outer_rows = NIL;
+	List	   *referencing_null_injected_keys = NIL;
 	List	   *referenced_uniqueness_preservation = NIL;
 	List	   *referenced_notnull_fk_chains = NIL;
 	List	   *referenced_row_preserving = NIL;
-	List	   *referenced_outer_rows = NIL;
+	List	   *referenced_null_injected_keys = NIL;
 	Node	   *referencing_arg;
 	Node	   *referenced_arg;
 	List	   *referencing_base_attnums;
@@ -296,11 +296,11 @@ transformAndValidateForeignKeyJoin(ParseState *pstate, JoinExpr *join,
 						column_list_to_string(referenced_cols)),
 				 parser_errposition(pstate, fkjn->location)));
 
-	analyze_join_tree(pstate, referencing_arg, NULL, referencing_rte->rteid, &referencing_uniqueness_preservation, &referencing_notnull_fk_chains, &referencing_row_preserving, &referencing_outer_rows, &referencing_found, fkjn->location, NULL);
+	analyze_join_tree(pstate, referencing_arg, NULL, referencing_rte->rteid, &referencing_uniqueness_preservation, &referencing_notnull_fk_chains, &referencing_row_preserving, &referencing_null_injected_keys, &referencing_found, fkjn->location, NULL);
 
 	/* Only analyze referenced side for derived tables - base tables always preserve uniqueness/rows */
 	if (!referenced_is_base_table)
-		analyze_join_tree(pstate, referenced_arg, NULL, referenced_rte->rteid, &referenced_uniqueness_preservation, &referenced_notnull_fk_chains, &referenced_row_preserving, &referenced_outer_rows, &referenced_found, fkjn->location, NULL);
+		analyze_join_tree(pstate, referenced_arg, NULL, referenced_rte->rteid, &referenced_uniqueness_preservation, &referenced_notnull_fk_chains, &referenced_row_preserving, &referenced_null_injected_keys, &referenced_found, fkjn->location, NULL);
 
 	/*
 	 * Check uniqueness preservation - only for derived tables.
@@ -338,18 +338,19 @@ transformAndValidateForeignKeyJoin(ParseState *pstate, JoinExpr *join,
 
 	/*
 	 * Check that the referenced relation's key columns are not subject to
-	 * NULL introduction from outer joins within the derived relation.  An
-	 * outer join can produce "ghost" rows where the inner side's columns
-	 * are all NULL, which violates the assumption that the referenced side
-	 * behaves like a primary key (unique and not null).
+	 * NULL introduction within the derived relation.  Outer joins can
+	 * produce "ghost" rows where the inner side's columns are all NULL,
+	 * and GROUP BY on a nullable UNIQUE column can collapse NULLs into a
+	 * single group.  Either case violates the assumption that the
+	 * referenced side behaves like a primary key (unique and not null).
 	 */
 	if (!referenced_is_base_table &&
-		list_member(referenced_outer_rows, referenced_id))
+		list_member(referenced_null_injected_keys, referenced_id))
 	{
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_FOREIGN_KEY),
 				 errmsg("foreign key join violation"),
-				 errdetail("referenced relation may contain NULL values from outer joins"),
+				 errdetail("NULL values may be introduced into the referenced relation's key columns"),
 				 parser_errposition(pstate, fkjn->location)));
 	}
 
@@ -416,7 +417,7 @@ analyze_join_tree(ParseState *pstate, Node *n,
 				  List **uniqueness_preservation,
 				  List **notnull_fk_chains,
 				  List **row_preserving,
-				  List **outer_rows,
+				  List **null_injected_keys,
 				  bool *found,
 				  int location,
 				  QueryStack *query_stack)
@@ -426,11 +427,11 @@ analyze_join_tree(ParseState *pstate, Node *n,
 	List	   *referencing_uniqueness_preservation = NIL;
 	List	   *referencing_notnull_fk_chains = NIL;
 	List	   *referencing_row_preserving = NIL;
-	List	   *referencing_outer_rows = NIL;
+	List	   *referencing_null_injected_keys = NIL;
 	List	   *referenced_uniqueness_preservation = NIL;
 	List	   *referenced_notnull_fk_chains = NIL;
 	List	   *referenced_row_preserving = NIL;
-	List	   *referenced_outer_rows = NIL;
+	List	   *referenced_null_injected_keys = NIL;
 	List	   *referencing_base_attnums;
 	List	   *referenced_base_attnums;
 	RangeTblEntry *base_referencing_rte;
@@ -482,8 +483,8 @@ analyze_join_tree(ParseState *pstate, Node *n,
 				referencing_rte = rt_fetch(fkjn->referencingVarno, rtable);
 				referenced_rte = rt_fetch(fkjn->referencedVarno, rtable);
 
-				analyze_join_tree(pstate, referencing_arg, query, rte_id, &referencing_uniqueness_preservation, &referencing_notnull_fk_chains, &referencing_row_preserving, &referencing_outer_rows, &referencing_found, location, query_stack);
-				analyze_join_tree(pstate, referenced_arg, query, rte_id, &referenced_uniqueness_preservation, &referenced_notnull_fk_chains, &referenced_row_preserving, &referenced_outer_rows, &referenced_found, location, query_stack);
+				analyze_join_tree(pstate, referencing_arg, query, rte_id, &referencing_uniqueness_preservation, &referencing_notnull_fk_chains, &referencing_row_preserving, &referencing_null_injected_keys, &referencing_found, location, query_stack);
+				analyze_join_tree(pstate, referenced_arg, query, rte_id, &referenced_uniqueness_preservation, &referenced_notnull_fk_chains, &referenced_row_preserving, &referenced_null_injected_keys, &referenced_found, location, query_stack);
 
 				base_referencing_rte = drill_down_to_base_rel(pstate, referencing_rte,
 															  fkjn->referencingAttnums,
@@ -519,9 +520,9 @@ analyze_join_tree(ParseState *pstate, Node *n,
 									 fkjn->fkdir,
 									 notnull_fk_chains,
 									 row_preserving,
-									 referencing_outer_rows,
-									 referenced_outer_rows,
-									 outer_rows);
+									 referencing_null_injected_keys,
+									 referenced_null_injected_keys,
+									 null_injected_keys);
 
 				/* Set found based on whether rte_id was in either subtree or matches either relation */
 				if (referencing_found || referenced_found ||
@@ -618,7 +619,7 @@ analyze_join_tree(ParseState *pstate, Node *n,
 
 						analyze_join_tree(pstate,
 										  (Node *) linitial(inner_query->jointree->fromlist),
-										  inner_query, rte_id, uniqueness_preservation, notnull_fk_chains, row_preserving, outer_rows, found, location,
+										  inner_query, rte_id, uniqueness_preservation, notnull_fk_chains, row_preserving, null_injected_keys, found, location,
 										  &new_stack);
 
 						/*
@@ -1668,13 +1669,13 @@ update_row_preserving(List *referencing_chains,
 					  ForeignKeyDirection fk_dir,
 					  List **result_chains,
 					  List **result_row_preserving,
-					  List *referencing_outer_rows,
-					  List *referenced_outer_rows,
-					  List **result_outer_rows)
+					  List *referencing_null_injected_keys,
+					  List *referenced_null_injected_keys,
+					  List **result_null_injected_keys)
 {
 	List	   *result_C = NIL;
 	List	   *result_R = NIL;
-	List	   *result_O = NIL;
+	List	   *result_N = NIL;
 	List	   *anchor_set = NIL;
 	List	   *target_set = NIL;
 	ListCell   *lc_anchor;
@@ -1704,15 +1705,15 @@ update_row_preserving(List *referencing_chains,
 	}
 
 	/*
-	 * Phase 1b: Outer-rows (NULL introduction) tracking.
+	 * Phase 1b: Null-injected-keys (NULL introduction) tracking.
 	 *
-	 * Start by propagating each side's outer_rows.  Then clear entries
-	 * for tables whose ghost rows are filtered by the join's inner
-	 * side: the FK equi-join condition ensures NULL join columns never
-	 * match, so ghost rows for the specific base table in the join
-	 * condition are eliminated.  Only that table is cleared — other
-	 * tables in outer_rows may have NULLs in non-join columns and
-	 * their ghost rows can survive.
+	 * Start by propagating each side's null_injected_keys.  Then clear
+	 * entries for tables whose ghost rows are filtered by the join's
+	 * inner side: the FK equi-join condition ensures NULL join columns
+	 * never match, so ghost rows for the specific base table in the
+	 * join condition are eliminated.  Only that table is cleared —
+	 * other tables in null_injected_keys may have NULLs in non-join columns
+	 * and their ghost rows can survive.
 	 *
 	 * Finally, the preserved (outer) side of an outer join may
 	 * introduce NEW ghost rows on the inner side.  When all FK columns
@@ -1720,25 +1721,25 @@ update_row_preserving(List *referencing_chains,
 	 * matches a referenced row, so no ghost rows are produced on the
 	 * referenced side.
 	 */
-	result_O = list_concat(list_copy(referencing_outer_rows),
-							list_copy(referenced_outer_rows));
+	result_N = list_concat(list_copy(referencing_null_injected_keys),
+							list_copy(referenced_null_injected_keys));
 
 	/* Clear: inner side's ghost rows filtered by FK equi-join */
 	if (!preserves_referencing)
-		result_O = list_delete(result_O, referencing_id);
+		result_N = list_delete(result_N, referencing_id);
 	if (!preserves_referenced)
-		result_O = list_delete(result_O, referenced_id);
+		result_N = list_delete(result_N, referenced_id);
 
 	/* Add: preserved side may introduce new ghost rows on inner side */
 	if (preserves_referenced &&
-		!list_member(result_O, referencing_id))
-		result_O = lappend(result_O, referencing_id);
+		!list_member(result_N, referencing_id))
+		result_N = lappend(result_N, referencing_id);
 	if (preserves_referencing &&
 		!fk_cols_not_null &&
-		!list_member(result_O, referenced_id))
-		result_O = lappend(result_O, referenced_id);
+		!list_member(result_N, referenced_id))
+		result_N = lappend(result_N, referenced_id);
 
-	*result_outer_rows = result_O;
+	*result_null_injected_keys = result_N;
 
 	/*
 	 * We can only derive new chains across the FK relationship when the FK
