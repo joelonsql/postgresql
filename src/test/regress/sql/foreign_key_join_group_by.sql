@@ -166,3 +166,35 @@ SELECT * FROM
 ) q JOIN t5 FOR KEY (t5_t4_id_1, t5_t4_id_2) -> q (t4_id_1, t4_id_2);
 
 DROP TABLE t1, t2, t3, t4, t5;
+
+CREATE TABLE t_pk_ab
+(
+    a INT NOT NULL,
+    b INT NOT NULL,
+    c INT NOT NULL,
+    PRIMARY KEY (a, b)
+);
+
+CREATE TABLE t_fk_ab
+(
+    id INT NOT NULL PRIMARY KEY,
+    fk_a INT NOT NULL,
+    fk_b INT NOT NULL,
+    FOREIGN KEY (fk_a, fk_b) REFERENCES t_pk_ab (a, b)
+);
+
+INSERT INTO t_pk_ab VALUES (1, 2, 10), (3, 4, 20);
+INSERT INTO t_fk_ab VALUES (100, 1, 2), (200, 3, 4);
+
+-- ok: GROUP BY a, b, c with PK(a, b) — superset of PK preserves uniqueness
+SELECT q.a, q.b, q.c FROM
+(
+    SELECT t_pk_ab.a, t_pk_ab.b, t_pk_ab.c
+    FROM t_pk_ab
+    LEFT JOIN t_fk_ab FOR KEY (fk_a, fk_b) -> t_pk_ab (a, b)
+    GROUP BY t_pk_ab.a, t_pk_ab.b, t_pk_ab.c
+) q
+JOIN t_fk_ab FOR KEY (fk_a, fk_b) -> q (a, b)
+ORDER BY q.a, q.b;
+
+DROP TABLE t_fk_ab, t_pk_ab;
