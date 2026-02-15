@@ -199,6 +199,54 @@ SELECT * FROM
 ERROR:  all key columns must belong to the same table
 LINE 8: ) q JOIN t5 FOR KEY (t5_t4_id_1, t5_t4_id_2) -> q (t4_id_1, ...
                     ^
+-- error: expression in GROUP BY prevents uniqueness preservation check
+-- The FK column (t1_id) is a simple column ref, but the additional GROUP BY
+-- expression (t1_id + 1) causes check_group_by_preserves_uniqueness to reject
+-- because RTE_GROUP contains a non-Var groupexpr
+SELECT q.t1_id FROM
+(
+    SELECT t1.t1_id, t1.t1_id + 1 AS expr_col
+    FROM t1
+    LEFT JOIN t2 FOR KEY (t2_t1_id) -> t1 (t1_id)
+    GROUP BY t1.t1_id, t1.t1_id + 1
+) q
+JOIN t3 FOR KEY (t3_t1_id) -> q (t1_id);
+ERROR:  foreign key join violation
+LINE 8: JOIN t3 FOR KEY (t3_t1_id) -> q (t1_id);
+                ^
+DETAIL:  referenced relation does not preserve uniqueness of keys
+-- error: GROUP BY columns from different base tables
+-- The FK column (t1_id) resolves to t1, but the GROUP BY also includes
+-- t2.t2_id which is from a different base table, causing
+-- check_group_by_preserves_uniqueness to reject (mixed varnos in groupexprs)
+SELECT q.t1_id FROM
+(
+    SELECT t1.t1_id, t2.t2_id
+    FROM t1
+    LEFT JOIN t2 FOR KEY (t2_t1_id) -> t1 (t1_id)
+    GROUP BY t1.t1_id, t2.t2_id
+) q
+JOIN t3 FOR KEY (t3_t1_id) -> q (t1_id);
+ERROR:  foreign key join violation
+LINE 8: JOIN t3 FOR KEY (t3_t1_id) -> q (t1_id);
+                ^
+DETAIL:  referenced relation does not preserve uniqueness of keys
+-- error: GROUP BY on subquery column (underlying RTE is not a base relation)
+-- The inner query groups on s.t1_id where s is a subquery, not a base table.
+-- check_group_by_preserves_uniqueness rejects because the underlying RTE
+-- referenced by the groupexpr is RTE_SUBQUERY, not RTE_RELATION
+SELECT q.t1_id FROM
+(
+    SELECT s.t1_id
+    FROM (SELECT t1_id FROM t1) s
+    LEFT JOIN t2 FOR KEY (t2_t1_id) -> s (t1_id)
+    GROUP BY s.t1_id
+) q
+JOIN t3 FOR KEY (t3_t1_id) -> q (t1_id);
+ERROR:  foreign key join violation
+LINE 8: JOIN t3 FOR KEY (t3_t1_id) -> q (t1_id);
+                ^
+DETAIL:  referenced relation does not preserve uniqueness of keys
 DROP TABLE t1, t2, t3, t4, t5;
 CREATE TABLE t_pk_ab
 (
@@ -262,3 +310,38 @@ JOIN t_fk_nu FOR KEY (fk_id) -> t_nu (id);
 
 DROP TABLE t_fk_nu;
 DROP TABLE t_nu;
+-- ============================================================
+-- Non-PK UNIQUE NOT NULL: exercises skipping non-unique indexes
+-- and matching a non-PK unique index where all columns are NOT NULL
+-- ============================================================
+-- Create non-unique index FIRST so it has a lower OID and is iterated first
+CREATE TABLE t_uq_nn (
+    id INT,
+    val INT NOT NULL
+);
+CREATE INDEX t_uq_nn_nonunique ON t_uq_nn(id, val);
+ALTER TABLE t_uq_nn ADD PRIMARY KEY (id);
+ALTER TABLE t_uq_nn ADD UNIQUE (val);
+CREATE TABLE t_fk_uq_nn (
+    fk_val INT NOT NULL REFERENCES t_uq_nn(val)
+);
+INSERT INTO t_uq_nn VALUES (1, 10), (2, 20), (3, 30);
+INSERT INTO t_fk_uq_nn VALUES (10), (20);
+-- ok: GROUP BY on NOT NULL UNIQUE (non-PK) column
+-- Exercises: skip non-unique index, skip PK (doesn't cover val),
+-- match non-PK unique index where val is NOT NULL
+SELECT q.val FROM
+(
+    SELECT val FROM t_uq_nn
+    LEFT JOIN t_fk_uq_nn FOR KEY (fk_val) -> t_uq_nn (val)
+    GROUP BY val
+) q
+JOIN t_fk_uq_nn FOR KEY (fk_val) -> q (val);
+ val 
+-----
+  10
+  20
+(2 rows)
+
+DROP INDEX t_uq_nn_nonunique;
+DROP TABLE t_fk_uq_nn, t_uq_nn;
