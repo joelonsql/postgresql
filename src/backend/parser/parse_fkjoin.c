@@ -1141,238 +1141,97 @@ drill_down_to_base_rel_query(ParseState *pstate, Query *query,
 /*
  * check_group_by_preserves_uniqueness
  *		Check if a GROUP BY clause preserves uniqueness by verifying that
- *		the GROUP BY columns form a unique key in the underlying base table.
- *		If uniqueness is preserved, adds the base table's rteid to the
- *		uniqueness_preservation list.  If the grouped columns include any
- *		nullable column, adds the base table to null_injected_keys (when
- *		non-NULL) because GROUP BY collapses all NULLs into one group,
- *		injecting a NULL key value that may not exist in the base data.
+ *		the grouped columns cover a unique index on the underlying base table.
+ *
+ *		On success, sets *uniqueness_preservation to {base_rteid} (GROUP BY
+ *		collapses rows across all tables, so only one table can remain unique).
+ *		If any grouped column is nullable, appends base_rteid to
+ *		*null_injected_keys because GROUP BY collapses all NULLs into one
+ *		group, injecting a NULL key value that may not exist in the base data.
+ *
+ *		Caller guarantees query->groupClause is non-empty.  PG17+ guarantees
+ *		query->hasGroupRTE is set, meaning an RTE_GROUP entry exists in the
+ *		range table whose groupexprs list contains the actual GROUP BY
+ *		expressions (Vars referencing the underlying base relation).
  */
 static bool
 check_group_by_preserves_uniqueness(Query *query, List **uniqueness_preservation,
 									List **null_injected_keys)
 {
+	RangeTblEntry *group_rte = NULL;
+	RangeTblEntry *base_rte;
+	Index		underlying_varno = 0;
+	Bitmapset  *columns = NULL;
 	ListCell   *lc;
-	Bitmapset  *group_cols = NULL;
-	Index		group_varno = 0;
-	RangeTblEntry *base_rte = NULL;
 	Relation	rel;
-	bool		result = false;
-	RTEId	   *base_rteid = NULL;
+	bool		all_cols_not_null;
+	bool		result;
 
+	Assert(query->groupClause);
+	Assert(query->hasGroupRTE);
 	Assert(null_injected_keys != NULL);
 
-	elog(DEBUG1, "check_group_by_preserves_uniqueness: entering");
-
-	/* Must have GROUP BY clause */
-	if (!query->groupClause)
+	/* Find the RTE_GROUP entry in the range table */
+	foreach(lc, query->rtable)
 	{
-		elog(DEBUG1, "check_group_by_preserves_uniqueness: no GROUP BY clause");
+		RangeTblEntry *rte = lfirst_node(RangeTblEntry, lc);
+
+		if (rte->rtekind == RTE_GROUP)
+		{
+			group_rte = rte;
+			break;
+		}
+	}
+	Assert(group_rte != NULL);
+
+	/*
+	 * Walk the RTE_GROUP's groupexprs to find the underlying base relation
+	 * and collect the set of grouped column attnos.  Every expression must be
+	 * a simple Var referencing the same relation.
+	 */
+	foreach(lc, group_rte->groupexprs)
+	{
+		Node	   *expr = (Node *) lfirst(lc);
+		Var		   *v;
+
+		if (!IsA(expr, Var))
+			return false;
+
+		v = (Var *) expr;
+
+		if (underlying_varno == 0)
+			underlying_varno = v->varno;
+		else if (underlying_varno != v->varno)
+			return false;
+
+		columns = bms_add_member(columns, v->varattno);
+	}
+
+	/* The underlying RTE must be a base relation */
+	base_rte = rt_fetch(underlying_varno, query->rtable);
+	if (base_rte->rtekind != RTE_RELATION)
+	{
+		bms_free(columns);
 		return false;
 	}
 
-	/*
-	 * Build bitmapset of GROUP BY columns and find which relation they belong
-	 * to
-	 */
-	elog(DEBUG1, "check_group_by_preserves_uniqueness: processing %d GROUP BY clauses", list_length(query->groupClause));
-	foreach(lc, query->groupClause)
+	/* Check if the grouped columns cover a unique index */
+	rel = table_open(base_rte->relid, AccessShareLock);
+	result = check_unique_index_covers_columns(rel, columns, &all_cols_not_null);
+	table_close(rel, AccessShareLock);
+	bms_free(columns);
+
+	if (result)
 	{
-		SortGroupClause *sgc = lfirst_node(SortGroupClause, lc);
-		TargetEntry *tle = list_nth_node(TargetEntry,
-										 query->targetList,
-										 sgc->tleSortGroupRef - 1);
-
-		elog(DEBUG1, "check_group_by_preserves_uniqueness: examining target entry %s", tle->resname ? tle->resname : "(unnamed)");
-
-		/* Only consider simple column references */
-		if (IsA(tle->expr, Var))
-		{
-			Var		   *v = (Var *) tle->expr;
-
-			elog(DEBUG1, "check_group_by_preserves_uniqueness: found Var with varno=%d, varattno=%d", v->varno, v->varattno);
-
-			/* All GROUP BY columns must be from the same relation */
-			if (group_varno == 0)
-				group_varno = v->varno;
-			else if (group_varno != v->varno)
-			{
-				/*
-				 * Mixed relations in GROUP BY - can't determine uniqueness
-				 * easily
-				 */
-				elog(DEBUG1, "check_group_by_preserves_uniqueness: mixed relations in GROUP BY (varno %d vs %d)", group_varno, v->varno);
-				bms_free(group_cols);
-				return false;
-			}
-
-			group_cols = bms_add_member(group_cols, v->varattno);
-		}
-		else
-		{
-			elog(DEBUG1, "check_group_by_preserves_uniqueness: GROUP BY expression is not a simple Var (node type %d)", nodeTag(tle->expr));
-		}
-	}
-
-	/* If we don't have any valid GROUP BY columns, can't preserve uniqueness */
-	if (bms_is_empty(group_cols) || group_varno == 0)
-	{
-		elog(DEBUG1, "check_group_by_preserves_uniqueness: no valid GROUP BY columns found");
-		bms_free(group_cols);
-		return false;
-	}
-
-	elog(DEBUG1, "check_group_by_preserves_uniqueness: found GROUP BY columns from varno=%d", group_varno);
-
-	/* Get the RTE for the grouped relation */
-	base_rte = rt_fetch(group_varno, query->rtable);
-
-	elog(DEBUG1, "check_group_by_preserves_uniqueness: examining RTE (rtekind=%d, relid=%u)", base_rte->rtekind, base_rte->relid);
-
-	/*
-	 * If this is an RTE_GROUP, we need to look at the underlying relation.
-	 * The GROUP BY expressions should point to the base relation that's being
-	 * grouped.
-	 */
-	if (base_rte->rtekind == RTE_GROUP)
-	{
-		elog(DEBUG1, "check_group_by_preserves_uniqueness: found RTE_GROUP, examining groupexprs");
+		*uniqueness_preservation = list_make1(base_rte->rteid);
 
 		/*
-		 * For RTE_GROUP, look at the groupexprs to find which base relation
-		 * and columns are actually being grouped.
+		 * If any grouped column is nullable, record it so the caller can
+		 * reject using this relation as the referenced side of an FK join.
 		 */
-		if (base_rte->groupexprs && list_length(base_rte->groupexprs) > 0)
-		{
-			ListCell   *grp_lc;
-			Index		underlying_varno = 0;
-			Bitmapset  *underlying_cols = NULL;
-
-			elog(DEBUG1, "check_group_by_preserves_uniqueness: RTE_GROUP has %d groupexprs", list_length(base_rte->groupexprs));
-
-			/* Examine each GROUP BY expression */
-			foreach(grp_lc, base_rte->groupexprs)
-			{
-				Node	   *expr = (Node *) lfirst(grp_lc);
-
-				if (IsA(expr, Var))
-				{
-					Var		   *v = (Var *) expr;
-
-					elog(DEBUG1, "check_group_by_preserves_uniqueness: groupexpr Var varno=%d, varattno=%d", v->varno, v->varattno);
-
-					/*
-					 * All expressions should reference the same underlying
-					 * relation
-					 */
-					if (underlying_varno == 0)
-						underlying_varno = v->varno;
-					else if (underlying_varno != v->varno)
-					{
-						elog(DEBUG1, "check_group_by_preserves_uniqueness: mixed varnos in groupexprs");
-						bms_free(underlying_cols);
-						bms_free(group_cols);
-						return false;
-					}
-
-					underlying_cols = bms_add_member(underlying_cols, v->varattno);
-				}
-				else
-				{
-					elog(DEBUG1, "check_group_by_preserves_uniqueness: groupexpr is not a Var");
-					bms_free(underlying_cols);
-					bms_free(group_cols);
-					return false;
-				}
-			}
-
-			if (underlying_varno > 0)
-			{
-				RangeTblEntry *underlying_rte = rt_fetch(underlying_varno, query->rtable);
-
-				elog(DEBUG1, "check_group_by_preserves_uniqueness: underlying relation varno=%d, rtekind=%d, relid=%u",
-					 underlying_varno, underlying_rte->rtekind, underlying_rte->relid);
-
-				if (underlying_rte->rtekind == RTE_RELATION && underlying_rte->relid != InvalidOid)
-				{
-					base_rte = underlying_rte;
-					base_rteid = underlying_rte->rteid;
-					/* Replace group_cols with the actual underlying columns */
-					bms_free(group_cols);
-					group_cols = underlying_cols;
-					elog(DEBUG1, "check_group_by_preserves_uniqueness: using underlying base relation and remapped columns");
-				}
-				else
-				{
-					elog(DEBUG1, "check_group_by_preserves_uniqueness: underlying RTE is not a base relation");
-					bms_free(underlying_cols);
-					bms_free(group_cols);
-					return false;
-				}
-			}
-			else
-			{
-				elog(DEBUG1, "check_group_by_preserves_uniqueness: no valid underlying varno found");
-				bms_free(underlying_cols);
-				bms_free(group_cols);
-				return false;
-			}
-		}
-		else
-		{
-			elog(DEBUG1, "check_group_by_preserves_uniqueness: RTE_GROUP has no groupexprs");
-			bms_free(group_cols);
-			return false;
-		}
-	}
-	/* Must be a base relation, not a subquery or other type */
-	else if (base_rte->rtekind != RTE_RELATION || base_rte->relid == InvalidOid)
-	{
-		elog(DEBUG1, "check_group_by_preserves_uniqueness: RTE is not a base relation (rtekind=%d, relid=%u)", base_rte->rtekind, base_rte->relid);
-		bms_free(group_cols);
-		return false;
-	}
-	else
-	{
-		/* It's already a base relation, save its rteid */
-		base_rteid = base_rte->rteid;
-	}
-
-	elog(DEBUG1, "check_group_by_preserves_uniqueness: checking uniqueness for relation %s (OID %u)", get_rel_name(base_rte->relid), base_rte->relid);
-
-	/* Check if the GROUP BY columns form a unique key */
-	{
-		bool		all_cols_not_null = false;
-
-		rel = table_open(base_rte->relid, AccessShareLock);
-		result = check_unique_index_covers_columns(rel, group_cols,
-												   &all_cols_not_null);
-		table_close(rel, AccessShareLock);
-
-		elog(DEBUG1, "check_group_by_preserves_uniqueness: uniqueness check result: %s, all_cols_not_null: %s",
-			 result ? "TRUE" : "FALSE", all_cols_not_null ? "TRUE" : "FALSE");
-
-		bms_free(group_cols);
-
-		/* If uniqueness is preserved, add the base table's rteid to the list */
-		if (result && base_rteid)
-		{
-			elog(DEBUG1, "check_group_by_preserves_uniqueness: adding base table rteid to uniqueness preservation");
-			*uniqueness_preservation = list_make1(base_rteid);
-
-			/*
-			 * If any grouped column is nullable, GROUP BY collapses all
-			 * NULL values into a single group, effectively injecting a
-			 * NULL key value.  Record this so the entry-point check can
-			 * reject using this relation as the referenced side.
-			 */
-			if (!all_cols_not_null &&
-				!list_member(*null_injected_keys, base_rteid))
-			{
-				elog(DEBUG1, "check_group_by_preserves_uniqueness: adding base table to null_injected_keys (nullable GROUP BY columns)");
-				*null_injected_keys = lappend(*null_injected_keys, base_rteid);
-			}
-		}
+		if (!all_cols_not_null &&
+			!list_member(*null_injected_keys, base_rte->rteid))
+			*null_injected_keys = lappend(*null_injected_keys, base_rte->rteid);
 	}
 
 	return result;
@@ -1395,13 +1254,8 @@ check_unique_index_covers_columns(Relation rel, Bitmapset *columns,
 
 	Assert(all_cols_not_null != NULL);
 
-	elog(DEBUG1, "check_unique_index_covers_columns: checking relation %s", RelationGetRelationName(rel));
-
-	/* Get a list of index OIDs for this relation */
 	indexoidlist = RelationGetIndexList(rel);
-	elog(DEBUG1, "check_unique_index_covers_columns: found %d indexes", list_length(indexoidlist));
 
-	/* Scan through the indexes */
 	foreach(indexoidscan, indexoidlist)
 	{
 		Oid			indexoid = lfirst_oid(indexoidscan);
@@ -1410,44 +1264,33 @@ check_unique_index_covers_columns(Relation rel, Bitmapset *columns,
 		int			nindexattrs;
 		Bitmapset  *index_cols = NULL;
 
-		/* Open the index relation */
 		indexRel = index_open(indexoid, AccessShareLock);
 		indexForm = indexRel->rd_index;
-
-		elog(DEBUG1, "check_unique_index_covers_columns: examining index %s (OID %u), unique=%s",
-			 RelationGetRelationName(indexRel), indexoid, indexForm->indisunique ? "true" : "false");
 
 		/* Skip if not a unique index */
 		if (!indexForm->indisunique)
 		{
-			elog(DEBUG1, "check_unique_index_covers_columns: skipping non-unique index %s", RelationGetRelationName(indexRel));
 			index_close(indexRel, AccessShareLock);
 			continue;
 		}
 
 		/* Build a bitmapset of the index columns */
 		nindexattrs = indexForm->indnatts;
-		elog(DEBUG1, "check_unique_index_covers_columns: index %s has %d attributes", RelationGetRelationName(indexRel), nindexattrs);
 		for (int j = 0; j < nindexattrs; j++)
 		{
 			AttrNumber	attnum = indexForm->indkey.values[j];
 
 			if (attnum > 0)		/* skip expressions */
-			{
 				index_cols = bms_add_member(index_cols, attnum);
-				elog(DEBUG1, "check_unique_index_covers_columns: index includes column %d", attnum);
-			}
 		}
 
-		/* Check if GROUP BY columns cover all unique index columns */
-		elog(DEBUG1, "check_unique_index_covers_columns: checking if index covers required columns");
+		/* Check if the grouped columns cover all unique index columns */
 		if (bms_is_subset(index_cols, columns))
 		{
-			elog(DEBUG1, "check_unique_index_covers_columns: MATCH! Index covers all required columns");
 			result = true;
 
 			/*
-			 * Report whether all GROUP BY columns are NOT NULL.  Primary
+			 * Report whether all grouped columns are NOT NULL.  Primary
 			 * key columns are always NOT NULL; otherwise check attnotnull
 			 * for each column in the GROUP BY list.
 			 */
@@ -1475,10 +1318,6 @@ check_unique_index_covers_columns(Relation rel, Bitmapset *columns,
 			index_close(indexRel, AccessShareLock);
 			bms_free(index_cols);
 			break;
-		}
-		else
-		{
-			elog(DEBUG1, "check_unique_index_covers_columns: index does not cover all required columns");
 		}
 
 		index_close(indexRel, AccessShareLock);
