@@ -198,3 +198,28 @@ JOIN t_fk_ab FOR KEY (fk_a, fk_b) -> q (a, b)
 ORDER BY q.a, q.b;
 
 DROP TABLE t_fk_ab, t_pk_ab;
+
+-- ============================================================
+-- Nullable UNIQUE GROUP BY: restores uniqueness but injects NULLs
+-- ============================================================
+
+CREATE TABLE t_nu (id INT UNIQUE);  -- nullable unique
+CREATE TABLE t_fk_nu (fk_id INT NOT NULL REFERENCES t_nu(id));
+
+INSERT INTO t_nu VALUES (1), (2), (NULL);
+INSERT INTO t_fk_nu VALUES (1), (2);
+
+-- error: GROUP BY restores uniqueness but the nullable column means
+-- NULL key values may be injected (GROUP BY collapses all NULLs into
+-- one group), so the referenced side is invalid
+SELECT * FROM (
+    SELECT id FROM t_nu GROUP BY id
+) q JOIN t_fk_nu FOR KEY (fk_id) -> q (id);
+
+-- ok: same table but with NOT NULL column used as FK target would work;
+-- here we show the referencing side is fine (no referenced-side check)
+SELECT * FROM t_nu
+JOIN t_fk_nu FOR KEY (fk_id) -> t_nu (id);
+
+DROP TABLE t_fk_nu;
+DROP TABLE t_nu;

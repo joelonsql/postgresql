@@ -57,8 +57,11 @@ static RangeTblEntry *drill_down_to_base_rel_query(ParseState *pstate, Query *qu
 												   List *attnos, List **base_attnums,
 												   int location, QueryStack *query_stack);
 
-static bool check_group_by_preserves_uniqueness(Query *query, List **uniqueness_preservation);
-static bool check_unique_index_covers_columns(Relation rel, Bitmapset *columns);
+static bool check_group_by_preserves_uniqueness(Query *query,
+												 List **uniqueness_preservation,
+												 List **null_injected_keys);
+static bool check_unique_index_covers_columns(Relation rel, Bitmapset *columns,
+											   bool *all_cols_not_null);
 static bool is_referencing_cols_unique(Oid referencing_relid, List *referencing_base_attnums);
 static bool is_referencing_cols_not_null(Oid referencing_relid, List *referencing_base_attnums,
 										 List **notNullConstraints);
@@ -629,7 +632,7 @@ analyze_join_tree(ParseState *pstate, Node *n,
 						 */
 						if (inner_query->groupClause)
 						{
-							if (!check_group_by_preserves_uniqueness(inner_query, uniqueness_preservation))
+							if (!check_group_by_preserves_uniqueness(inner_query, uniqueness_preservation, null_injected_keys))
 								*uniqueness_preservation = NIL;
 						}
 					}
@@ -1140,10 +1143,14 @@ drill_down_to_base_rel_query(ParseState *pstate, Query *query,
  *		Check if a GROUP BY clause preserves uniqueness by verifying that
  *		the GROUP BY columns form a unique key in the underlying base table.
  *		If uniqueness is preserved, adds the base table's rteid to the
- *		uniqueness_preservation list.
+ *		uniqueness_preservation list.  If the grouped columns include any
+ *		nullable column, adds the base table to null_injected_keys (when
+ *		non-NULL) because GROUP BY collapses all NULLs into one group,
+ *		injecting a NULL key value that may not exist in the base data.
  */
 static bool
-check_group_by_preserves_uniqueness(Query *query, List **uniqueness_preservation)
+check_group_by_preserves_uniqueness(Query *query, List **uniqueness_preservation,
+									List **null_injected_keys)
 {
 	ListCell   *lc;
 	Bitmapset  *group_cols = NULL;
@@ -1152,6 +1159,8 @@ check_group_by_preserves_uniqueness(Query *query, List **uniqueness_preservation
 	Relation	rel;
 	bool		result = false;
 	RTEId	   *base_rteid = NULL;
+
+	Assert(null_injected_keys != NULL);
 
 	elog(DEBUG1, "check_group_by_preserves_uniqueness: entering");
 
@@ -1332,19 +1341,38 @@ check_group_by_preserves_uniqueness(Query *query, List **uniqueness_preservation
 	elog(DEBUG1, "check_group_by_preserves_uniqueness: checking uniqueness for relation %s (OID %u)", get_rel_name(base_rte->relid), base_rte->relid);
 
 	/* Check if the GROUP BY columns form a unique key */
-	rel = table_open(base_rte->relid, AccessShareLock);
-	result = check_unique_index_covers_columns(rel, group_cols);
-	table_close(rel, AccessShareLock);
-
-	elog(DEBUG1, "check_group_by_preserves_uniqueness: uniqueness check result: %s", result ? "TRUE" : "FALSE");
-
-	bms_free(group_cols);
-
-	/* If uniqueness is preserved, add the base table's rteid to the list */
-	if (result && base_rteid)
 	{
-		elog(DEBUG1, "check_group_by_preserves_uniqueness: adding base table rteid to uniqueness preservation");
-		*uniqueness_preservation = list_make1(base_rteid);
+		bool		all_cols_not_null = false;
+
+		rel = table_open(base_rte->relid, AccessShareLock);
+		result = check_unique_index_covers_columns(rel, group_cols,
+												   &all_cols_not_null);
+		table_close(rel, AccessShareLock);
+
+		elog(DEBUG1, "check_group_by_preserves_uniqueness: uniqueness check result: %s, all_cols_not_null: %s",
+			 result ? "TRUE" : "FALSE", all_cols_not_null ? "TRUE" : "FALSE");
+
+		bms_free(group_cols);
+
+		/* If uniqueness is preserved, add the base table's rteid to the list */
+		if (result && base_rteid)
+		{
+			elog(DEBUG1, "check_group_by_preserves_uniqueness: adding base table rteid to uniqueness preservation");
+			*uniqueness_preservation = list_make1(base_rteid);
+
+			/*
+			 * If any grouped column is nullable, GROUP BY collapses all
+			 * NULL values into a single group, effectively injecting a
+			 * NULL key value.  Record this so the entry-point check can
+			 * reject using this relation as the referenced side.
+			 */
+			if (!all_cols_not_null &&
+				!list_member(*null_injected_keys, base_rteid))
+			{
+				elog(DEBUG1, "check_group_by_preserves_uniqueness: adding base table to null_injected_keys (nullable GROUP BY columns)");
+				*null_injected_keys = lappend(*null_injected_keys, base_rteid);
+			}
+		}
 	}
 
 	return result;
@@ -1352,14 +1380,20 @@ check_group_by_preserves_uniqueness(Query *query, List **uniqueness_preservation
 
 /*
  * check_unique_index_covers_columns
- *		Check if the given columns are covered by a unique index on the relation
+ *		Check if the given columns are covered by a unique index on the relation.
+ *		When a matching index is found, *all_cols_not_null is set to true when
+ *		every column in the GROUP BY list has a NOT NULL constraint (or the
+ *		matching index is a primary key, which implies NOT NULL).
  */
 static bool
-check_unique_index_covers_columns(Relation rel, Bitmapset *columns)
+check_unique_index_covers_columns(Relation rel, Bitmapset *columns,
+								  bool *all_cols_not_null)
 {
 	List	   *indexoidlist;
 	ListCell   *indexoidscan;
 	bool		result = false;
+
+	Assert(all_cols_not_null != NULL);
 
 	elog(DEBUG1, "check_unique_index_covers_columns: checking relation %s", RelationGetRelationName(rel));
 
@@ -1405,14 +1439,40 @@ check_unique_index_covers_columns(Relation rel, Bitmapset *columns)
 			}
 		}
 
-		index_close(indexRel, AccessShareLock);
-
 		/* Check if GROUP BY columns cover all unique index columns */
 		elog(DEBUG1, "check_unique_index_covers_columns: checking if index covers required columns");
 		if (bms_is_subset(index_cols, columns))
 		{
 			elog(DEBUG1, "check_unique_index_covers_columns: MATCH! Index covers all required columns");
 			result = true;
+
+			/*
+			 * Report whether all GROUP BY columns are NOT NULL.  Primary
+			 * key columns are always NOT NULL; otherwise check attnotnull
+			 * for each column in the GROUP BY list.
+			 */
+			if (indexForm->indisprimary)
+			{
+				*all_cols_not_null = true;
+			}
+			else
+			{
+				int			attnum;
+				TupleDesc	tupdesc = RelationGetDescr(rel);
+
+				*all_cols_not_null = true;
+				attnum = -1;
+				while ((attnum = bms_next_member(columns, attnum)) >= 0)
+				{
+					if (!TupleDescAttr(tupdesc, attnum - 1)->attnotnull)
+					{
+						*all_cols_not_null = false;
+						break;
+					}
+				}
+			}
+
+			index_close(indexRel, AccessShareLock);
 			bms_free(index_cols);
 			break;
 		}
@@ -1421,6 +1481,7 @@ check_unique_index_covers_columns(Relation rel, Bitmapset *columns)
 			elog(DEBUG1, "check_unique_index_covers_columns: index does not cover all required columns");
 		}
 
+		index_close(indexRel, AccessShareLock);
 		bms_free(index_cols);
 	}
 
