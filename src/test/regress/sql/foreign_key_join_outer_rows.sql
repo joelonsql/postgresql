@@ -2,10 +2,9 @@
 -- foreign_key_join_outer_rows
 --
 -- Demonstrates that a FULL JOIN inside a derived relation can introduce
--- NULL-valued rows in the referenced column list via outer rows from the
--- other side of the join.  The current FK join validation accepts these
--- queries because it checks uniqueness and row preservation but does not
--- track NULL introduction from outer rows.
+-- NULL-valued rows in the referenced column list via null-injected keys
+-- from the other side of the join.  The FK join validation rejects these
+-- queries because the referenced side may contain NULL key values.
 --
 
 -- ============================================================
@@ -53,7 +52,7 @@ LEFT JOIN fko_fk_notnull FOR KEY (fk_id) -> fko_pktab (id);
 -- ============================================================
 
 -- The FULL JOIN between fko_pktab and fko_fk_nullable can introduce NULLs
--- in fko_pktab.id via outer rows.  Using this as the referenced side
+-- in fko_pktab.id via null-injected keys.  Using this as the referenced side
 -- of a FK join must be rejected because the referenced column may contain
 -- NULLs, violating the PK-like invariant (unique + not null).
 
