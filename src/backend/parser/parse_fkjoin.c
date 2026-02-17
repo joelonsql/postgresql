@@ -59,7 +59,7 @@ static RangeTblEntry *drill_down_to_base_rel_query(ParseState *pstate, Query *qu
 
 static bool check_group_by_preserves_uniqueness(Query *query,
 												 List **uniqueness_preservation,
-												 List **null_injected_keys);
+												 List **null_preserving);
 static bool check_unique_index_covers_columns(Relation rel, Bitmapset *columns,
 											   bool *all_cols_not_null);
 static bool is_referencing_cols_unique(Oid referencing_relid, List *referencing_base_attnums);
@@ -80,16 +80,16 @@ static void update_row_preserving(List *referencing_chains,
 								  ForeignKeyDirection fk_dir,
 								  List **result_chains,
 								  List **result_row_preserving,
-								  List *referencing_null_injected_keys,
-								  List *referenced_null_injected_keys,
-								  List **result_null_injected_keys);
+								  List *referencing_null_preserving,
+								  List *referenced_null_preserving,
+								  List **result_null_preserving);
 static void analyze_join_tree(ParseState *pstate, Node *n,
 							  Query *query,
 							  RTEId *rte_id,
 							  List **uniqueness_preservation,
 							  List **notnull_fk_chains,
 							  List **row_preserving,
-							  List **null_injected_keys,
+							  List **null_preserving,
 							  bool *found,
 							  int location,
 							  QueryStack *query_stack);
@@ -113,11 +113,11 @@ transformAndValidateForeignKeyJoin(ParseState *pstate, JoinExpr *join,
 	List	   *referencing_uniqueness_preservation = NIL;
 	List	   *referencing_notnull_fk_chains = NIL;
 	List	   *referencing_row_preserving = NIL;
-	List	   *referencing_null_injected_keys = NIL;
+	List	   *referencing_null_preserving = NIL;
 	List	   *referenced_uniqueness_preservation = NIL;
 	List	   *referenced_notnull_fk_chains = NIL;
 	List	   *referenced_row_preserving = NIL;
-	List	   *referenced_null_injected_keys = NIL;
+	List	   *referenced_null_preserving = NIL;
 	Node	   *referencing_arg;
 	Node	   *referenced_arg;
 	List	   *referencing_base_attnums;
@@ -299,11 +299,11 @@ transformAndValidateForeignKeyJoin(ParseState *pstate, JoinExpr *join,
 						column_list_to_string(referenced_cols)),
 				 parser_errposition(pstate, fkjn->location)));
 
-	analyze_join_tree(pstate, referencing_arg, NULL, referencing_rte->rteid, &referencing_uniqueness_preservation, &referencing_notnull_fk_chains, &referencing_row_preserving, &referencing_null_injected_keys, &referencing_found, fkjn->location, NULL);
+	analyze_join_tree(pstate, referencing_arg, NULL, referencing_rte->rteid, &referencing_uniqueness_preservation, &referencing_notnull_fk_chains, &referencing_row_preserving, &referencing_null_preserving, &referencing_found, fkjn->location, NULL);
 
 	/* Only analyze referenced side for derived tables - base tables always preserve uniqueness/rows */
 	if (!referenced_is_base_table)
-		analyze_join_tree(pstate, referenced_arg, NULL, referenced_rte->rteid, &referenced_uniqueness_preservation, &referenced_notnull_fk_chains, &referenced_row_preserving, &referenced_null_injected_keys, &referenced_found, fkjn->location, NULL);
+		analyze_join_tree(pstate, referenced_arg, NULL, referenced_rte->rteid, &referenced_uniqueness_preservation, &referenced_notnull_fk_chains, &referenced_row_preserving, &referenced_null_preserving, &referenced_found, fkjn->location, NULL);
 
 	/*
 	 * Check uniqueness preservation - only for derived tables.
@@ -340,15 +340,14 @@ transformAndValidateForeignKeyJoin(ParseState *pstate, JoinExpr *join,
 	}
 
 	/*
-	 * Check that the referenced relation's key columns are not subject to
-	 * NULL introduction within the derived relation.  Outer joins can
-	 * produce "ghost" rows where the inner side's columns are all NULL,
-	 * and GROUP BY on a nullable UNIQUE column can collapse NULLs into a
-	 * single group.  Either case violates the assumption that the
-	 * referenced side behaves like a primary key (unique and not null).
+	 * Check that the referenced relation preserves its key-column values
+	 * (i.e. is in the null-preserving set N).  If it is not, outer joins
+	 * or GROUP BY on nullable columns may have introduced ghost rows with
+	 * NULL key values, violating the PK-like invariant (unique and not
+	 * null) that the FK join depends on.
 	 */
 	if (!referenced_is_base_table &&
-		list_member(referenced_null_injected_keys, referenced_id))
+		!list_member(referenced_null_preserving, referenced_id))
 	{
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_FOREIGN_KEY),
@@ -420,7 +419,7 @@ analyze_join_tree(ParseState *pstate, Node *n,
 				  List **uniqueness_preservation,
 				  List **notnull_fk_chains,
 				  List **row_preserving,
-				  List **null_injected_keys,
+				  List **null_preserving,
 				  bool *found,
 				  int location,
 				  QueryStack *query_stack)
@@ -430,11 +429,11 @@ analyze_join_tree(ParseState *pstate, Node *n,
 	List	   *referencing_uniqueness_preservation = NIL;
 	List	   *referencing_notnull_fk_chains = NIL;
 	List	   *referencing_row_preserving = NIL;
-	List	   *referencing_null_injected_keys = NIL;
+	List	   *referencing_null_preserving = NIL;
 	List	   *referenced_uniqueness_preservation = NIL;
 	List	   *referenced_notnull_fk_chains = NIL;
 	List	   *referenced_row_preserving = NIL;
-	List	   *referenced_null_injected_keys = NIL;
+	List	   *referenced_null_preserving = NIL;
 	List	   *referencing_base_attnums;
 	List	   *referenced_base_attnums;
 	RangeTblEntry *base_referencing_rte;
@@ -486,8 +485,8 @@ analyze_join_tree(ParseState *pstate, Node *n,
 				referencing_rte = rt_fetch(fkjn->referencingVarno, rtable);
 				referenced_rte = rt_fetch(fkjn->referencedVarno, rtable);
 
-				analyze_join_tree(pstate, referencing_arg, query, rte_id, &referencing_uniqueness_preservation, &referencing_notnull_fk_chains, &referencing_row_preserving, &referencing_null_injected_keys, &referencing_found, location, query_stack);
-				analyze_join_tree(pstate, referenced_arg, query, rte_id, &referenced_uniqueness_preservation, &referenced_notnull_fk_chains, &referenced_row_preserving, &referenced_null_injected_keys, &referenced_found, location, query_stack);
+				analyze_join_tree(pstate, referencing_arg, query, rte_id, &referencing_uniqueness_preservation, &referencing_notnull_fk_chains, &referencing_row_preserving, &referencing_null_preserving, &referencing_found, location, query_stack);
+				analyze_join_tree(pstate, referenced_arg, query, rte_id, &referenced_uniqueness_preservation, &referenced_notnull_fk_chains, &referenced_row_preserving, &referenced_null_preserving, &referenced_found, location, query_stack);
 
 				base_referencing_rte = drill_down_to_base_rel(pstate, referencing_rte,
 															  fkjn->referencingAttnums,
@@ -523,9 +522,9 @@ analyze_join_tree(ParseState *pstate, Node *n,
 									 fkjn->fkdir,
 									 notnull_fk_chains,
 									 row_preserving,
-									 referencing_null_injected_keys,
-									 referenced_null_injected_keys,
-									 null_injected_keys);
+									 referencing_null_preserving,
+									 referenced_null_preserving,
+									 null_preserving);
 
 				/* Set found based on whether rte_id was in either subtree or matches either relation */
 				if (referencing_found || referenced_found ||
@@ -566,6 +565,7 @@ analyze_join_tree(ParseState *pstate, Node *n,
 									 rel->rd_rel->relkind == RELKIND_PARTITIONED_TABLE)
 							{
 								*uniqueness_preservation = list_make1(rte->rteid);
+								*null_preserving = list_make1(rte->rteid);
 
 								/*
 								 * Mark as row-preserving if not filtered by
@@ -622,7 +622,7 @@ analyze_join_tree(ParseState *pstate, Node *n,
 
 						analyze_join_tree(pstate,
 										  (Node *) linitial(inner_query->jointree->fromlist),
-										  inner_query, rte_id, uniqueness_preservation, notnull_fk_chains, row_preserving, null_injected_keys, found, location,
+										  inner_query, rte_id, uniqueness_preservation, notnull_fk_chains, row_preserving, null_preserving, found, location,
 										  &new_stack);
 
 						/*
@@ -632,7 +632,7 @@ analyze_join_tree(ParseState *pstate, Node *n,
 						 */
 						if (inner_query->groupClause)
 						{
-							if (!check_group_by_preserves_uniqueness(inner_query, uniqueness_preservation, null_injected_keys))
+							if (!check_group_by_preserves_uniqueness(inner_query, uniqueness_preservation, null_preserving))
 								*uniqueness_preservation = NIL;
 						}
 					}
@@ -1145,8 +1145,8 @@ drill_down_to_base_rel_query(ParseState *pstate, Query *query,
  *
  *		On success, sets *uniqueness_preservation to {base_rteid} (GROUP BY
  *		collapses rows across all tables, so only one table can remain unique).
- *		If any grouped column is nullable, appends base_rteid to
- *		*null_injected_keys because GROUP BY collapses all NULLs into one
+ *		If any grouped column is nullable, removes base_rteid from
+ *		*null_preserving because GROUP BY collapses all NULLs into one
  *		group, injecting a NULL key value that may not exist in the base data.
  *
  *		Caller guarantees query->groupClause is non-empty.  PG17+ guarantees
@@ -1156,7 +1156,7 @@ drill_down_to_base_rel_query(ParseState *pstate, Query *query,
  */
 static bool
 check_group_by_preserves_uniqueness(Query *query, List **uniqueness_preservation,
-									List **null_injected_keys)
+									List **null_preserving)
 {
 	RangeTblEntry *group_rte = NULL;
 	RangeTblEntry *base_rte;
@@ -1169,7 +1169,7 @@ check_group_by_preserves_uniqueness(Query *query, List **uniqueness_preservation
 
 	Assert(query->groupClause);
 	Assert(query->hasGroupRTE);
-	Assert(null_injected_keys != NULL);
+	Assert(null_preserving != NULL);
 
 	/* Find the RTE_GROUP entry in the range table */
 	foreach(lc, query->rtable)
@@ -1226,12 +1226,11 @@ check_group_by_preserves_uniqueness(Query *query, List **uniqueness_preservation
 		*uniqueness_preservation = list_make1(base_rte->rteid);
 
 		/*
-		 * If any grouped column is nullable, record it so the caller can
-		 * reject using this relation as the referenced side of an FK join.
+		 * If any grouped column is nullable, remove it from N so the
+		 * caller rejects using this relation as the referenced side.
 		 */
-		if (!all_cols_not_null &&
-			!list_member(*null_injected_keys, base_rte->rteid))
-			*null_injected_keys = lappend(*null_injected_keys, base_rte->rteid);
+		if (!all_cols_not_null)
+			*null_preserving = list_delete(*null_preserving, base_rte->rteid);
 	}
 
 	return result;
@@ -1569,9 +1568,9 @@ update_row_preserving(List *referencing_chains,
 					  ForeignKeyDirection fk_dir,
 					  List **result_chains,
 					  List **result_row_preserving,
-					  List *referencing_null_injected_keys,
-					  List *referenced_null_injected_keys,
-					  List **result_null_injected_keys)
+					  List *referencing_null_preserving,
+					  List *referenced_null_preserving,
+					  List **result_null_preserving)
 {
 	List	   *result_C = NIL;
 	List	   *result_R = NIL;
@@ -1605,41 +1604,39 @@ update_row_preserving(List *referencing_chains,
 	}
 
 	/*
-	 * Phase 1b: Null-injected-keys (NULL introduction) tracking.
+	 * Phase 1b: Null-preserving set tracking.
 	 *
-	 * Start by propagating each side's null_injected_keys.  Then clear
+	 * The null-preserving set N tracks which base tables still have
+	 * their key-column values intact (not overwritten by NULLs from
+	 * ghost rows).  Membership in N is good: p ∈ N means the table's
+	 * key columns are trustworthy.
+	 *
+	 * Start by propagating each side's null_preserving.  Then restore
 	 * entries for tables whose ghost rows are filtered by the join's
 	 * inner side: the FK equi-join condition ensures NULL join columns
-	 * never match, so ghost rows for the specific base table in the
-	 * join condition are eliminated.  Only that table is cleared —
-	 * other tables in null_injected_keys may have NULLs in non-join columns
-	 * and their ghost rows can survive.
-	 *
-	 * Finally, the preserved (outer) side of an outer join may
-	 * introduce NEW ghost rows on the inner side.  When all FK columns
-	 * are NOT NULL the FK guarantee ensures every referencing row
-	 * matches a referenced row, so no ghost rows are produced on the
-	 * referenced side.
+	 * never match, so ghost rows are eliminated and the table's key
+	 * columns become trustworthy again.  Finally, remove entries for
+	 * tables on the inner side of an outer join, since the outer side
+	 * may introduce new ghost rows with NULL key values.
 	 */
-	result_N = list_concat(list_copy(referencing_null_injected_keys),
-							list_copy(referenced_null_injected_keys));
+	result_N = list_concat(list_copy(referencing_null_preserving),
+							list_copy(referenced_null_preserving));
 
-	/* Clear: inner side's ghost rows filtered by FK equi-join */
-	if (!preserves_referencing)
-		result_N = list_delete(result_N, referencing_id);
-	if (!preserves_referenced)
-		result_N = list_delete(result_N, referenced_id);
-
-	/* Add: preserved side may introduce new ghost rows on inner side */
-	if (preserves_referenced &&
+	/* Restore: inner side filters ghost rows, restoring null-preservation */
+	if (!preserves_referencing &&
 		!list_member(result_N, referencing_id))
 		result_N = lappend(result_N, referencing_id);
-	if (preserves_referencing &&
-		!fk_cols_not_null &&
+	if (!preserves_referenced &&
 		!list_member(result_N, referenced_id))
 		result_N = lappend(result_N, referenced_id);
 
-	*result_null_injected_keys = result_N;
+	/* Remove: outer side introduces ghost rows, breaking null-preservation */
+	if (preserves_referenced)
+		result_N = list_delete(result_N, referencing_id);
+	if (preserves_referencing && !fk_cols_not_null)
+		result_N = list_delete(result_N, referenced_id);
+
+	*result_null_preserving = result_N;
 
 	/*
 	 * We can only derive new chains across the FK relationship when the FK
