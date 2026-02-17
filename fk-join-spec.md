@@ -50,7 +50,7 @@ Each node `J` carries four sets computed bottom-up:
 | **U** | uniqueness preservation | ⊆ T | Base tables whose primary/unique key uniqueness is preserved through the joins in J's subtree |
 | **R** | row-preserving set | ⊆ T | Base tables whose complete row set appears in J's result |
 | **C** | NOT NULL FK chains | ⊆ T × T | Binary relation where (A, B) ∈ C means A ∈ R and A reaches B through a directed path of NOT NULL FK joins, each step's referenced table being row-preserving at the time the step was processed |
-| **N** | null-injected keys | ⊆ T | Base tables whose key columns may contain NULL values injected by the query structure (outer joins or GROUP BY on nullable columns), as opposed to NULLs present in the base data |
+| **N** | null-preserving set | ⊆ T | Base tables whose key-column values are preserved (not overwritten by NULLs from outer-join ghost rows or GROUP BY on nullable columns). Membership in N is good: p ∈ N means the table's key columns are trustworthy |
 
 where T is the universe of base table RTEIds in J's subtree.
 
@@ -80,12 +80,12 @@ relations — it initializes the properties as follows:
 enclosing derived relation's query has no WHERE, LIMIT, OFFSET, or
 HAVING):
 
-    U = {t},  R = {t},  C = ∅,  N = ∅
+    U = {t},  R = {t},  C = ∅,  N = {t}
 
 **Filtered** (some enclosing derived relation applies WHERE, LIMIT,
 OFFSET, or HAVING):
 
-    U = {t},  R = ∅,  C = ∅,  N = ∅
+    U = {t},  R = ∅,  C = ∅,  N = {t}
 
 Uniqueness is always preserved (filtering cannot break a unique
 constraint). Row preservation is lost because the enclosing query may
@@ -109,12 +109,12 @@ is added only when the FK columns are unique *and* the referencing
 base table itself preserves uniqueness — in that case the join is
 one-to-one and cannot duplicate referenced rows.
 
-## 5. Row Preservation and Chains (R, C) — `update_row_preserving`
+## 5. Row Preservation and Chains (R, C, N) — `update_row_preserving`
 
 This is the core algorithm. Given a join node
 `J = (J_f ⋈[f→p, nn, τ, δ] J_p)` with inputs
-`(R_f, C_f)` from the referencing subtree and `(R_p, C_p)` from the
-referenced subtree, compute the output `(R', C')`.
+`(R_f, C_f, N_f)` from the referencing subtree and `(R_p, C_p, N_p)` from the
+referenced subtree, compute the output `(R', C', N')`.
 
 The computation proceeds in three phases.
 
@@ -144,45 +144,44 @@ directly into the result:
 The outer join guarantee is unconditional — it does not depend on
 NOT NULL or FK properties.
 
-### Phase 1b — Null-Injected Keys (N)
+### Phase 1b — Null-Preserving Set (N)
 
-Compute the null-injected-keys set for the combined node.  This
-tracks which base tables may have NULL key values injected by the
-query structure — either ghost rows from outer joins, or collapsed
-NULLs from GROUP BY on nullable columns — as opposed to NULLs that
-exist in the base data.
+Compute the null-preserving set for the combined node.  N tracks
+which base tables still have their key-column values intact (not
+overwritten by NULLs from ghost rows).  Membership in N is good:
+p ∈ N means the table's key columns are trustworthy.
 
 **Propagate** from both inputs:
 
     N' = N_f ∪ N_p
 
-**Clear** — the inner side of the join filters ghost rows for the
+**Restore** — the inner side of the join filters ghost rows for the
 specific base table in the FK equi-join condition. Ghost rows have
 NULLs in *all* of that table's columns (including the join column),
-so they cannot match the equi-join and are eliminated. Only the
-table named in the join condition is cleared; other tables in N
-may have NULLs in non-join columns and their ghost rows can survive:
+so they cannot match the equi-join and are eliminated. The table's
+key columns become trustworthy again:
 
-    if ¬outer_preserves(referencing, τ, δ):  N' = N' \ {f}
-    if ¬outer_preserves(referenced, τ, δ):   N' = N' \ {p}
+    if ¬outer_preserves(referencing, τ, δ):  N' = N' ∪ {f}
+    if ¬outer_preserves(referenced, τ, δ):   N' = N' ∪ {p}
 
-**Add** — the preserved (outer) side of an outer join introduces new
-ghost rows on the inner side. When all FK columns are NOT NULL, the
-FK guarantee ensures every referencing row matches a referenced row,
-so no ghost rows appear on the referenced side:
+**Remove** — the preserved (outer) side of an outer join introduces
+new ghost rows on the inner side, breaking null-preservation. When
+all FK columns are NOT NULL, the FK guarantee ensures every
+referencing row matches a referenced row, so no ghost rows appear on
+the referenced side:
 
-    if outer_preserves(referenced, τ, δ):                N' = N' ∪ {f}
-    if outer_preserves(referencing, τ, δ) ∧ ¬nn:         N' = N' ∪ {p}
+    if outer_preserves(referenced, τ, δ):                N' = N' \ {f}
+    if outer_preserves(referencing, τ, δ) ∧ ¬nn:         N' = N' \ {p}
 
-Summary of the net effect on f and p after clear + add:
+Summary of the net effect on f and p after restore + remove:
 
 | τ | f in N'? | p in N'? |
 |---|-----------|-----------|
-| INNER | cleared | cleared |
-| LEFT (referencing preserved) | cleared | added if ¬nn, else cleared |
-| LEFT (referenced preserved) | added | cleared |
+| INNER | restored | restored |
+| LEFT (referencing preserved) | restored | removed if ¬nn, else restored |
+| LEFT (referenced preserved) | removed | restored |
 | RIGHT | mirror of LEFT | mirror of LEFT |
-| FULL | added | added if ¬nn, else inherited |
+| FULL | removed | removed if ¬nn, else inherited |
 
 (Plus any entries inherited from N_f ∪ N_p for other base tables.)
 
@@ -193,13 +192,13 @@ uniqueness (the grouped columns cover a unique index), the base
 table is added back to U.  However, if any of the grouped columns
 is nullable, GROUP BY collapses all NULL values into a single group,
 effectively injecting a NULL key value that may not exist in the base
-data.  In this case the base table is added to N:
+data.  In this case the base table is removed from N:
 
     if GROUP BY restores uniqueness ∧ ¬all_cols_not_null:
-        N' = N' ∪ {t}
+        N' = N' \ {t}
 
 This is computed by `check_group_by_preserves_uniqueness` and
-propagated through the `null_injected_keys` parameter in
+propagated through the `null_preserving` parameter in
 `analyze_join_tree`.
 
 ### Phase 2 — Guard Condition
@@ -338,32 +337,32 @@ for (p, Y) ∈ C_p extends the path through p; by the inductive
 hypothesis on J_p, the chain p → ... → Y was valid, and prepending
 the path from A through f to p preserves validity.
 
-### Null-Injected Keys (N)
+### Null-Preserving Set (N)
 
-- **Base case.** N = ∅ is trivially correct: a single base table has
-  no joins and no GROUP BY, so no NULL key values can be injected.
+- **Base case.** N = {t} is trivially correct: a single base table
+  has no joins and no GROUP BY, so its key-column values are intact.
 
-- **Clear step.** When a side is inner (not preserved), the FK
+- **Restore step.** When a side is inner (not preserved), the FK
   equi-join filters rows where the join column is NULL. Ghost rows
   for a base table have NULLs in *all* of that table's columns
   (including the join column), so they cannot match the equi-join
-  and are eliminated. Removing the table from N is correct.
+  and are eliminated. Adding the table back to N is correct.
 
-- **Add step (outer joins).** When a side is preserved (outer),
+- **Remove step (outer joins).** When a side is preserved (outer),
   unmatched rows from the other side produce ghost rows with
-  all-NULL columns on the inner side. Adding the inner-side base
-  table to N is correct. Exception: when the FK columns carry NOT
+  all-NULL columns on the inner side. Removing the inner-side base
+  table from N is correct. Exception: when the FK columns carry NOT
   NULL constraints and the referencing side is preserved, every
   referencing row has a non-null FK value and the FK constraint
   guarantees a match exists. Therefore no unmatched referencing rows
   exist and no ghost rows appear on the referenced side.
 
-- **Add step (GROUP BY).** When GROUP BY on a nullable UNIQUE column
-  restores uniqueness, it collapses all NULL values in that column
-  into a single group. This group's key value is NULL, which does
-  not correspond to any row in the base table (the base table may
-  have multiple rows with NULL in the column, or none). Adding the
-  base table to N is correct because the derived relation now
+- **Remove step (GROUP BY).** When GROUP BY on a nullable UNIQUE
+  column restores uniqueness, it collapses all NULL values in that
+  column into a single group. This group's key value is NULL, which
+  does not correspond to any row in the base table (the base table
+  may have multiple rows with NULL in the column, or none). Removing
+  the base table from N is correct because the derived relation now
   contains a NULL key value that the FK constraint cannot match.
 
 **Selective inheritance.** Tables in R_f that are *not* in `anchor_set`
@@ -387,11 +386,10 @@ checks three conditions on the referenced side:
    in the referenced subtree's result. This ensures every valid FK
    value will find its match.
 
-3. **p ∉ N** — the referenced base table's key columns do not
-   contain NULL values injected by the query structure (outer joins
-   or GROUP BY on nullable columns).  Injected NULL key values
-   violate the PK-like invariant (unique and not null) that the FK
-   join depends on.
+3. **p ∈ N** — the referenced base table preserves its key-column
+   values (no NULLs injected by outer joins or GROUP BY on nullable
+   columns).  Loss of null-preservation violates the PK-like
+   invariant (unique and not null) that the FK join depends on.
 
 For base tables accessed directly (not through a derived relation),
 all three conditions hold trivially and the checks are skipped.
