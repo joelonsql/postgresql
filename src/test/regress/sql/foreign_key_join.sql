@@ -296,7 +296,522 @@ CREATE TABLE t11
 
 INSERT INTO t11 (c27, c28) VALUES (1, 10);
 
+--
+-- Test subqueries
+--
+
+SELECT
+    a.c1,
+    a.c2,
+    b.c3,
+    b.c4
+FROM t1 AS a
+JOIN
+(
+    SELECT * FROM t2
+) AS b FOR KEY (c3) -> a (c1);
+
+SELECT
+    a.c1,
+    a.c2,
+    b.c3,
+    b.c4
+FROM
+(
+    SELECT * FROM t1
+) AS a
+JOIN
+(
+    SELECT * FROM t2
+) AS b FOR KEY (c3) -> a (c1);
+
+SELECT
+    a.t1_c1,
+    a.t1_c2,
+    b.t2_c3,
+    b.t2_c4
+FROM
+(
+    SELECT c1 AS t1_c1, c2 AS t1_c2 FROM t1
+) AS a
+JOIN
+(
+    SELECT c3 AS t2_c3, c4 AS t2_c4 FROM t2
+) AS b FOR KEY (t2_c3) -> a (t1_c1);
+
+SELECT
+    a.outer_c1,
+    a.outer_c2,
+    b.outer_c3,
+    b.outer_c4
+FROM
+(
+    SELECT mid_c1 AS outer_c1, mid_c2 AS outer_c2 FROM
+    (
+        SELECT c1 AS mid_c1, c2 AS mid_c2 FROM t1
+    ) sub1
+) AS a
+JOIN
+(
+    SELECT mid_c3 AS outer_c3, mid_c4 AS outer_c4 FROM
+    (
+        SELECT c3 AS mid_c3, c4 AS mid_c4 FROM t2
+    ) sub2
+) AS b FOR KEY (outer_c3) -> a (outer_c1);
+
+SELECT *
+FROM t1
+JOIN
+(
+    SELECT
+        t10.c23,
+        t10.c24,
+        t10_2.c25,
+        t10_2.c26
+    FROM t10
+    JOIN t10 AS t10_2 FOR KEY (c23, c24) <- t10 (c25, c26)
+) AS q1 FOR KEY (c23, c24) -> t1 (c1, c2);
+
+SELECT *
+FROM t1
+JOIN LATERAL (
+    SELECT c3, c4 FROM t2 WHERE c4 = c1 + 9
+) AS q1 FOR KEY (c3) -> t1 (c1);
+
+--
+-- Test CTEs
+--
+
+WITH
+q1 (q1_c1, q1_c2) AS
+(
+    SELECT c1, c2 FROM t1
+),
+q2 (q2_c1, q2_c2) AS
+(
+    SELECT q1_c1, q1_c2 FROM q1
+),
+q3 (q3_c3, q3_c4) AS
+(
+    SELECT c3, c4 FROM t2
+),
+q4 (q4_c3, q4_c4) AS
+(
+    SELECT q3_c3, q3_c4 FROM q3
+)
+SELECT
+    q2_c1,
+    q2_c2,
+    q4_c3,
+    q4_c4
+FROM q2 JOIN q4 FOR KEY (q4_c3, q4_c4) -> q2 (q2_c1, q2_c2);
+
+WITH RECURSIVE q1 AS (SELECT c1 FROM t1 UNION SELECT c1 FROM q1)
+SELECT * FROM q1 JOIN t2 FOR KEY (c3) -> q1 (c1);
+
+--
+-- Test VIEWs
+--
+
 DROP VIEW v1, v2, v3;
+
+CREATE VIEW v1 AS
+SELECT c1 AS v1_c1, c2 AS v1_c2 FROM t1;
+
+CREATE VIEW v2 AS
+SELECT v1_c1 AS v2_c1, v1_c2 AS v2_c2 FROM v1;
+
+CREATE VIEW v3 AS
+SELECT c3 AS v3_c3, c4 AS v3_c4 FROM t2;
+
+CREATE VIEW v4 AS
+SELECT v3_c3 AS v4_c3, v3_c4 AS v4_c4 FROM v3;
+
+CREATE VIEW v5 AS
+SELECT
+    v2_c1,
+    v2_c2,
+    v4_c3,
+    v4_c4
+FROM v2 JOIN v4 FOR KEY (v4_c3, v4_c4) -> v2 (v2_c1, v2_c2);
+
+SELECT * FROM v5;
+
+--
+-- Test subqueries, CTEs, and views
+--
+WITH
+q2 (q2_c1, q2_c2) AS
+(
+    SELECT
+        q1_c1,
+        q1_c2
+    FROM
+    (
+        SELECT c1 AS q1_c1, c2 AS q1_c2 FROM t1
+    ) AS q1
+)
+SELECT
+    q2_c1,
+    q2_c2,
+    v4_c3,
+    v4_c4
+FROM q2 JOIN v4 FOR KEY (v4_c3, v4_c4) -> q2 (q2_c1, q2_c2);
+
+DROP VIEW v1, v2, v3, v4, v5;
+
+--
+-- Test subqueries, CTEs and VIEWs containing joins
+--
+
+SELECT
+    q1.c11,
+    q1.c12,
+    t6.c13,
+    t6.c14
+FROM
+(
+    SELECT
+        t5.c9,
+        t5.c10,
+        t5.c11,
+        t5.c12
+    FROM t5
+    JOIN t1 FOR KEY (c1, c2) <- t5 (c11, c12)
+    JOIN t1 AS t1_2 FOR KEY (c1, c2) <- t5 (c11, c12)
+    JOIN t1 AS t1_3 FOR KEY (c1, c2) <- t5 (c11, c12)
+) AS q1
+JOIN t6 FOR KEY (c13, c14) -> q1 (c9, c10);
+
+WITH
+q1 AS
+(
+    SELECT
+        t5.c9,
+        t5.c10,
+        t5.c11,
+        t5.c12
+    FROM t5
+    JOIN t1 FOR KEY (c1, c2) <- t5 (c11, c12)
+    JOIN t1 AS t1_2 FOR KEY (c1, c2) <- t5 (c11, c12)
+    JOIN t1 AS t1_3 FOR KEY (c1, c2) <- t5 (c11, c12)
+)
+SELECT
+    q1.c11,
+    q1.c12,
+    t6.c13,
+    t6.c14
+FROM q1
+JOIN t6 FOR KEY (c13, c14) -> q1 (c9, c10);
+
+CREATE VIEW v1 AS
+SELECT
+    t5.c9,
+    t5.c10,
+    t5.c11,
+    t5.c12
+FROM t5
+JOIN t1 FOR KEY (c1, c2) <- t5 (c11, c12)
+JOIN t1 AS t1_2 FOR KEY (c1, c2) <- t5 (c11, c12)
+JOIN t1 AS t1_3 FOR KEY (c1, c2) <- t5 (c11, c12);
+
+SELECT
+    v1.c11,
+    v1.c12,
+    t6.c13,
+    t6.c14
+FROM v1
+JOIN t6 FOR KEY (c13, c14) -> v1 (c9, c10);
+
+DROP VIEW v1;
+
+--
+-- Test disallowed filtering of referenced table
+--
+
+CREATE VIEW v1 AS
+SELECT * FROM t1 WHERE c1 > 0;
+
+CREATE VIEW v2 AS
+SELECT * FROM t2 WHERE c3 > 0;
+
+-- invalid since v1 is filtered and is the referenced table
+SELECT * FROM v1 JOIN t2 FOR KEY (c3) -> v1 (c1);
+
+-- OK, filtering allowed since v2 is the referencing table
+SELECT * FROM t1 JOIN v2 FOR KEY (c3) -> t1 (c1);
+
+-- also invalid, since v1 is filtered and is the referenced table
+SELECT * FROM v1 JOIN v2 FOR KEY (c3) -> v1 (c1);
+
+-- also invalid, filters uisng a having clause
+SELECT * FROM
+(
+    SELECT c1, count(*) FROM t1 GROUP BY c1 HAVING c2 > 100
+) AS u
+JOIN t2 FOR KEY (c3) -> u (c1);
+
+-- invalid, since u is filtered and is the referenced table
+SELECT * FROM (SELECT c1 FROM t1 LIMIT 1) AS u
+JOIN t2 FOR KEY (c3) -> u (c1);
+
+-- invalid, since u is filtered and is the referenced table
+SELECT * FROM (SELECT c1 FROM t1 OFFSET 1) AS u
+JOIN t2 FOR KEY (c3) -> u (c1);
+
+WITH q2 AS
+(
+    SELECT * FROM t5 WHERE t5.c11 > 0
+)
+SELECT
+    q1.c11,
+    q1.c12,
+    t7.c15,
+    t7.c16
+FROM
+(
+    SELECT
+        q2.c9,
+        q2.c10,
+        q2.c11,
+        q2.c12
+    FROM q2
+    JOIN t1 FOR KEY (c1, c2) <- q2 (c11, c12)
+) AS q1
+JOIN t7 FOR KEY (c15, c16) -> q1 (c9, c10);
+
+--
+-- Test allowed joins not affecting uniqueness
+--
+
+SELECT
+    q1.c11,
+    q1.c12,
+    t6.c13,
+    t6.c14
+FROM
+(
+    SELECT
+        t5.c9,
+        t5.c10,
+        t5.c11,
+        t5.c12
+    FROM t5
+    JOIN t1 FOR KEY (c1, c2) <- t5 (c11, c12)
+) AS q1
+JOIN t6 FOR KEY (c13, c14) -> q1 (c9, c10);
+
+--
+-- Test disallowed non-unique referenced table
+--
+
+SELECT
+    q1.c11,
+    q1.c12,
+    t7.c15,
+    t7.c16
+FROM
+(
+    SELECT
+        t5.c9,
+        t5.c10,
+        t5.c11,
+        t5.c12
+    FROM t5
+    JOIN t1 FOR KEY (c1, c2) <- t5 (c11, c12)
+    JOIN t6 FOR KEY (c13, c14) -> t5 (c9, c10)
+) AS q1
+JOIN t7 FOR KEY (c15, c16) -> q1 (c9, c10);
+
+SELECT
+    q1.c19,
+    q1.c20,
+    t9.c21,
+    t9.c22
+FROM
+(
+    SELECT
+        t8.c17,
+        t8.c18,
+        t8.c19,
+        t8.c20
+    FROM t8
+    JOIN t1 FOR KEY (c1, c2) <- t8 (c19, c20)
+) AS q1
+JOIN t9 FOR KEY (c21, c22) -> q1 (c17, c18);
+
+--
+-- Test revalidation of views
+--
+
+CREATE TABLE addresses
+(
+    id           INTEGER      NOT NULL,
+    street       VARCHAR(255) NOT NULL,
+    city         VARCHAR(100) NOT NULL,
+    state        VARCHAR(100) NOT NULL,
+    country_code CHAR(2)      NOT NULL,
+    zip_code     VARCHAR(20)  NOT NULL,
+    CONSTRAINT addresses_pkey PRIMARY KEY (id)
+);
+
+CREATE TABLE customers
+(
+    id         INTEGER      NOT NULL,
+    name       VARCHAR(255) NOT NULL,
+    address_id INTEGER      NOT NULL,
+    CONSTRAINT customers_pkey            PRIMARY KEY (id),
+    CONSTRAINT customers_address_id_fkey FOREIGN KEY (address_id) REFERENCES addresses (id)
+);
+
+CREATE TABLE orders
+(
+    id           BIGINT         NOT NULL,
+    order_date   DATE           NOT NULL,
+    amount       DECIMAL(10, 2) NOT NULL,
+    customer_id  INTEGER        NOT NULL,
+    CONSTRAINT orders_pkey             PRIMARY KEY (id),
+    CONSTRAINT orders_customer_id_fkey FOREIGN KEY (customer_id) REFERENCES customers (id)
+);
+
+CREATE VIEW customer_details AS
+SELECT
+    c.id AS customer_id,
+    c.name AS customer_name,
+    a.street,
+    a.city,
+    a.state,
+    a.country_code,
+    a.zip_code
+FROM customers AS c
+JOIN addresses AS a FOR KEY (id) <- c (address_id);
+
+CREATE VIEW orders_by_country AS
+SELECT
+    cd.country_code,
+    COUNT(*) AS order_count,
+    SUM(o.amount) AS total_amount
+FROM orders AS o
+JOIN customer_details AS cd FOR KEY (customer_id) <- o (customer_id)
+GROUP BY ROLLUP (cd.country_code);
+
+-- Test NOT NULL constraint dependency: should error because customer_details
+-- (and transitively orders_by_country) depends on address_id being NOT NULL
+ALTER TABLE customers ALTER COLUMN address_id DROP NOT NULL;
+
+-- Replace customer_details with LEFT JOIN version - no NOT NULL dependency
+CREATE OR REPLACE VIEW customer_details AS
+SELECT
+    c.id AS customer_id,
+    c.name AS customer_name,
+    a.street,
+    a.city,
+    a.state,
+    a.country_code,
+    a.zip_code
+FROM customers AS c
+LEFT JOIN addresses AS a FOR KEY (id) <- c (address_id);
+
+-- Now DROP NOT NULL should succeed
+ALTER TABLE customers ALTER COLUMN address_id DROP NOT NULL;
+
+-- Restore NOT NULL for subsequent tests
+ALTER TABLE customers ALTER COLUMN address_id SET NOT NULL;
+
+-- Restore customer_details to inner join version
+CREATE OR REPLACE VIEW customer_details AS
+SELECT
+    c.id AS customer_id,
+    c.name AS customer_name,
+    a.street,
+    a.city,
+    a.state,
+    a.country_code,
+    a.zip_code
+FROM customers AS c
+JOIN addresses AS a FOR KEY (id) <- c (address_id);
+
+--
+-- Test NOT NULL constraint tracking for various join types
+-- Create simple test tables for these tests
+--
+CREATE TABLE t1_nn (t1_id INTEGER PRIMARY KEY);
+CREATE TABLE t2_nn (
+    t2_id INTEGER PRIMARY KEY,
+    t2_t1_id_nn INTEGER NOT NULL REFERENCES t1_nn(t1_id),
+    t2_t1_id_nullable INTEGER REFERENCES t1_nn(t1_id)
+);
+
+INSERT INTO t1_nn VALUES (1), (2), (3);
+INSERT INTO t2_nn VALUES (10, 1, 1), (20, 2, NULL);
+
+-- Test 1: LEFT JOIN where referencing is on inner side (right)
+-- DROP NOT NULL should fail because the view depends on NOT NULL
+CREATE VIEW v_left_ref_inner AS
+SELECT * FROM t1_nn LEFT JOIN t2_nn FOR KEY (t2_t1_id_nn) -> t1_nn (t1_id);
+ALTER TABLE t2_nn ALTER COLUMN t2_t1_id_nn DROP NOT NULL; -- should fail
+DROP VIEW v_left_ref_inner;
+
+-- Test 2: LEFT JOIN where referencing is on outer side (left)
+-- DROP NOT NULL should succeed because left side is preserved
+CREATE VIEW v_left_ref_outer AS
+SELECT * FROM t2_nn LEFT JOIN t1_nn FOR KEY (t1_id) <- t2_nn (t2_t1_id_nn);
+ALTER TABLE t2_nn ALTER COLUMN t2_t1_id_nn DROP NOT NULL; -- should succeed
+ALTER TABLE t2_nn ALTER COLUMN t2_t1_id_nn SET NOT NULL; -- restore
+
+-- Test 3: RIGHT JOIN where referencing is on inner side (left)
+-- DROP NOT NULL should fail because the view depends on NOT NULL
+CREATE VIEW v_right_ref_inner AS
+SELECT * FROM t2_nn RIGHT JOIN t1_nn FOR KEY (t1_id) <- t2_nn (t2_t1_id_nn);
+ALTER TABLE t2_nn ALTER COLUMN t2_t1_id_nn DROP NOT NULL; -- should fail
+DROP VIEW v_right_ref_inner;
+
+-- Test 4: RIGHT JOIN where referencing is on outer side (right)
+-- DROP NOT NULL should succeed because right side is preserved
+CREATE VIEW v_right_ref_outer AS
+SELECT * FROM t1_nn RIGHT JOIN t2_nn FOR KEY (t2_t1_id_nn) -> t1_nn (t1_id);
+ALTER TABLE t2_nn ALTER COLUMN t2_t1_id_nn DROP NOT NULL; -- should succeed
+ALTER TABLE t2_nn ALTER COLUMN t2_t1_id_nn SET NOT NULL; -- restore
+
+-- Test 5: FULL JOIN - DROP NOT NULL should always succeed
+-- Both sides are preserved in a FULL JOIN
+CREATE VIEW v_full_1 AS
+SELECT * FROM t1_nn FULL JOIN t2_nn FOR KEY (t2_t1_id_nn) -> t1_nn (t1_id);
+ALTER TABLE t2_nn ALTER COLUMN t2_t1_id_nn DROP NOT NULL; -- should succeed
+ALTER TABLE t2_nn ALTER COLUMN t2_t1_id_nn SET NOT NULL; -- restore
+
+CREATE VIEW v_full_2 AS
+SELECT * FROM t2_nn FULL JOIN t1_nn FOR KEY (t1_id) <- t2_nn (t2_t1_id_nn);
+ALTER TABLE t2_nn ALTER COLUMN t2_t1_id_nn DROP NOT NULL; -- should succeed
+ALTER TABLE t2_nn ALTER COLUMN t2_t1_id_nn SET NOT NULL; -- restore
+
+-- Cleanup views for outer join NOT NULL tests
+DROP VIEW v_left_ref_outer, v_right_ref_outer, v_full_1, v_full_2;
+DROP TABLE t2_nn, t1_nn;
+
+CREATE TABLE customer_addresses
+(
+    customer_id INTEGER NOT NULL,
+    address_id INTEGER NOT NULL,
+    CONSTRAINT customer_addresses_pkey             PRIMARY KEY (customer_id, address_id),
+    CONSTRAINT customer_addresses_customer_id_fkey FOREIGN KEY (customer_id) REFERENCES customers (id),
+    CONSTRAINT customer_addresses_address_id_fkey  FOREIGN KEY (address_id) REFERENCES addresses (id)
+);
+
+-- error, since it would invalidate foreign key join in orders_by_country
+-- that uses customer_details
+CREATE OR REPLACE VIEW customer_details AS
+SELECT
+    c.id AS customer_id,
+    c.name AS customer_name,
+    a.street,
+    a.city,
+    a.state,
+    a.country_code,
+    a.zip_code
+FROM customers AS c
+JOIN customer_addresses AS ca FOR KEY (customer_id) -> c (id)
+JOIN addresses AS a FOR KEY (id) <- ca (address_id);
 
 --
 -- Test various error conditions
@@ -316,6 +831,72 @@ RETURN (1, 2);
 SELECT * FROM t1 JOIN t2() FOR KEY (c3, c4) -> t1 (c1, c2);
 
 SELECT * FROM t1 JOIN t2 FOR KEY (c3, c4) -> t1 (c1, c5);
+
+DROP VIEW v1, v2;
+CREATE VIEW v1 AS SELECT c1 AS c1_1, c1 AS c1_2, c2 AS c2_1, c2 AS c2_2 FROM t1;
+CREATE VIEW v2 AS SELECT c3 AS c3_1, c3 AS c3_2, c4 AS c4_1, c4 AS c4_2 FROM t2;
+
+SELECT * FROM v1 JOIN t2 FOR KEY (c3, c4) -> v1 (c1_1, c2_1); -- ok
+
+SELECT * FROM v1 JOIN t2 FOR KEY (c3, c4) -> v1 (c1_1, c1_2);
+
+SELECT * FROM v1 JOIN t2 FOR KEY (c3, c4) -> v1 (c1_1, nonexistent);
+
+/*
+ * We don't need to check for duplicate columns,
+ * since there is already such a check for foreign key constraints.
+ * Let's test it anyway.
+ */
+SELECT * FROM v1 JOIN t2 FOR KEY (c3, c3) -> v1 (c1_1, c1_1);
+
+DROP VIEW v1;
+CREATE VIEW v1 AS SELECT c1+0 AS c1_1, c1 AS c1_2, c2 AS c2_1, c2 AS c2_2 FROM t1;
+SELECT * FROM v1 JOIN t2 FOR KEY (c3, c4) -> v1 (c1_1, c2_1);
+
+SELECT * FROM t1 JOIN
+(
+    SELECT c3, c4 FROM t2
+    UNION ALL
+    SELECT c3, c4 FROM t2
+) AS u FOR KEY (c3, c4) -> t1 (c1, c2);
+
+SELECT * FROM
+(
+    SELECT c1, c2 FROM t1 WHERE c2 > 0
+) AS u
+JOIN t2 FOR KEY (c3, c4) -> u (c1, c2);
+
+SELECT *
+FROM t1
+JOIN
+(
+    SELECT * FROM t10
+    JOIN t10 AS t10_2 FOR KEY (c23, c24) <- t10 (c25, c26)
+) AS q1 FOR KEY (c23, c24) -> t1 (c1, c2);
+
+SELECT *
+FROM t1
+JOIN
+(
+    SELECT
+        t10.c23,
+        t10.c24,
+        t10_2.c25,
+        t10_2.c26
+    FROM t10
+    JOIN t10 AS t10_2 FOR KEY (c23, c24) <- t10 (c25, c26)
+) AS q1 FOR KEY (nonexistent, c24) -> t1 (c1, c2);
+
+SELECT *
+FROM t1
+JOIN
+(
+    SELECT
+        t10.c23,
+        t10_2.c24
+    FROM t10
+    JOIN t10 AS t10_2 FOR KEY (c23, c24) <- t10 (c25, c26)
+) AS q1 FOR KEY (c23, c24) -> t1 (c1, c2);
 
 --
 -- Test materialized views (not supported yet)
@@ -462,20 +1043,178 @@ SELECT * FROM t1 JOIN pt2_1 FOR KEY (c3) -> t1 (c1);
 DROP TABLE pt3;
 DROP TABLE pt2;
 
+SELECT *
+FROM (SELECT * FROM (SELECT c1, c2 FROM t1) AS q1(q1_c1, q1_c2)) q
+JOIN t2 FOR KEY (c3, c4) -> q (q1_c1, q1_c2);
+-- equivalent to:
+SELECT *
+FROM (WITH q1 (q1_c1, q1_c2) AS (SELECT c1, c2 FROM t1) SELECT * FROM q1) q
+JOIN t2 FOR KEY (c3, c4) -> q (q1_c1, q1_c2);
+
+DROP TABLE orders CASCADE;
+
 --
--- Test that derived relations are rejected as FK join operands
+-- The below query should raise the error "foreign key join violation",
+-- "referenced relation does not preserve the referenced base table",
+-- since even though there is a UNIQUE constraint on orders.shipment_id,
+-- the orders table doesn't preserve the uniqueness of its keys
+-- due to the join with order_items.
 --
 
--- Subquery as operand: error
-SELECT * FROM (SELECT c1, c2 FROM t1) AS q
-JOIN t2 FOR KEY (c3, c4) -> q (c1, c2);
+CREATE TABLE shipments
+(
+    id INTEGER PRIMARY KEY,
+    carrier TEXT NOT NULL
+);
 
--- View as operand: error
-CREATE VIEW v1 AS SELECT c1, c2 FROM t1;
-SELECT * FROM v1 JOIN t2 FOR KEY (c3, c4) -> v1 (c1, c2);
-DROP VIEW v1;
+CREATE TABLE orders
+(
+    id INTEGER PRIMARY KEY,
+    shipment_id INTEGER UNIQUE NULL REFERENCES shipments(id)
+);
 
--- CTE as operand: error
-WITH q AS (SELECT c1, c2 FROM t1)
-SELECT * FROM q JOIN t2 FOR KEY (c3, c4) -> q (c1, c2);
+CREATE TABLE order_items
+(
+    id INTEGER PRIMARY KEY,
+    order_id INTEGER NOT NULL REFERENCES orders(id)
+);
+
+CREATE TABLE packages
+(
+    id INTEGER PRIMARY KEY,
+    shipment_id INTEGER NOT NULL REFERENCES shipments(id)
+);
+
+INSERT INTO shipments (id, carrier) VALUES
+  (100, 'UPS'),
+  (200, 'FedEx');
+
+INSERT INTO orders (id, shipment_id) VALUES
+  (10, 100),
+  (20, NULL);
+
+INSERT INTO order_items (id, order_id) VALUES
+  (1000, 10),
+  (1001, 10);
+
+INSERT INTO packages (id, shipment_id) VALUES
+  (900, 100);
+
+SELECT
+    packages.id AS package_id,
+    q.order_id,
+    q.shipment_id,
+    q.order_item_id
+FROM
+(
+    SELECT
+        order_items.id AS order_item_id,
+        orders.id      AS order_id,
+        shipments.id   AS shipment_id
+    FROM order_items
+    JOIN orders FOR KEY (id) <- order_items (order_id)
+    RIGHT JOIN shipments FOR KEY (id) <- orders (shipment_id)
+) AS q JOIN packages FOR KEY (shipment_id) -> q (shipment_id);
+
+--
+-- The below query should be accepted
+--
+SELECT
+    packages.id AS package_id,
+    q.order_id,
+    q.shipment_id
+FROM
+(
+    SELECT
+        shipments.id AS shipment_id,
+        orders.id AS order_id
+    FROM shipments
+    LEFT JOIN orders FOR KEY (shipment_id) -> shipments (id)
+) AS q JOIN packages FOR KEY (shipment_id) -> q (shipment_id);
+
+--
+-- The below query should raise an error since a CROSS JOIN
+-- could produce a zero rows result if one of the tables contain
+-- zero rows.
+--
+SELECT
+    packages.id AS package_id,
+    q.order_id,
+    q.shipment_id
+FROM
+(
+    SELECT
+        shipments.id AS shipment_id,
+        orders.id AS order_id
+    FROM shipments
+    LEFT JOIN orders FOR KEY (shipment_id) -> shipments (id)
+    CROSS JOIN order_items
+) AS q JOIN packages FOR KEY (shipment_id) -> q (shipment_id);
+
+--
+-- TODO: RLS policy equivalence check
+-- Long-term ambition: If both the referencing and referenced sides of a
+-- foreign key join have equivalent RLS policies, any filtering due to RLS
+-- would not violate the foreign key join semantics. For now, RLS is ignored
+-- during FK join validation - filtering happens at execution time.
+--
+-- Example of what could be valid if policies are equivalent:
+-- CREATE POLICY referencing_policy ON referencing_table USING (tenant_id = current_tenant());
+-- CREATE POLICY referenced_policy ON referenced_table USING (tenant_id = current_tenant());
+-- SELECT * FROM referencing_table
+-- JOIN referenced_table FOR KEY (fk_col) -> referenced_table (pk_col);
+-- This would be safe because both tables filter by the same tenant_id condition.
+--
+
+--
+-- Test self-referencing FK: relid-only column mapping can't distinguish
+-- between different instances of the same base table in a self-join view.
+--
+-- A view that FK-joins t_self to itself preserves the referencing (child)
+-- instance but NOT the referenced (parent) instance.  Yet both child_id
+-- and parent_id resolve to the same (relid, attnum) pair, so using
+-- parent_id as the referenced column in an outer FK join is incorrectly
+-- accepted — the view doesn't guarantee all parent_id values are present.
+--
+CREATE TABLE t_self (
+    id int PRIMARY KEY,
+    parent_id int NOT NULL REFERENCES t_self(id)
+);
+INSERT INTO t_self VALUES (1, 1), (2, 1), (3, 2);
+-- row 1: root (parent_id points to itself)
+-- row 2: child of 1
+-- row 3: child of 2
+
+-- View: each row joined to its parent via FK join.
+-- The INNER FK join preserves the referencing (child) side, so
+-- fkPreservedRteid = child's RTEId for the child instance.
+-- parent_id values in the view: {1, 2} (row 3's parent is 2, row 2's parent is 1, row 1's parent is 1).
+-- Notably, parent_id=3 is ABSENT (nobody has parent_id=3).
+CREATE VIEW v_child_parent AS
+SELECT child.id AS child_id, parent.id AS parent_id
+FROM t_self AS child
+JOIN t_self AS parent FOR KEY (id) <- child (parent_id);
+
+-- Verify the view contents
+SELECT * FROM v_child_parent ORDER BY child_id;
+
+-- Another table that references t_self
+CREATE TABLE t_other (ref_id int NOT NULL REFERENCES t_self(id));
+INSERT INTO t_other VALUES (3);  -- references t_self.id=3
+
+-- Using child_id as the referenced column should work: the view preserves
+-- ALL child_id values (every row from the child instance of t_self is present).
+SELECT * FROM v_child_parent
+JOIN t_other FOR KEY (ref_id) -> v_child_parent (child_id);
+
+-- Using parent_id as the referenced column should FAIL: the view does NOT
+-- preserve all parent_id values (parent_id=3 is missing because no row has
+-- parent_id=3).  With RTEId-based tracking, child_id and parent_id resolve
+-- to different base table instances, so this is correctly rejected.
+SELECT * FROM v_child_parent
+JOIN t_other FOR KEY (ref_id) -> v_child_parent (parent_id);
+
+DROP TABLE t_other;
+DROP VIEW v_child_parent;
+DROP TABLE t_self CASCADE;
 

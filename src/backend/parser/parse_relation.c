@@ -34,7 +34,6 @@
 #include "utils/lsyscache.h"
 #include "utils/syscache.h"
 #include "utils/varlena.h"
-#include "rewrite/rewriteHandler.h"
 
 /* Static variable for global base relation indexing */
 static Index next_baserelindex = 1;
@@ -95,6 +94,7 @@ static void expandRelation(Oid relid, Alias *eref,
 						   VarReturningType returning_type,
 						   int location, bool include_dropped,
 						   List **colnames, List **colvars);
+static void set_rte_fk_info_for_relation(RangeTblEntry *rte, Relation rel);
 static void expandTupleDesc(TupleDesc tupdesc, Alias *eref,
 							int count, int offset,
 							int rtindex, int sublevels_up,
@@ -1474,6 +1474,146 @@ parserOpenTable(ParseState *pstate, const RangeVar *relation, int lockmode)
 }
 
 /*
+ * set_rte_fk_info_for_relation
+ *		Set FK preservation and column mapping on an RTE for a relation.
+ *
+ * For base tables (RELKIND_RELATION / RELKIND_PARTITIONED_TABLE), uses the
+ * RTE's runtime RTEId directly: all columns map to the table's own RTEId.
+ *
+ * For views, reads FK join metadata from the relcache catalogs
+ * (pg_class.relfkpreserved = baserelindex, pg_attribute.attfkbaserelid /
+ * attfkbaseattnum / attfkbaserelindex) and constructs RTEIds from catalog data.
+ *
+ * Other relation kinds get NULL preservation and empty lists.
+ */
+static void
+set_rte_fk_info_for_relation(RangeTblEntry *rte, Relation rel)
+{
+	int		natts = RelationGetNumberOfAttributes(rel);
+	char	relkind = rel->rd_rel->relkind;
+
+	rte->fkPreservedRteid = NULL;
+	rte->fkColBaseRteids = NIL;
+	rte->fkColBaseAttnums = NIL;
+
+	if (relkind == RELKIND_RELATION || relkind == RELKIND_PARTITIONED_TABLE)
+	{
+		/*
+		 * Base tables: use runtime RTEId directly. The RTE must already have
+		 * its rteid assigned before calling this function.
+		 */
+		Assert(rte->rteid != NULL);
+		rte->fkPreservedRteid = rte->rteid;
+
+		for (int i = 0; i < natts; i++)
+		{
+			Form_pg_attribute attr = TupleDescAttr(rel->rd_att, i);
+
+			rte->fkColBaseRteids = lappend(rte->fkColBaseRteids, rte->rteid);
+			rte->fkColBaseAttnums = lappend_int(rte->fkColBaseAttnums,
+												attr->attnum);
+		}
+	}
+	else if (relkind == RELKIND_VIEW)
+	{
+		/*
+		 * Views: reconstruct RTEIds from catalog data.
+		 * relfkpreserved stores the baserelindex of the preserved instance.
+		 * Per-column attfkbaserelid/attfkbaserelindex identify the instance.
+		 */
+		int32	preserved_bri = rel->rd_rel->relfkpreserved;
+
+		for (int i = 0; i < natts; i++)
+		{
+			Form_pg_attribute attr = TupleDescAttr(rel->rd_att, i);
+
+			if (OidIsValid(attr->attfkbaserelid))
+			{
+				RTEId  *col_rteid = makeNode(RTEId);
+
+				col_rteid->relid = attr->attfkbaserelid;
+				col_rteid->baserelindex = (Index) attr->attfkbaserelindex;
+				col_rteid->fxid = 0;
+				col_rteid->procnumber = 0;
+
+				rte->fkColBaseRteids = lappend(rte->fkColBaseRteids, col_rteid);
+
+				/*
+				 * If this column's baserelindex matches the preserved one,
+				 * use this RTEId as the preservation RTEId.
+				 */
+				if (preserved_bri != 0 &&
+					attr->attfkbaserelindex == preserved_bri &&
+					rte->fkPreservedRteid == NULL)
+					rte->fkPreservedRteid = col_rteid;
+			}
+			else
+			{
+				rte->fkColBaseRteids = lappend(rte->fkColBaseRteids, NULL);
+			}
+
+			rte->fkColBaseAttnums = lappend_int(rte->fkColBaseAttnums,
+												attr->attfkbaseattnum);
+		}
+
+		/*
+		 * If we have a preserved baserelindex but no matching column was
+		 * found, construct a standalone RTEId for preservation.
+		 */
+		if (preserved_bri != 0 && rte->fkPreservedRteid == NULL)
+		{
+			RTEId  *pres_rteid = makeNode(RTEId);
+
+			pres_rteid->baserelindex = (Index) preserved_bri;
+			pres_rteid->relid = InvalidOid;
+			pres_rteid->fxid = 0;
+			pres_rteid->procnumber = 0;
+			rte->fkPreservedRteid = pres_rteid;
+		}
+	}
+	/* else: other relkinds get NULL/NIL defaults set above */
+}
+
+/*
+ * resolve_var_fk_colmap
+ *		Resolve a Var to its base table RTEId and attnum via FK column mapping.
+ *
+ * Given a Var and the query's rtable, looks up the source RTE's fkColBaseRteids
+ * and fkColBaseAttnums to find which base table column the Var originates from.
+ * Returns (NULL, 0) for system columns, outer-level Vars, or Vars whose
+ * source RTE has no column mapping.
+ */
+void
+resolve_var_fk_colmap(Var *var, List *rtable,
+					  RTEId **base_rteid, int *base_attnum)
+{
+	RangeTblEntry *src_rte;
+
+	if (var->varlevelsup != 0 || var->varattno < 1)
+	{
+		*base_rteid = NULL;
+		*base_attnum = 0;
+		return;
+	}
+
+	src_rte = rt_fetch(var->varno, rtable);
+
+	if (src_rte->fkColBaseRteids != NIL &&
+		var->varattno <= list_length(src_rte->fkColBaseRteids))
+	{
+		*base_rteid = (RTEId *) list_nth(src_rte->fkColBaseRteids,
+										  var->varattno - 1);
+		*base_attnum = list_nth_int(src_rte->fkColBaseAttnums,
+									var->varattno - 1);
+	}
+	else
+	{
+		*base_rteid = NULL;
+		*base_attnum = 0;
+	}
+}
+
+/*
  * Add an entry for a relation to the pstate's range table (p_rtable).
  * Then, construct and return a ParseNamespaceItem for the new RTE.
  *
@@ -1537,6 +1677,25 @@ addRangeTableEntry(ParseState *pstate,
 	rte->lateral = false;
 	rte->inFromCl = inFromCl;
 
+	/*
+	 * Create RTEId for base tables before setting FK info, because
+	 * set_rte_fk_info_for_relation needs it for column mapping.
+	 */
+	if (rte->relkind == RELKIND_RELATION || rte->relkind == RELKIND_PARTITIONED_TABLE)
+	{
+		RTEId	   *rteid = makeNode(RTEId);
+		FullTransactionId fxid = ReadNextFullTransactionId();
+
+		rteid->fxid = fxid.value;
+		rteid->procnumber = (int) MyProcNumber;
+		rteid->baserelindex = next_baserelindex++;
+		rteid->relid = rte->relid;
+		rte->rteid = rteid;
+	}
+
+	/* Set FK preservation and column mapping for this relation */
+	set_rte_fk_info_for_relation(rte, rel);
+
 	perminfo = addRTEPermissionInfo(&pstate->p_rteperminfos, rte);
 	perminfo->requiredPerms = ACL_SELECT;
 
@@ -1546,18 +1705,6 @@ addRangeTableEntry(ParseState *pstate,
 	 * appropriate.
 	 */
 	pstate->p_rtable = lappend(pstate->p_rtable, rte);
-
-	if (rte->relkind == RELKIND_RELATION || rte->relkind == RELKIND_PARTITIONED_TABLE)
-	{
-		/* Create default RTEId for any relation type */
-		RTEId	   *rteid = makeNode(RTEId);
-		FullTransactionId fxid = ReadNextFullTransactionId();
-
-		rteid->fxid = fxid.value;
-		rteid->procnumber = (int) MyProcNumber;
-		rteid->baserelindex = next_baserelindex++;
-		rte->rteid = rteid;
-	}
 
 	/*
 	 * Build a ParseNamespaceItem, but don't add it to the pstate's namespace
@@ -1633,6 +1780,9 @@ addRangeTableEntryForRelation(ParseState *pstate,
 	 */
 	rte->lateral = false;
 	rte->inFromCl = inFromCl;
+
+	/* Set FK preservation and column mapping for this relation */
+	set_rte_fk_info_for_relation(rte, rel);
 
 	perminfo = addRTEPermissionInfo(&pstate->p_rteperminfos, rte);
 	perminfo->requiredPerms = ACL_SELECT;
@@ -1730,6 +1880,13 @@ addRangeTableEntryForSubquery(ParseState *pstate,
 	 */
 	rte->lateral = lateral;
 	rte->inFromCl = inFromCl;
+
+	/*
+	 * Propagate FK join preservation info from the subquery.
+	 */
+	rte->fkPreservedRteid = subquery->fkPreservedRteid;
+	rte->fkColBaseRteids = list_copy(subquery->fkColBaseRteids);
+	rte->fkColBaseAttnums = list_copy(subquery->fkColBaseAttnums);
 
 	/*
 	 * Add completed RTE to pstate's range table list, so that we know its
@@ -2452,6 +2609,20 @@ addRangeTableEntryForCTE(ParseState *pstate,
 	 */
 	rte->lateral = false;
 	rte->inFromCl = inFromCl;
+
+	/*
+	 * Propagate FK join preservation info from the CTE's query.
+	 * Recursive CTEs and self-references are opaque for FK join purposes.
+	 */
+	if (!cte->cterecursive && !rte->self_reference &&
+		IsA(cte->ctequery, Query))
+	{
+		Query  *ctequery = (Query *) cte->ctequery;
+
+		rte->fkPreservedRteid = ctequery->fkPreservedRteid;
+		rte->fkColBaseRteids = list_copy(ctequery->fkColBaseRteids);
+		rte->fkColBaseAttnums = list_copy(ctequery->fkColBaseAttnums);
+	}
 
 	/*
 	 * Add completed RTE to pstate's range table list, so that we know its

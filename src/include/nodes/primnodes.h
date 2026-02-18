@@ -2296,6 +2296,23 @@ typedef struct RangeTblRef
 	int			rtindex;
 } RangeTblRef;
 
+/*
+ * RTEId - Identifier for range table entries
+ *
+ * Uniquely identifies a base table instance across the query.  Used for
+ * FK join column mapping and preservation tracking.  Defined here in
+ * primnodes.h (rather than parsenodes.h) because ForeignKeyJoinNode
+ * references it.
+ */
+typedef struct RTEId
+{
+	NodeTag		type;			/* tag identifying this as a node */
+	uint64		fxid;			/* transaction ID when created */
+	Index		baserelindex;	/* base range table index */
+	int			procnumber;		/* process ID */
+	Oid			relid;			/* base table OID, for FK constraint lookup */
+} RTEId;
+
 typedef enum ForeignKeyDirection
 {
 	FKDIR_FROM,
@@ -2311,6 +2328,11 @@ typedef struct ForeignKeyJoinNode
 	Index		referencedVarno;	/* varno of the referenced relation */
 	List	   *referencedAttnums;	/* List of attribute numbers (int) */
 	Oid			constraint;		/* pg_constraint OID foreign key */
+	RTEId	   *referencingRteid;	/* RTEId of referencing base table instance */
+	RTEId	   *referencedRteid;	/* RTEId of referenced base table instance */
+	bool		fkColsNotNull;	/* all FK cols on referencing table are NOT NULL */
+	bool		fkColsUnique;	/* FK cols on referencing table form a unique key */
+	List	   *notNullConstraints; /* NOT NULL constraint OIDs for dependency tracking */
 } ForeignKeyJoinNode;
 
 /*----------

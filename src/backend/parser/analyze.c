@@ -1550,6 +1550,84 @@ transformSelectStmt(ParseState *pstate, SelectStmt *stmt,
 	if (pstate->p_hasAggs || qry->groupClause || qry->groupingSets || qry->havingQual)
 		parseCheckAggregates(pstate, qry);
 
+	/*
+	 * Compute FK preservation for this query.  A query preserves a base
+	 * table only if it has no disqualifying clauses and a single FROM item.
+	 */
+	qry->fkPreservedRteid = NULL;
+	if (qual == NULL &&						/* no WHERE */
+		qry->havingQual == NULL &&			/* no HAVING */
+		qry->limitOffset == NULL &&			/* no OFFSET */
+		qry->limitCount == NULL &&			/* no LIMIT */
+		qry->distinctClause == NIL &&		/* no DISTINCT */
+		qry->groupClause == NIL &&			/* no GROUP BY */
+		qry->groupingSets == NIL &&			/* no GROUPING SETS */
+		!qry->hasWindowFuncs &&				/* no window functions */
+		qry->setOperations == NULL &&		/* no UNION/INTERSECT/EXCEPT */
+		qry->hasAggs == false)				/* no aggregates */
+	{
+		List	   *fromlist = qry->jointree->fromlist;
+
+		if (list_length(fromlist) == 1)
+		{
+			Node	   *fromitem = (Node *) linitial(fromlist);
+			int			rtindex = 0;
+
+			if (IsA(fromitem, RangeTblRef))
+				rtindex = castNode(RangeTblRef, fromitem)->rtindex;
+			else if (IsA(fromitem, JoinExpr))
+				rtindex = castNode(JoinExpr, fromitem)->rtindex;
+
+			if (rtindex > 0)
+			{
+				RangeTblEntry *rte = rt_fetch(rtindex, qry->rtable);
+
+				qry->fkPreservedRteid = rte->fkPreservedRteid;
+			}
+		}
+	}
+
+	/*
+	 * Compute FK column mapping for this query.  This maps each output
+	 * column to its source base table RTEId (if any).  Unlike preservation,
+	 * this is computed even for queries with WHERE, LIMIT, etc., because
+	 * the referencing side of an FK join is allowed to filter rows.
+	 *
+	 * We require a single FROM item and no set operations (which would make
+	 * column mapping ambiguous).
+	 */
+	qry->fkColBaseRteids = NIL;
+	qry->fkColBaseAttnums = NIL;
+	if (qry->setOperations == NULL)
+	{
+		List	   *fromlist = qry->jointree->fromlist;
+
+		if (list_length(fromlist) == 1)
+		{
+			ListCell   *lc;
+
+			foreach(lc, qry->targetList)
+			{
+				TargetEntry *te = (TargetEntry *) lfirst(lc);
+				RTEId  *col_rteid = NULL;
+				int		col_attnum = 0;
+
+				if (te->resjunk)
+					continue;
+
+				if (IsA(te->expr, Var))
+					resolve_var_fk_colmap((Var *) te->expr,
+										  qry->rtable,
+										  &col_rteid, &col_attnum);
+
+				qry->fkColBaseRteids =
+					lappend(qry->fkColBaseRteids, col_rteid);
+				qry->fkColBaseAttnums =
+					lappend_int(qry->fkColBaseAttnums, col_attnum);
+			}
+		}
+	}
+
 	return qry;
 }
 

@@ -1571,6 +1571,106 @@ transformFromClauseItem(ParseState *pstate, Node *n,
 		Assert(res_colindex == list_length(nsitem->p_names->colnames));
 
 		/*
+		 * Compute FK preservation for this join.  For FK joins, apply
+		 * the preservation rule from the spec.  For non-FK joins, no base
+		 * table is preserved.  Result is stored directly on the join RTE.
+		 */
+		nsitem->p_rte->fkPreservedRteid = NULL;
+		if (j->fkJoin && IsA(j->fkJoin, ForeignKeyJoinNode))
+		{
+			ForeignKeyJoinNode *fkjn_node = (ForeignKeyJoinNode *) j->fkJoin;
+			RangeTblEntry *l_rte = rt_fetch(l_nsitem->p_rtindex, pstate->p_rtable);
+			RangeTblEntry *r_rte = rt_fetch(r_nsitem->p_rtindex, pstate->p_rtable);
+			RTEId	   *l_preserved = l_rte->fkPreservedRteid;
+			RTEId	   *r_preserved = r_rte->fkPreservedRteid;
+			RTEId	   *preserved_f,
+					   *preserved_p;
+			bool		P_p,
+						P_f;
+
+			/* Map left/right to referencing/referenced based on FK direction */
+			if (fkjn_node->fkdir == FKDIR_FROM)
+			{
+				preserved_f = l_preserved;
+				preserved_p = r_preserved;
+			}
+			else
+			{
+				preserved_f = r_preserved;
+				preserved_p = l_preserved;
+			}
+
+			P_p = (preserved_p != NULL &&
+				   fkjn_node->referencedRteid != NULL &&
+				   preserved_p->baserelindex == fkjn_node->referencedRteid->baserelindex);
+			P_f = (preserved_f != NULL &&
+				   fkjn_node->referencingRteid != NULL &&
+				   preserved_f->baserelindex == fkjn_node->referencingRteid->baserelindex);
+
+			/*
+			 * Apply the preservation rule from the spec:
+			 *   (P_p, _,    INNER, true, _,    _   ) -> preserved_f
+			 *   (P_p, _,    LEFT,  FROM, _,    _   ) -> preserved_f
+			 *   (P_p, P_f,  LEFT,  TO,   _,    true) -> preserved_p
+			 *   (P_p, _,    RIGHT, TO,   _,    _   ) -> preserved_f
+			 *   (P_p, P_f,  RIGHT, FROM, _,    true) -> preserved_p
+			 *   otherwise                             -> NULL
+			 */
+			if (P_p &&
+				j->jointype == JOIN_INNER &&
+				fkjn_node->fkColsNotNull)
+				nsitem->p_rte->fkPreservedRteid = preserved_f;
+			else if (P_p &&
+					 j->jointype == JOIN_LEFT &&
+					 fkjn_node->fkdir == FKDIR_FROM)
+				nsitem->p_rte->fkPreservedRteid = preserved_f;
+			else if (P_p && P_f &&
+					 j->jointype == JOIN_LEFT &&
+					 fkjn_node->fkdir == FKDIR_TO &&
+					 fkjn_node->fkColsUnique)
+				nsitem->p_rte->fkPreservedRteid = preserved_p;
+			else if (P_p &&
+					 j->jointype == JOIN_RIGHT &&
+					 fkjn_node->fkdir == FKDIR_TO)
+				nsitem->p_rte->fkPreservedRteid = preserved_f;
+			else if (P_p && P_f &&
+					 j->jointype == JOIN_RIGHT &&
+					 fkjn_node->fkdir == FKDIR_FROM &&
+					 fkjn_node->fkColsUnique)
+				nsitem->p_rte->fkPreservedRteid = preserved_p;
+		}
+
+		/*
+		 * Compute FK column mapping for the join RTE.  For each output
+		 * column (joinaliasvars entry), trace it back to its base table
+		 * origin if possible.
+		 */
+		{
+			RangeTblEntry *join_rte = nsitem->p_rte;
+			ListCell   *lc2;
+
+			join_rte->fkColBaseRteids = NIL;
+			join_rte->fkColBaseAttnums = NIL;
+
+			foreach(lc2, join_rte->joinaliasvars)
+			{
+				Node   *aliasvar = (Node *) lfirst(lc2);
+				RTEId  *col_rteid = NULL;
+				int		col_attnum = 0;
+
+				if (aliasvar != NULL && IsA(aliasvar, Var))
+					resolve_var_fk_colmap((Var *) aliasvar,
+										  pstate->p_rtable,
+										  &col_rteid, &col_attnum);
+
+				join_rte->fkColBaseRteids =
+					lappend(join_rte->fkColBaseRteids, col_rteid);
+				join_rte->fkColBaseAttnums =
+					lappend_int(join_rte->fkColBaseAttnums, col_attnum);
+			}
+		}
+
+		/*
 		 * Save a link to the JoinExpr in the proper element of p_joinexprs.
 		 * Since we maintain that list lazily, it may be necessary to fill in
 		 * empty entries before we can add the JoinExpr in the right place.

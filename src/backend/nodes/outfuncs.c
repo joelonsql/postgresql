@@ -576,6 +576,10 @@ _outRangeTblEntry(StringInfo str, const RangeTblEntry *node)
 			break;
 	}
 
+	WRITE_NODE_FIELD(fkPreservedRteid);
+	WRITE_NODE_FIELD(fkColBaseRteids);
+	WRITE_NODE_FIELD(fkColBaseAttnums);
+
 	WRITE_BOOL_FIELD(lateral);
 	WRITE_BOOL_FIELD(inFromCl);
 	WRITE_NODE_FIELD(securityQuals);

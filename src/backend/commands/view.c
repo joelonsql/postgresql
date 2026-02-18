@@ -14,9 +14,13 @@
  */
 #include "postgres.h"
 
+#include "access/htup_details.h"
 #include "access/relation.h"
+#include "access/table.h"
 #include "access/xact.h"
+#include "catalog/indexing.h"
 #include "catalog/namespace.h"
+#include "catalog/pg_attribute.h"
 #include "commands/tablecmds.h"
 #include "commands/view.h"
 #include "nodes/makefuncs.h"
@@ -28,8 +32,10 @@
 #include "utils/builtins.h"
 #include "utils/lsyscache.h"
 #include "utils/rel.h"
+#include "utils/syscache.h"
 
 static void checkViewColumns(TupleDesc newdesc, TupleDesc olddesc);
+static void UpdateViewFKInfo(Oid viewOid, Query *viewParse);
 
 /*---------------------------------------------------------------------
  * DefineVirtualRelation
@@ -179,7 +185,13 @@ DefineVirtualRelation(RangeVar *relation, List *tlist, bool replace,
 		 */
 		StoreViewQuery(viewOid, viewParse, replace);
 
-		/* Make the new view query visible */
+		/* Make the new view query visible before updating FK info */
+		CommandCounterIncrement();
+
+		/* Store FK preservation info in pg_class/pg_attribute */
+		UpdateViewFKInfo(viewOid, viewParse);
+
+		/* Make FK info visible */
 		CommandCounterIncrement();
 
 		/*
@@ -251,6 +263,12 @@ DefineVirtualRelation(RangeVar *relation, List *tlist, bool replace,
 
 		/* Store the query for the view */
 		StoreViewQuery(address.objectId, viewParse, replace);
+
+		/* Make view query visible before updating FK info */
+		CommandCounterIncrement();
+
+		/* Store FK preservation info in pg_class/pg_attribute */
+		UpdateViewFKInfo(address.objectId, viewParse);
 
 		return address;
 	}
@@ -325,6 +343,78 @@ checkViewColumns(TupleDesc newdesc, TupleDesc olddesc)
 	 * constraints, and the only ones that could be on the old view are
 	 * defaults, which we are happy to leave in place.
 	 */
+}
+
+/*
+ * UpdateViewFKInfo
+ *		Store FK preservation info from a view's parsed query into the
+ *		system catalogs (pg_class.relfkpreserved and pg_attribute columns).
+ *
+ * This makes FK join metadata available via the relcache so the parser
+ * doesn't need to inspect view rewrite rules.
+ */
+static void
+UpdateViewFKInfo(Oid viewOid, Query *viewParse)
+{
+	HeapTuple	classtup;
+	Form_pg_class classform;
+	Relation	attrel;
+	int			natts;
+	ListCell   *lc_rteid;
+	ListCell   *lc_attnum;
+
+	/* Update pg_class.relfkpreserved (stores baserelindex, not OID) */
+	classtup = SearchSysCacheCopy1(RELOID, ObjectIdGetDatum(viewOid));
+	if (!HeapTupleIsValid(classtup))
+		elog(ERROR, "cache lookup failed for relation %u", viewOid);
+	classform = (Form_pg_class) GETSTRUCT(classtup);
+	classform->relfkpreserved = viewParse->fkPreservedRteid ?
+		(int32) viewParse->fkPreservedRteid->baserelindex : 0;
+	{
+		Relation	pg_class_rel = table_open(RelationRelationId, RowExclusiveLock);
+
+		CatalogTupleUpdate(pg_class_rel, &classtup->t_self, classtup);
+		table_close(pg_class_rel, RowExclusiveLock);
+	}
+	heap_freetuple(classtup);
+
+	/* Update pg_attribute FK column mapping */
+	natts = list_length(viewParse->fkColBaseRteids);
+	if (natts == 0)
+		return;
+
+	attrel = table_open(AttributeRelationId, RowExclusiveLock);
+
+	lc_rteid = list_head(viewParse->fkColBaseRteids);
+	lc_attnum = list_head(viewParse->fkColBaseAttnums);
+
+	for (int i = 1; i <= natts; i++)
+	{
+		HeapTuple		atttup;
+		Form_pg_attribute attform;
+		RTEId		   *col_rteid;
+
+		atttup = SearchSysCacheCopy2(ATTNUM,
+									 ObjectIdGetDatum(viewOid),
+									 Int16GetDatum(i));
+		if (!HeapTupleIsValid(atttup))
+			elog(ERROR, "cache lookup failed for attribute %d of relation %u",
+				 i, viewOid);
+		attform = (Form_pg_attribute) GETSTRUCT(atttup);
+
+		col_rteid = (RTEId *) lfirst(lc_rteid);
+		attform->attfkbaserelid = col_rteid ? col_rteid->relid : InvalidOid;
+		attform->attfkbaserelindex = col_rteid ? (int32) col_rteid->baserelindex : 0;
+		attform->attfkbaseattnum = lfirst_int(lc_attnum);
+
+		CatalogTupleUpdate(attrel, &atttup->t_self, atttup);
+		heap_freetuple(atttup);
+
+		lc_rteid = lnext(viewParse->fkColBaseRteids, lc_rteid);
+		lc_attnum = lnext(viewParse->fkColBaseAttnums, lc_attnum);
+	}
+
+	table_close(attrel, RowExclusiveLock);
 }
 
 static void

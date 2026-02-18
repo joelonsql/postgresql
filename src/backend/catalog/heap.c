@@ -770,6 +770,9 @@ InsertPgAttributeTuples(Relation pg_attribute_rel,
 		slot[slotCount]->tts_values[Anum_pg_attribute_attislocal - 1] = BoolGetDatum(attrs->attislocal);
 		slot[slotCount]->tts_values[Anum_pg_attribute_attinhcount - 1] = Int16GetDatum(attrs->attinhcount);
 		slot[slotCount]->tts_values[Anum_pg_attribute_attcollation - 1] = ObjectIdGetDatum(attrs->attcollation);
+		slot[slotCount]->tts_values[Anum_pg_attribute_attfkbaserelid - 1] = ObjectIdGetDatum(attrs->attfkbaserelid);
+		slot[slotCount]->tts_values[Anum_pg_attribute_attfkbaseattnum - 1] = Int16GetDatum(attrs->attfkbaseattnum);
+		slot[slotCount]->tts_values[Anum_pg_attribute_attfkbaserelindex - 1] = Int32GetDatum(attrs->attfkbaserelindex);
 		if (attrs_extra)
 		{
 			slot[slotCount]->tts_values[Anum_pg_attribute_attstattarget - 1] = attrs_extra->attstattarget.value;
@@ -847,6 +850,18 @@ AddNewAttributeTuples(Oid new_rel_oid,
 	rel = table_open(AttributeRelationId, RowExclusiveLock);
 
 	indstate = CatalogOpenIndexes(rel);
+
+	/* Base tables get identity FK column mapping (each col maps to itself) */
+	if (relkind == RELKIND_RELATION || relkind == RELKIND_PARTITIONED_TABLE)
+	{
+		for (int i = 0; i < natts; i++)
+		{
+			Form_pg_attribute attr = TupleDescAttr(tupdesc, i);
+
+			attr->attfkbaserelid = new_rel_oid;
+			attr->attfkbaseattnum = attr->attnum;
+		}
+	}
 
 	InsertPgAttributeTuples(rel, tupdesc, new_rel_oid, NULL, indstate);
 
@@ -953,6 +968,7 @@ InsertPgClassTuple(Relation pg_class_desc,
 	values[Anum_pg_class_relrewrite - 1] = ObjectIdGetDatum(rd_rel->relrewrite);
 	values[Anum_pg_class_relfrozenxid - 1] = TransactionIdGetDatum(rd_rel->relfrozenxid);
 	values[Anum_pg_class_relminmxid - 1] = MultiXactIdGetDatum(rd_rel->relminmxid);
+	values[Anum_pg_class_relfkpreserved - 1] = Int32GetDatum(rd_rel->relfkpreserved);
 	if (relacl != (Datum) 0)
 		values[Anum_pg_class_relacl - 1] = relacl;
 	else
@@ -1022,6 +1038,12 @@ AddNewRelationTuple(Relation pg_class_desc,
 
 	/* relispartition is always set by updating this tuple later */
 	new_rel_reltup->relispartition = false;
+
+	/*
+	 * FK join preservation: base tables use runtime RTEId (not catalog), so 0.
+	 * Views set this to the preserved baserelindex via UpdateViewFKInfo().
+	 */
+	new_rel_reltup->relfkpreserved = 0;
 
 	/* fill rd_att's type ID with something sane even if reltype is zero */
 	new_rel_desc->rd_att->tdtypeid = new_type_oid ? new_type_oid : RECORDOID;

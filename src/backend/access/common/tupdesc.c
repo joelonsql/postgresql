@@ -872,6 +872,9 @@ TupleDescInitEntry(TupleDesc desc,
 	att->attisdropped = false;
 	att->attislocal = true;
 	att->attinhcount = 0;
+	att->attfkbaserelid = InvalidOid;
+	att->attfkbaseattnum = 0;
+	att->attfkbaserelindex = 0;
 	/* variable-length fields are not present in tupledescs */
 
 	tuple = SearchSysCache1(TYPEOID, ObjectIdGetDatum(oidtypeid));
@@ -935,6 +938,9 @@ TupleDescInitBuiltinEntry(TupleDesc desc,
 	att->attisdropped = false;
 	att->attislocal = true;
 	att->attinhcount = 0;
+	att->attfkbaserelid = InvalidOid;
+	att->attfkbaseattnum = 0;
+	att->attfkbaserelindex = 0;
 	/* variable-length fields are not present in tupledescs */
 
 	att->atttypid = oidtypeid;
