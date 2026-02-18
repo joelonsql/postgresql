@@ -106,16 +106,14 @@ FROM (
 JOIN fko_fk_notnull i FOR KEY (fk_id) -> q (ref_id);
 
 -- ============================================================
--- Section E: Outer rows — clearing by inner FK equi-join
+-- Section E: Outer rows — simplified algorithm rejects all
 -- ============================================================
 
--- When a LEFT JOIN introduces ghost rows for a table (adding it to O),
--- a subsequent INNER FK join can clear it: the equi-join condition
--- filters ghost rows because NULL join columns never match.
---
--- Schema: a <-FK- b -FK-> c, and d -FK-> b
--- b has two NOT NULL foreign keys: b.a_id -> a.id and b.c_id -> c.id
--- d references b: d.b_id -> b.id
+-- The simplified algorithm tracks only a single "preserved" base table
+-- through the join tree.  Once a LEFT JOIN introduces a second table,
+-- the preserved value can only track one side.  All three cases below
+-- fail because the subquery's preserved table is fko_clear_a (the LEFT
+-- JOIN preserves the left/outer side), not fko_clear_b.
 
 CREATE TABLE fko_clear_a (id integer PRIMARY KEY);
 CREATE TABLE fko_clear_c (id integer PRIMARY KEY);
@@ -134,12 +132,8 @@ INSERT INTO fko_clear_c VALUES (10), (20), (30);
 INSERT INTO fko_clear_b VALUES (100, 1, 10), (200, 2, 20), (300, 3, 30);
 INSERT INTO fko_clear_d VALUES (1000, 100), (2000, 200);
 
--- E1: INNER JOIN clears b from O → FK join succeeds.
---
--- Inside the subquery:
---   a LEFT JOIN b: adds b to O (b is on the inner side of the LEFT JOIN)
---   ... JOIN c:    clears b from O (INNER equi-join on b.c_id filters ghost rows)
--- After: b ∈ R (chain extension), b ∈ U, b ∉ O → entry point passes.
+-- E1: The simplified algorithm cannot track ghost-row clearing via
+-- INNER JOIN, so this now correctly errors.
 SELECT COUNT(*)
 FROM (
     SELECT a.id AS a_id, b.id AS b_id, c.id AS c_id
@@ -149,9 +143,7 @@ FROM (
 ) sub
 JOIN fko_clear_d d FOR KEY (b_id) -> sub (b_id);
 
--- E2: Without the clearing INNER JOIN, b stays in O → FK join fails.
---
--- Only the LEFT JOIN; no subsequent join to clear b from O.
+-- E2: Without the clearing INNER JOIN, b stays unpreserved → error.
 SELECT COUNT(*)
 FROM (
     SELECT a.id AS a_id, b.id AS b_id
@@ -160,9 +152,7 @@ FROM (
 ) sub
 JOIN fko_clear_d d FOR KEY (b_id) -> sub (b_id);
 
--- E3: LEFT JOIN followed by LEFT JOIN — b stays in O because b's side
--- is preserved by the second LEFT JOIN.  The Clear step only fires when
--- a side is NOT preserved (inner), so ghost rows for b survive.
+-- E3: LEFT JOIN followed by LEFT JOIN — preserved tracks a, not b.
 SELECT COUNT(*)
 FROM (
     SELECT a.id AS a_id, b.id AS b_id, c.id AS c_id

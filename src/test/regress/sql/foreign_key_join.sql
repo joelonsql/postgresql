@@ -1055,8 +1055,8 @@ DROP TABLE orders CASCADE;
 
 --
 -- The below query should raise the error "foreign key join violation",
--- "referenced relation does not preserve uniqueness of keys", since
--- even though there is a UNIQUE constraint on orders.shipment_id,
+-- "referenced relation does not preserve the referenced base table",
+-- since even though there is a UNIQUE constraint on orders.shipment_id,
 -- the orders table doesn't preserve the uniqueness of its keys
 -- due to the join with order_items.
 --

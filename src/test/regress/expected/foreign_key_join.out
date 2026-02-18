@@ -853,7 +853,7 @@ SELECT * FROM v1 JOIN t2 FOR KEY (c3) -> v1 (c1);
 ERROR:  foreign key join violation
 LINE 1: SELECT * FROM v1 JOIN t2 FOR KEY (c3) -> v1 (c1);
                                  ^
-DETAIL:  referenced relation does not preserve all rows
+DETAIL:  referenced relation does not preserve the referenced base table
 -- OK, filtering allowed since v2 is the referencing table
 SELECT * FROM t1 JOIN v2 FOR KEY (c3) -> t1 (c1);
  c1 | c2 | c3 | c4 
@@ -867,7 +867,7 @@ SELECT * FROM v1 JOIN v2 FOR KEY (c3) -> v1 (c1);
 ERROR:  foreign key join violation
 LINE 1: SELECT * FROM v1 JOIN v2 FOR KEY (c3) -> v1 (c1);
                                  ^
-DETAIL:  referenced relation does not preserve all rows
+DETAIL:  referenced relation does not preserve the referenced base table
 -- also invalid, filters uisng a having clause
 SELECT * FROM
 (
@@ -877,21 +877,21 @@ JOIN t2 FOR KEY (c3) -> u (c1);
 ERROR:  foreign key join violation
 LINE 5: JOIN t2 FOR KEY (c3) -> u (c1);
                 ^
-DETAIL:  referenced relation does not preserve all rows
+DETAIL:  referenced relation does not preserve the referenced base table
 -- invalid, since u is filtered and is the referenced table
 SELECT * FROM (SELECT c1 FROM t1 LIMIT 1) AS u
 JOIN t2 FOR KEY (c3) -> u (c1);
 ERROR:  foreign key join violation
 LINE 2: JOIN t2 FOR KEY (c3) -> u (c1);
                 ^
-DETAIL:  referenced relation does not preserve all rows
+DETAIL:  referenced relation does not preserve the referenced base table
 -- invalid, since u is filtered and is the referenced table
 SELECT * FROM (SELECT c1 FROM t1 OFFSET 1) AS u
 JOIN t2 FOR KEY (c3) -> u (c1);
 ERROR:  foreign key join violation
 LINE 2: JOIN t2 FOR KEY (c3) -> u (c1);
                 ^
-DETAIL:  referenced relation does not preserve all rows
+DETAIL:  referenced relation does not preserve the referenced base table
 WITH q2 AS
 (
     SELECT * FROM t5 WHERE t5.c11 > 0
@@ -915,7 +915,7 @@ JOIN t7 FOR KEY (c15, c16) -> q1 (c9, c10);
 ERROR:  foreign key join violation
 LINE 20: JOIN t7 FOR KEY (c15, c16) -> q1 (c9, c10);
                  ^
-DETAIL:  referenced relation does not preserve all rows
+DETAIL:  referenced relation does not preserve the referenced base table
 --
 -- Test allowed joins not affecting uniqueness
 --
@@ -965,7 +965,7 @@ JOIN t7 FOR KEY (c15, c16) -> q1 (c9, c10);
 ERROR:  foreign key join violation
 LINE 17: JOIN t7 FOR KEY (c15, c16) -> q1 (c9, c10);
                  ^
-DETAIL:  referenced relation does not preserve uniqueness of keys
+DETAIL:  referenced relation does not preserve the referenced base table
 SELECT
     q1.c19,
     q1.c20,
@@ -985,7 +985,7 @@ JOIN t9 FOR KEY (c21, c22) -> q1 (c17, c18);
 ERROR:  foreign key join violation
 LINE 16: JOIN t9 FOR KEY (c21, c22) -> q1 (c17, c18);
                  ^
-DETAIL:  referenced relation does not preserve all rows
+DETAIL:  referenced relation does not preserve the referenced base table
 --
 -- Test revalidation of views
 --
@@ -1232,7 +1232,7 @@ JOIN t2 FOR KEY (c3, c4) -> u (c1, c2);
 ERROR:  foreign key join violation
 LINE 5: JOIN t2 FOR KEY (c3, c4) -> u (c1, c2);
                 ^
-DETAIL:  referenced relation does not preserve all rows
+DETAIL:  referenced relation does not preserve the referenced base table
 SELECT *
 FROM t1
 JOIN
@@ -1461,8 +1461,8 @@ DROP TABLE orders CASCADE;
 NOTICE:  drop cascades to view orders_by_country
 --
 -- The below query should raise the error "foreign key join violation",
--- "referenced relation does not preserve uniqueness of keys", since
--- even though there is a UNIQUE constraint on orders.shipment_id,
+-- "referenced relation does not preserve the referenced base table",
+-- since even though there is a UNIQUE constraint on orders.shipment_id,
 -- the orders table doesn't preserve the uniqueness of its keys
 -- due to the join with order_items.
 --
@@ -1515,7 +1515,7 @@ FROM
 ERROR:  foreign key join violation
 LINE 15: ) AS q JOIN packages FOR KEY (shipment_id) -> q (shipment_id...
                               ^
-DETAIL:  referenced relation does not preserve uniqueness of keys
+DETAIL:  referenced relation does not preserve the referenced base table
 --
 -- The below query should be accepted
 --

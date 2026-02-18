@@ -20,7 +20,6 @@
 #include "access/table.h"
 #include "access/xact.h"
 #include "catalog/pg_constraint.h"
-#include "nodes/bitmapset.h"
 #include "nodes/makefuncs.h"
 #include "nodes/nodeFuncs.h"
 #include "nodes/primnodes.h"
@@ -57,42 +56,12 @@ static RangeTblEntry *drill_down_to_base_rel_query(ParseState *pstate, Query *qu
 												   List *attnos, List **base_attnums,
 												   int location, QueryStack *query_stack);
 
-static bool check_group_by_preserves_uniqueness(Query *query,
-												 List **uniqueness_preservation,
-												 List **null_preserving);
-static bool check_unique_index_covers_columns(Relation rel, Bitmapset *columns,
-											   bool *all_cols_not_null);
 static bool is_referencing_cols_unique(Oid referencing_relid, List *referencing_base_attnums);
 static bool is_referencing_cols_not_null(Oid referencing_relid, List *referencing_base_attnums,
 										 List **notNullConstraints);
-static List *update_uniqueness_preservation(List *referencing_uniqueness_preservation,
-											List *referenced_uniqueness_preservation,
-											RTEId *referencing_id,
-											bool fk_cols_unique);
-static void update_row_preserving(List *referencing_chains,
-								  List *referencing_row_preserving,
-								  RTEId *referencing_id,
-								  List *referenced_chains,
-								  List *referenced_row_preserving,
-								  RTEId *referenced_id,
-								  bool fk_cols_not_null,
-								  JoinType join_type,
-								  ForeignKeyDirection fk_dir,
-								  List **result_chains,
-								  List **result_row_preserving,
-								  List *referencing_null_preserving,
-								  List *referenced_null_preserving,
-								  List **result_null_preserving);
-static void analyze_join_tree(ParseState *pstate, Node *n,
-							  Query *query,
-							  RTEId *rte_id,
-							  List **uniqueness_preservation,
-							  List **notnull_fk_chains,
-							  List **row_preserving,
-							  List **null_preserving,
-							  bool *found,
-							  int location,
-							  QueryStack *query_stack);
+static RTEId *analyze_join_tree(ParseState *pstate, Node *n,
+								Query *query, int location,
+								QueryStack *query_stack);
 
 void
 transformAndValidateForeignKeyJoin(ParseState *pstate, JoinExpr *join,
@@ -110,14 +79,6 @@ transformAndValidateForeignKeyJoin(ParseState *pstate, JoinExpr *join,
 			   *other_rel = NULL;
 	List	   *referencing_cols,
 			   *referenced_cols;
-	List	   *referencing_uniqueness_preservation = NIL;
-	List	   *referencing_notnull_fk_chains = NIL;
-	List	   *referencing_row_preserving = NIL;
-	List	   *referencing_null_preserving = NIL;
-	List	   *referenced_uniqueness_preservation = NIL;
-	List	   *referenced_notnull_fk_chains = NIL;
-	List	   *referenced_row_preserving = NIL;
-	List	   *referenced_null_preserving = NIL;
 	Node	   *referencing_arg;
 	Node	   *referenced_arg;
 	List	   *referencing_base_attnums;
@@ -129,8 +90,7 @@ transformAndValidateForeignKeyJoin(ParseState *pstate, JoinExpr *join,
 	Oid			referencing_relid;
 	Oid			referenced_relid;
 	RTEId	   *referenced_id;
-	bool		referencing_found = false;
-	bool		referenced_found = false;
+	RTEId	   *preserved;
 	bool		referenced_is_base_table = false;
 	List	   *notNullConstraints = NIL;
 
@@ -266,9 +226,7 @@ transformAndValidateForeignKeyJoin(ParseState *pstate, JoinExpr *join,
 	/*
 	 * Check if referenced relation is a base table at same query level.
 	 * Base tables always preserve their own uniqueness and rows, so we can
-	 * skip the uniqueness/FD checks for them. These checks are only needed
-	 * for derived tables (subqueries, views, CTEs) where the preservation
-	 * properties may have been lost due to joins or filtering.
+	 * skip the preservation check for them.
 	 */
 	if (referenced_rte->rtekind == RTE_RELATION && referenced_rte->relid != InvalidOid)
 	{
@@ -299,61 +257,28 @@ transformAndValidateForeignKeyJoin(ParseState *pstate, JoinExpr *join,
 						column_list_to_string(referenced_cols)),
 				 parser_errposition(pstate, fkjn->location)));
 
-	analyze_join_tree(pstate, referencing_arg, NULL, referencing_rte->rteid, &referencing_uniqueness_preservation, &referencing_notnull_fk_chains, &referencing_row_preserving, &referencing_null_preserving, &referencing_found, fkjn->location, NULL);
+	/*
+	 * Analyze the referencing side to validate no non-FK joins inside
+	 * derived relations (the return value is discarded).
+	 */
+	(void) analyze_join_tree(pstate, referencing_arg, NULL,
+							 fkjn->location, NULL);
 
-	/* Only analyze referenced side for derived tables - base tables always preserve uniqueness/rows */
+	/*
+	 * Check preservation of the referenced base table — only needed for
+	 * derived tables.  Base tables trivially preserve themselves.
+	 */
 	if (!referenced_is_base_table)
-		analyze_join_tree(pstate, referenced_arg, NULL, referenced_rte->rteid, &referenced_uniqueness_preservation, &referenced_notnull_fk_chains, &referenced_row_preserving, &referenced_null_preserving, &referenced_found, fkjn->location, NULL);
-
-	/*
-	 * Check uniqueness preservation - only for derived tables.
-	 * Base tables always preserve their own uniqueness.
-	 */
-	if (!referenced_is_base_table &&
-		!list_member(referenced_uniqueness_preservation, referenced_id))
 	{
-		ereport(ERROR,
-				(errcode(ERRCODE_INVALID_FOREIGN_KEY),
-				 errmsg("foreign key join violation"),
-				 errdetail("referenced relation does not preserve uniqueness of keys"),
-				 parser_errposition(pstate, fkjn->location)));
-	}
+		preserved = analyze_join_tree(pstate, referenced_arg, NULL,
+									  fkjn->location, NULL);
 
-	/*
-	 * Check row preservation - only for derived tables.
-	 * Base tables always preserve all their rows.
-	 */
-	if (!referenced_is_base_table &&
-		!list_member(referenced_row_preserving, referenced_id))
-	{
-		/*
-		 * This check ensures that the referenced relation is not filtered
-		 * (e.g., by WHERE, LIMIT, OFFSET, HAVING, RLS). Foreign key joins
-		 * require the referenced side to represent the complete set of rows
-		 * from the underlying table(s).
-		 */
-		ereport(ERROR,
-				(errcode(ERRCODE_INVALID_FOREIGN_KEY),
-				 errmsg("foreign key join violation"),
-				 errdetail("referenced relation does not preserve all rows"),
-				 parser_errposition(pstate, fkjn->location)));
-	}
-
-	/*
-	 * Check that the referenced relation preserves its key-column values
-	 * (i.e. is in the null-preserving set N).  If it is not, outer joins
-	 * or GROUP BY on nullable columns may have introduced ghost rows with
-	 * NULL key values, violating the PK-like invariant (unique and not
-	 * null) that the FK join depends on.
-	 */
-	if (!referenced_is_base_table &&
-		!list_member(referenced_null_preserving, referenced_id))
-	{
-		ereport(ERROR,
-				(errcode(ERRCODE_INVALID_FOREIGN_KEY),
-				 errmsg("foreign key join violation"),
-				 errdetail("NULL values may be introduced into the referenced relation's key columns"),
-				 parser_errposition(pstate, fkjn->location)));
+		if (preserved == NULL || !equal(preserved, referenced_id))
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_FOREIGN_KEY),
+					 errmsg("foreign key join violation"),
+					 errdetail("referenced relation does not preserve the referenced base table"),
+					 parser_errposition(pstate, fkjn->location)));
 	}
 
 	join->quals = build_fk_join_on_clause(pstate, referencing_rel->p_nscolumns, referencing_attnums, referenced_rel->p_nscolumns, referenced_attnums);
@@ -412,37 +337,24 @@ transformAndValidateForeignKeyJoin(ParseState *pstate, JoinExpr *join,
 	join->fkJoin = (Node *) fkjn_node;
 }
 
-static void
+/*
+ * analyze_join_tree
+ *		Walk the join tree inside a derived relation and return the RTEId
+ *		of the single base table that is "preserved" through the tree,
+ *		or NULL if no single table can be guaranteed preserved.
+ *
+ * A base table is preserved when it is unfiltered and its uniqueness and
+ * row completeness survive through the chain of FK joins.  This is a
+ * simplified algorithm that tracks a single scalar rather than separate
+ * sets for uniqueness, row preservation, null preservation, and FK chains.
+ */
+static RTEId *
 analyze_join_tree(ParseState *pstate, Node *n,
-				  Query *query,
-				  RTEId *rte_id,
-				  List **uniqueness_preservation,
-				  List **notnull_fk_chains,
-				  List **row_preserving,
-				  List **null_preserving,
-				  bool *found,
-				  int location,
+				  Query *query, int location,
 				  QueryStack *query_stack)
 {
 	RangeTblEntry *rte;
 	Query	   *inner_query = NULL;
-	List	   *referencing_uniqueness_preservation = NIL;
-	List	   *referencing_notnull_fk_chains = NIL;
-	List	   *referencing_row_preserving = NIL;
-	List	   *referencing_null_preserving = NIL;
-	List	   *referenced_uniqueness_preservation = NIL;
-	List	   *referenced_notnull_fk_chains = NIL;
-	List	   *referenced_row_preserving = NIL;
-	List	   *referenced_null_preserving = NIL;
-	List	   *referencing_base_attnums;
-	List	   *referenced_base_attnums;
-	RangeTblEntry *base_referencing_rte;
-	RangeTblEntry *base_referenced_rte;
-	Oid			referencing_relid;
-	RTEId	   *referencing_id;
-	RTEId	   *referenced_id;
-	bool		referencing_found = false;
-	bool		referenced_found = false;
 
 	switch (nodeTag(n))
 	{
@@ -455,6 +367,18 @@ analyze_join_tree(ParseState *pstate, Node *n,
 				RangeTblEntry *referencing_rte;
 				RangeTblEntry *referenced_rte;
 				ForeignKeyJoinNode *fkjn;
+				RTEId	   *referencing_preserved;
+				RTEId	   *referenced_preserved;
+				List	   *referencing_base_attnums;
+				List	   *referenced_base_attnums;
+				RangeTblEntry *base_referencing_rte;
+				RangeTblEntry *base_referenced_rte;
+				RTEId	   *referencing_id;
+				RTEId	   *referenced_id;
+				bool		fk_cols_unique;
+				bool		fk_cols_not_null;
+				bool		P_p;
+				bool		P_f;
 
 				if (join->fkJoin == NULL)
 					ereport(ERROR,
@@ -463,8 +387,6 @@ analyze_join_tree(ParseState *pstate, Node *n,
 							 parser_errposition(pstate, location)));
 
 				fkjn = castNode(ForeignKeyJoinNode, join->fkJoin);
-				bool		fk_cols_unique;
-				bool		fk_cols_not_null;
 
 				if (query)
 					rtable = query->rtable;
@@ -485,8 +407,12 @@ analyze_join_tree(ParseState *pstate, Node *n,
 				referencing_rte = rt_fetch(fkjn->referencingVarno, rtable);
 				referenced_rte = rt_fetch(fkjn->referencedVarno, rtable);
 
-				analyze_join_tree(pstate, referencing_arg, query, rte_id, &referencing_uniqueness_preservation, &referencing_notnull_fk_chains, &referencing_row_preserving, &referencing_null_preserving, &referencing_found, location, query_stack);
-				analyze_join_tree(pstate, referenced_arg, query, rte_id, &referenced_uniqueness_preservation, &referenced_notnull_fk_chains, &referenced_row_preserving, &referenced_null_preserving, &referenced_found, location, query_stack);
+				referencing_preserved = analyze_join_tree(pstate, referencing_arg,
+														  query, location,
+														  query_stack);
+				referenced_preserved = analyze_join_tree(pstate, referenced_arg,
+														 query, location,
+														 query_stack);
 
 				base_referencing_rte = drill_down_to_base_rel(pstate, referencing_rte,
 															  fkjn->referencingAttnums,
@@ -497,44 +423,50 @@ analyze_join_tree(ParseState *pstate, Node *n,
 															 &referenced_base_attnums,
 															 location, query_stack);
 
-				referencing_relid = base_referencing_rte->relid;
 				referencing_id = base_referencing_rte->rteid;
 				referenced_id = base_referenced_rte->rteid;
 
-				fk_cols_unique = is_referencing_cols_unique(referencing_relid, referencing_base_attnums);
-				fk_cols_not_null = is_referencing_cols_not_null(referencing_relid, referencing_base_attnums, NULL);
+				fk_cols_unique = is_referencing_cols_unique(base_referencing_rte->relid,
+														   referencing_base_attnums);
+				fk_cols_not_null = is_referencing_cols_not_null(base_referencing_rte->relid,
+															   referencing_base_attnums, NULL);
 
-				*uniqueness_preservation = update_uniqueness_preservation(
-																		  referencing_uniqueness_preservation,
-																		  referenced_uniqueness_preservation,
-																		  referencing_id,
-																		  fk_cols_unique
-					);
-				update_row_preserving(
-									 referencing_notnull_fk_chains,
-									 referencing_row_preserving,
-									 referencing_id,
-									 referenced_notnull_fk_chains,
-									 referenced_row_preserving,
-									 referenced_id,
-									 fk_cols_not_null,
-									 join->jointype,
-									 fkjn->fkdir,
-									 notnull_fk_chains,
-									 row_preserving,
-									 referencing_null_preserving,
-									 referenced_null_preserving,
-									 null_preserving);
+				P_p = (referenced_preserved != NULL &&
+					   equal(referenced_preserved, referenced_id));
+				P_f = (referencing_preserved != NULL &&
+					   equal(referencing_preserved, referencing_id));
 
-				/* Set found based on whether rte_id was in either subtree or matches either relation */
-				if (referencing_found || referenced_found ||
-					equal(referencing_rte->rteid, rte_id) || equal(referenced_rte->rteid, rte_id))
+				/* Case 1: referenced side not preserved */
+				if (!P_p)
+					return NULL;
+
+				/* Cases 2-3: INNER JOIN */
+				if (join->jointype == JOIN_INNER)
+					return fk_cols_not_null ? referencing_preserved : NULL;
+
+				/* Cases 4-7: LEFT JOIN */
+				if (join->jointype == JOIN_LEFT)
 				{
-					*found = true;
+					if (fkjn->fkdir == FKDIR_FROM)
+						return referencing_preserved;		/* Case 4 */
+					if (P_f && fk_cols_unique)
+						return referenced_preserved;		/* Case 5 */
+					return NULL;							/* Cases 6, 7 */
 				}
 
+				/* Cases 8-11: RIGHT JOIN */
+				if (join->jointype == JOIN_RIGHT)
+				{
+					if (fkjn->fkdir == FKDIR_TO)
+						return referencing_preserved;		/* Case 8 */
+					if (P_f && fk_cols_unique)
+						return referenced_preserved;		/* Case 9 */
+					return NULL;							/* Cases 10, 11 */
+				}
+
+				/* Case 12: FULL JOIN */
+				return NULL;
 			}
-			break;
 
 		case T_RangeTblRef:
 			{
@@ -564,18 +496,17 @@ analyze_join_tree(ParseState *pstate, Node *n,
 							else if (rel->rd_rel->relkind == RELKIND_RELATION ||
 									 rel->rd_rel->relkind == RELKIND_PARTITIONED_TABLE)
 							{
-								*uniqueness_preservation = list_make1(rte->rteid);
-								*null_preserving = list_make1(rte->rteid);
-
 								/*
-								 * Mark as row-preserving if not filtered by
+								 * Base table: preserved if not filtered by
 								 * WHERE/OFFSET/LIMIT/HAVING.
 								 */
+								table_close(rel, AccessShareLock);
 								if (!query || (!query->jointree->quals &&
 											   !query->limitOffset &&
 											   !query->limitCount &&
 											   !query->havingQual))
-									*row_preserving = list_make1(rte->rteid);
+									return rte->rteid;
+								return NULL;
 							}
 
 							/* Close the relation */
@@ -618,34 +549,35 @@ analyze_join_tree(ParseState *pstate, Node *n,
 					if (inner_query->jointree && inner_query->jointree->fromlist &&
 						list_length(inner_query->jointree->fromlist) == 1)
 					{
+						RTEId	   *result;
 						QueryStack	new_stack = {.parent=query_stack, .query=inner_query};
 
-						analyze_join_tree(pstate,
-										  (Node *) linitial(inner_query->jointree->fromlist),
-										  inner_query, rte_id, uniqueness_preservation, notnull_fk_chains, row_preserving, null_preserving, found, location,
-										  &new_stack);
+						result = analyze_join_tree(pstate,
+												   (Node *) linitial(inner_query->jointree->fromlist),
+												   inner_query, location,
+												   &new_stack);
 
 						/*
-						 * If the inner query has GROUP BY, check if it
-						 * preserves uniqueness. If it does, add the current
-						 * RTE to uniqueness preservation.
+						 * GROUP BY destroys preservation — the simplified
+						 * algorithm cannot verify that grouping preserves
+						 * uniqueness.
 						 */
 						if (inner_query->groupClause)
-						{
-							if (!check_group_by_preserves_uniqueness(inner_query, uniqueness_preservation, null_preserving))
-								*uniqueness_preservation = NIL;
-						}
+							return NULL;
+
+						return result;
 					}
 				}
+
+				return NULL;
 			}
-			break;
 
 		default:
 			ereport(ERROR,
 					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 					 errmsg("unsupported node type in foreign key join traversal"),
 					 parser_errposition(pstate, location)));
-			break;
+			return NULL;
 	}
 }
 
@@ -1077,10 +1009,12 @@ drill_down_to_base_rel_query(ParseState *pstate, Query *query,
 	}
 
 	/*
-	 * We allow GROUP BY if the grouping preserves uniqueness, but we check
-	 * this in analyze_join_tree where we build uniqueness preservation info.
+	 * GROUP BY is allowed here because drill_down_to_base_rel_query only
+	 * traces column references to find the underlying base table — actual
+	 * preservation checking happens in analyze_join_tree, which returns
+	 * NULL for queries with GROUP BY.
 	 *
-	 * DISTINCT is still fatal here – once duplicates are removed there is
+	 * DISTINCT is still fatal — once duplicates are removed there is
 	 * no way to re-establish determinism for FK-checking.
 	 */
 	if (query->commandType != CMD_SELECT ||
@@ -1136,206 +1070,10 @@ drill_down_to_base_rel_query(ParseState *pstate, Query *query,
 	return result;
 }
 
-
-
-/*
- * check_group_by_preserves_uniqueness
- *		Check if a GROUP BY clause preserves uniqueness by verifying that
- *		the grouped columns cover a unique index on the underlying base table.
- *
- *		On success, sets *uniqueness_preservation to {base_rteid} (GROUP BY
- *		collapses rows across all tables, so only one table can remain unique).
- *		If any grouped column is nullable, removes base_rteid from
- *		*null_preserving because GROUP BY collapses all NULLs into one
- *		group, injecting a NULL key value that may not exist in the base data.
- *
- *		Caller guarantees query->groupClause is non-empty.  PG17+ guarantees
- *		query->hasGroupRTE is set, meaning an RTE_GROUP entry exists in the
- *		range table whose groupexprs list contains the actual GROUP BY
- *		expressions (Vars referencing the underlying base relation).
- */
-static bool
-check_group_by_preserves_uniqueness(Query *query, List **uniqueness_preservation,
-									List **null_preserving)
-{
-	RangeTblEntry *group_rte = NULL;
-	RangeTblEntry *base_rte;
-	Index		underlying_varno = 0;
-	Bitmapset  *columns = NULL;
-	ListCell   *lc;
-	Relation	rel;
-	bool		all_cols_not_null;
-	bool		result;
-
-	Assert(query->groupClause);
-	Assert(query->hasGroupRTE);
-	Assert(null_preserving != NULL);
-
-	/* Find the RTE_GROUP entry in the range table */
-	foreach(lc, query->rtable)
-	{
-		RangeTblEntry *rte = lfirst_node(RangeTblEntry, lc);
-
-		if (rte->rtekind == RTE_GROUP)
-		{
-			group_rte = rte;
-			break;
-		}
-	}
-	Assert(group_rte != NULL);
-
-	/*
-	 * Walk the RTE_GROUP's groupexprs to find the underlying base relation
-	 * and collect the set of grouped column attnos.  Every expression must be
-	 * a simple Var referencing the same relation.
-	 */
-	foreach(lc, group_rte->groupexprs)
-	{
-		Node	   *expr = (Node *) lfirst(lc);
-		Var		   *v;
-
-		if (!IsA(expr, Var))
-			return false;
-
-		v = (Var *) expr;
-
-		if (underlying_varno == 0)
-			underlying_varno = v->varno;
-		else if (underlying_varno != v->varno)
-			return false;
-
-		columns = bms_add_member(columns, v->varattno);
-	}
-
-	/* The underlying RTE must be a base relation */
-	base_rte = rt_fetch(underlying_varno, query->rtable);
-	if (base_rte->rtekind != RTE_RELATION)
-	{
-		bms_free(columns);
-		return false;
-	}
-
-	/* Check if the grouped columns cover a unique index */
-	rel = table_open(base_rte->relid, AccessShareLock);
-	result = check_unique_index_covers_columns(rel, columns, &all_cols_not_null);
-	table_close(rel, AccessShareLock);
-	bms_free(columns);
-
-	if (result)
-	{
-		*uniqueness_preservation = list_make1(base_rte->rteid);
-
-		/*
-		 * If any grouped column is nullable, remove it from N so the
-		 * caller rejects using this relation as the referenced side.
-		 */
-		if (!all_cols_not_null)
-			*null_preserving = list_delete(*null_preserving, base_rte->rteid);
-	}
-
-	return result;
-}
-
-/*
- * check_unique_index_covers_columns
- *		Check if the given columns are covered by a unique index on the relation.
- *		When a matching index is found, *all_cols_not_null is set to true when
- *		every column in the GROUP BY list has a NOT NULL constraint (or the
- *		matching index is a primary key, which implies NOT NULL).
- */
-static bool
-check_unique_index_covers_columns(Relation rel, Bitmapset *columns,
-								  bool *all_cols_not_null)
-{
-	List	   *indexoidlist;
-	ListCell   *indexoidscan;
-	bool		result = false;
-
-	Assert(all_cols_not_null != NULL);
-
-	indexoidlist = RelationGetIndexList(rel);
-
-	foreach(indexoidscan, indexoidlist)
-	{
-		Oid			indexoid = lfirst_oid(indexoidscan);
-		Relation	indexRel;
-		Form_pg_index indexForm;
-		int			nindexattrs;
-		Bitmapset  *index_cols = NULL;
-
-		indexRel = index_open(indexoid, AccessShareLock);
-		indexForm = indexRel->rd_index;
-
-		/* Skip if not a unique index */
-		if (!indexForm->indisunique)
-		{
-			index_close(indexRel, AccessShareLock);
-			continue;
-		}
-
-		/* Build a bitmapset of the index columns */
-		nindexattrs = indexForm->indnatts;
-		for (int j = 0; j < nindexattrs; j++)
-		{
-			AttrNumber	attnum = indexForm->indkey.values[j];
-
-			if (attnum > 0)		/* skip expressions */
-				index_cols = bms_add_member(index_cols, attnum);
-		}
-
-		/* Check if the grouped columns cover all unique index columns */
-		if (bms_is_subset(index_cols, columns))
-		{
-			result = true;
-
-			/*
-			 * Report whether all grouped columns are NOT NULL.  Primary
-			 * key columns are always NOT NULL; otherwise check attnotnull
-			 * for each column in the GROUP BY list.
-			 */
-			if (indexForm->indisprimary)
-			{
-				*all_cols_not_null = true;
-			}
-			else
-			{
-				int			attnum;
-				TupleDesc	tupdesc = RelationGetDescr(rel);
-
-				*all_cols_not_null = true;
-				attnum = -1;
-				while ((attnum = bms_next_member(columns, attnum)) >= 0)
-				{
-					if (!TupleDescAttr(tupdesc, attnum - 1)->attnotnull)
-					{
-						*all_cols_not_null = false;
-						break;
-					}
-				}
-			}
-
-			index_close(indexRel, AccessShareLock);
-			bms_free(index_cols);
-			break;
-		}
-
-		index_close(indexRel, AccessShareLock);
-		bms_free(index_cols);
-	}
-
-	list_free(indexoidlist);
-
-	return result;
-}
-
 /*
  * is_referencing_cols_unique
  *      Determines if the foreign key columns in the referencing table
  *      are guaranteed to be unique by a constraint or index.
- *
- * This function checks if the columns forming the foreign key in the referencing
- * table are covered by a unique index or primary key constraint, which would
- * guarantee their uniqueness.
  */
 static bool
 is_referencing_cols_unique(Oid referencing_relid, List *referencing_base_attnums)
@@ -1428,13 +1166,8 @@ is_referencing_cols_unique(Oid referencing_relid, List *referencing_base_attnums
  *      Determines if all foreign key columns in the referencing table
  *      have NOT NULL constraints.
  *
- * This function checks if each column in the foreign key has a NOT NULL
- * constraint, which is important for correct join semantics and for
- * preserving functional dependencies across joins.
- *
  * If notNullConstraints is not NULL, the function also collects the OIDs
- * of the NOT NULL constraints for each column that has one. This is used
- * to establish dependencies on those constraints.
+ * of the NOT NULL constraints for each column that has one.
  */
 static bool
 is_referencing_cols_not_null(Oid referencing_relid, List *referencing_base_attnums,
@@ -1501,241 +1234,4 @@ is_referencing_cols_not_null(Oid referencing_relid, List *referencing_base_attnu
 	}
 
 	return all_not_null;
-}
-
-/*
- * update_uniqueness_preservation
- *      Updates the uniqueness preservation properties for a foreign key join
- *
- * This function calculates the uniqueness preservation for a join based on
- * the uniqueness preservation properties of the input relations and the
- * uniqueness of the foreign key columns.
- *
- * Uniqueness preservation is propagated from the referencing relation, and
- * if both the foreign key columns form a unique key, and the referencing
- * base table preserves uniqueness, then uniqueness preservation
- * from the referenced relation is also added.
- */
-static List *
-update_uniqueness_preservation(List *referencing_uniqueness_preservation,
-							   List *referenced_uniqueness_preservation,
-							   RTEId *referencing_id,
-							   bool fk_cols_unique)
-{
-	List	   *result = NIL;
-	bool		referencing_preserves_uniqueness;
-
-	/* Start with uniqueness preservation from the referencing relation */
-	if (referencing_uniqueness_preservation)
-		result = list_copy(referencing_uniqueness_preservation);
-
-	referencing_preserves_uniqueness = list_member(referencing_uniqueness_preservation, referencing_id);
-
-	if (fk_cols_unique && referencing_preserves_uniqueness && referenced_uniqueness_preservation)
-		result = list_concat(result, referenced_uniqueness_preservation);
-
-	return result;
-}
-
-/*
- * update_row_preserving
- *      Compute the row-preserving set (R) and NOT NULL FK chain set (C)
- *      produced by a single foreign key join, given the R and C from each
- *      input side.
- *
- * Three properties are tracked through the join tree (U is handled
- * separately by update_uniqueness_preservation):
- *
- *   U (uniqueness_preservation) - tables whose PK/UNIQUE uniqueness is
- *       preserved through the join tree.
- *   R (row_preserving) - tables whose complete set of rows is guaranteed
- *       to appear in the join result.  Stored as a plain List of RTEId*.
- *   C (notnull_fk_chains) - pairs (A, B) with A != B meaning "A is
- *       row-preserving and reaches B through NOT NULL FK joins".  Stored
- *       as a flat List of alternating RTEId* pairs.
- *
- * Both result_chains and result_row_preserving are written as out-parameters.
- */
-static void
-update_row_preserving(List *referencing_chains,
-					  List *referencing_row_preserving,
-					  RTEId *referencing_id,
-					  List *referenced_chains,
-					  List *referenced_row_preserving,
-					  RTEId *referenced_id,
-					  bool fk_cols_not_null,
-					  JoinType join_type,
-					  ForeignKeyDirection fk_dir,
-					  List **result_chains,
-					  List **result_row_preserving,
-					  List *referencing_null_preserving,
-					  List *referenced_null_preserving,
-					  List **result_null_preserving)
-{
-	List	   *result_C = NIL;
-	List	   *result_R = NIL;
-	List	   *result_N = NIL;
-	List	   *anchor_set = NIL;
-	List	   *target_set = NIL;
-	ListCell   *lc_anchor;
-	ListCell   *lc_target;
-	bool		preserves_referencing;
-	bool		preserves_referenced;
-
-	/* Phase 1: Outer Join Preservation */
-	preserves_referencing = (join_type == JOIN_FULL ||
-							 (fk_dir == FKDIR_FROM && join_type == JOIN_LEFT) ||
-							 (fk_dir == FKDIR_TO && join_type == JOIN_RIGHT));
-
-	preserves_referenced = (join_type == JOIN_FULL ||
-							(fk_dir == FKDIR_TO && join_type == JOIN_LEFT) ||
-							(fk_dir == FKDIR_FROM && join_type == JOIN_RIGHT));
-
-	if (preserves_referencing)
-	{
-		result_R = list_concat(result_R, referencing_row_preserving);
-		result_C = list_concat(result_C, referencing_chains);
-	}
-
-	if (preserves_referenced)
-	{
-		result_R = list_concat(result_R, referenced_row_preserving);
-		result_C = list_concat(result_C, referenced_chains);
-	}
-
-	/*
-	 * Phase 1b: Null-preserving set tracking.
-	 *
-	 * The null-preserving set N tracks which base tables still have
-	 * their key-column values intact (not overwritten by NULLs from
-	 * ghost rows).  Membership in N is good: p ∈ N means the table's
-	 * key columns are trustworthy.
-	 *
-	 * Start by propagating each side's null_preserving.  Then restore
-	 * entries for tables whose ghost rows are filtered by the join's
-	 * inner side: the FK equi-join condition ensures NULL join columns
-	 * never match, so ghost rows are eliminated and the table's key
-	 * columns become trustworthy again.  Finally, remove entries for
-	 * tables on the inner side of an outer join, since the outer side
-	 * may introduce new ghost rows with NULL key values.
-	 */
-	result_N = list_concat(list_copy(referencing_null_preserving),
-							list_copy(referenced_null_preserving));
-
-	/* Restore: inner side filters ghost rows, restoring null-preservation */
-	if (!preserves_referencing &&
-		!list_member(result_N, referencing_id))
-		result_N = lappend(result_N, referencing_id);
-	if (!preserves_referenced &&
-		!list_member(result_N, referenced_id))
-		result_N = lappend(result_N, referenced_id);
-
-	/* Remove: outer side introduces ghost rows, breaking null-preservation */
-	if (preserves_referenced)
-		result_N = list_delete(result_N, referencing_id);
-	if (preserves_referencing && !fk_cols_not_null)
-		result_N = list_delete(result_N, referenced_id);
-
-	*result_null_preserving = result_N;
-
-	/*
-	 * We can only derive new chains across the FK relationship when the FK
-	 * columns are NOT NULL and the referenced side is row-preserving.  If
-	 * the FK columns are nullable, a referencing row with NULL FK values
-	 * won't match any referenced row.  If the referenced side is filtered
-	 * (not row-preserving), FK values might not find a match even when
-	 * non-null.
-	 */
-	if (!fk_cols_not_null ||
-		!list_member(referenced_row_preserving, referenced_id))
-	{
-		*result_chains = result_C;
-		*result_row_preserving = result_R;
-		return;
-	}
-
-	/*
-	 * At this point the FK columns are NOT NULL and the referenced relation
-	 * preserves all rows.  Because every non-null FK value must find a match
-	 * in the referenced relation (that's what a foreign key constraint
-	 * guarantees), and we know the FK columns cannot be null, every
-	 * referencing row will successfully join.  This means every row that
-	 * reaches referencing_id from earlier in the join tree is preserved
-	 * through this join as well.
-	 *
-	 * Build anchor_set: the set of tables that reach referencing_id via
-	 * chains, plus referencing_id itself if it is row-preserving.
-	 */
-	for (int i = 0; i < list_length(referencing_chains); i += 2)
-	{
-		RTEId	   *det = list_nth(referencing_chains, i);
-		RTEId	   *dep = list_nth(referencing_chains, i + 1);
-
-		if (equal(dep, referencing_id))
-			anchor_set = lappend(anchor_set, det);
-	}
-
-	if (list_member(referencing_row_preserving, referencing_id))
-		anchor_set = lappend(anchor_set, referencing_id);
-
-	/* Precompute target_set = {p} ∪ { Z : (p, Z) ∈ C_p } for step 3c */
-	target_set = list_make1(referenced_id);
-	for (int i = 0; i < list_length(referenced_chains); i += 2)
-	{
-		RTEId	   *det = list_nth(referenced_chains, i);
-		RTEId	   *dep = list_nth(referenced_chains, i + 1);
-
-		if (equal(det, referenced_id))
-			target_set = lappend(target_set, dep);
-	}
-
-	/*
-	 * R'_inherit: propagate row-preserving status for anchor_set members.
-	 * C'_inherit: propagate chains whose determinant is in anchor_set.
-	 *
-	 * Skip if an outer join already copied them above.
-	 *
-	 * Every member of anchor_set is guaranteed to be in R_f by the
-	 * invariant on C: each (A, f) pair in C_f implies A ∈ R_f, and f
-	 * is only added to anchor_set when f ∈ R_f (explicit guard above).
-	 */
-	if (!preserves_referencing)
-	{
-		/* R'_inherit = anchor_set */
-		result_R = list_concat(result_R, list_copy(anchor_set));
-
-		/* C'_inherit = { (A, Y) ∈ C_f : A ∈ anchor_set } */
-		for (int i = 0; i < list_length(referencing_chains); i += 2)
-		{
-			RTEId	   *det = list_nth(referencing_chains, i);
-			RTEId	   *dep = list_nth(referencing_chains, i + 1);
-
-			if (list_member(anchor_set, det))
-			{
-				result_C = lappend(result_C, det);
-				result_C = lappend(result_C, dep);
-			}
-		}
-	}
-
-	/*
-	 * C'_extend = { (A, Y) : A ∈ anchor_set, Y ∈ target_set }
-	 *
-	 * Each table in anchor_set reaches referenced_id (guaranteed
-	 * row-preserving by the early return above), and transitively reaches
-	 * everything referenced_id reaches.  Form the cross product.
-	 */
-	foreach(lc_anchor, anchor_set)
-	{
-		RTEId	   *a = (RTEId *) lfirst(lc_anchor);
-
-		foreach(lc_target, target_set)
-		{
-			result_C = lappend(result_C, a);
-			result_C = lappend(result_C, (RTEId *) lfirst(lc_target));
-		}
-	}
-
-	*result_chains = result_C;
-	*result_row_preserving = result_R;
 }
