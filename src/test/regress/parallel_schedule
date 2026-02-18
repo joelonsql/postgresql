@@ -11,10 +11,6 @@
 # required setup steps
 test: test_setup
 
-test: foreign_key_join_cte
-
-test: foreign_key_join_outer_rows
-
 # ----------
 # The first group of parallel tests
 # ----------
