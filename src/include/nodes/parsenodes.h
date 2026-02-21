@@ -248,7 +248,7 @@ typedef struct Query
 	 * at the end of parse analysis.  Persisted in view queries for use at
 	 * view-use time.
 	 */
-	RTEId	   *fkPreservedRteid pg_node_attr(query_jumble_ignore);
+	RTEId	   *fkPreservedRteid pg_node_attr(equal_ignore, query_jumble_ignore);
 
 	/*
 	 * FK join column mapping: per output column, the source base table RTEId
@@ -256,8 +256,8 @@ typedef struct Query
 	 * (subqueries, views, CTEs) without drill-down.  NIL means the query
 	 * is opaque for FK join purposes.
 	 */
-	List	   *fkColBaseRteids pg_node_attr(query_jumble_ignore);
-	List	   *fkColBaseAttnums pg_node_attr(query_jumble_ignore);
+	List	   *fkColBaseRteids pg_node_attr(equal_ignore, query_jumble_ignore);
+	List	   *fkColBaseAttnums pg_node_attr(equal_ignore, query_jumble_ignore);
 
 	/* a list of WithCheckOption's (added during rewrite) */
 	List	   *withCheckOptions pg_node_attr(query_jumble_ignore);
@@ -1246,15 +1246,15 @@ typedef struct RangeTblEntry
 	 * RTE, this is the RTEId preserved through the join (if any).  NULL
 	 * means no base table is preserved.
 	 */
-	RTEId	   *fkPreservedRteid pg_node_attr(query_jumble_ignore);
+	RTEId	   *fkPreservedRteid pg_node_attr(equal_ignore, query_jumble_ignore);
 
 	/*
 	 * FK join column mapping: per output column, the source base table RTEId
 	 * and attnum.  Used to resolve FK join columns through derived relations
 	 * without drill-down.  NIL means the RTE is opaque for FK join purposes.
 	 */
-	List	   *fkColBaseRteids pg_node_attr(query_jumble_ignore);
-	List	   *fkColBaseAttnums pg_node_attr(query_jumble_ignore);
+	List	   *fkColBaseRteids pg_node_attr(equal_ignore, query_jumble_ignore);
+	List	   *fkColBaseAttnums pg_node_attr(equal_ignore, query_jumble_ignore);
 
 	/*
 	 * Fields valid for a function RTE (else NIL/zero):

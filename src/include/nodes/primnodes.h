@@ -2375,7 +2375,7 @@ typedef struct JoinExpr
 	/* alias attached to USING clause, if any */
 	Alias	   *join_using_alias pg_node_attr(query_jumble_ignore);
 	/* KEY clause, if any */
-	Node	   *fkJoin;			/* ForeignKeyClause or ForeignKeyJoinNode */
+	Node	   *fkJoin pg_node_attr(equal_ignore, query_jumble_ignore);			/* ForeignKeyClause or ForeignKeyJoinNode */
 	/* qualifiers on join, if any */
 	Node	   *quals;
 	/* user-written alias clause, if any */
