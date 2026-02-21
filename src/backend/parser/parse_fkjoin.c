@@ -71,6 +71,7 @@ static List *update_functional_dependencies(List *referencing_fds,
 											List *referenced_fds,
 											RTEId *referenced_id,
 											bool fk_cols_not_null,
+											bool fk_cols_unique,
 											JoinType join_type,
 											ForeignKeyDirection fk_dir);
 static void analyze_join_tree(ParseState *pstate, Node *n,
@@ -354,7 +355,11 @@ transformAndValidateForeignKeyJoin(ParseState *pstate, JoinExpr *join,
 	 * - INNER JOIN: both sides can be filtered, so always need NOT NULL
 	 * - LEFT JOIN: right side is inner, track if referencing is on right
 	 * - RIGHT JOIN: left side is inner, track if referencing is on left
-	 * - FULL JOIN: both sides preserved, no NOT NULL dependency needed
+	 * - FULL JOIN: need NOT NULL if FK columns are UNIQUE, because the
+	 *   referenced side is only preserved when FK is NOT NULL + UNIQUE
+	 *   (Rule 3: NOT NULL prevents unmatched referencing rows from
+	 *   introducing NULLs on the referenced side, UNIQUE prevents
+	 *   duplicating referenced rows)
 	 */
 	{
 		bool		need_not_null_deps = false;
@@ -373,7 +378,9 @@ transformAndValidateForeignKeyJoin(ParseState *pstate, JoinExpr *join,
 				need_not_null_deps = (referencing_arg == join->larg);
 				break;
 			case JOIN_FULL:
-				/* Full join: both sides preserved, no NOT NULL dependency needed */
+				/* Full join: need NOT NULL deps if FK is unique (Rule 3) */
+				need_not_null_deps = is_referencing_cols_unique(referencing_relid,
+															   referencing_base_attnums);
 				break;
 		}
 
@@ -495,6 +502,7 @@ analyze_join_tree(ParseState *pstate, Node *n,
 																		  referenced_functional_dependencies,
 																		  referenced_id,
 																		  fk_cols_not_null,
+																		  fk_cols_unique,
 																		  join->jointype,
 																		  fkjn->fkdir
 					);
@@ -1638,6 +1646,7 @@ update_functional_dependencies(List *referencing_fds,
 							   List *referenced_fds,
 							   RTEId *referenced_id,
 							   bool fk_cols_not_null,
+							   bool fk_cols_unique,
 							   JoinType join_type,
 							   ForeignKeyDirection fk_dir)
 {
@@ -1660,10 +1669,16 @@ update_functional_dependencies(List *referencing_fds,
 	/*
 	 * Step 2: Add functional dependencies from the referenced relation when
 	 * an outer join preserves the referenced relation's tuples.
+	 *
+	 * For FULL JOINs, the referenced side is only preserved when the FK
+	 * columns are both NOT NULL and UNIQUE (Rule 3).  NOT NULL ensures no
+	 * unmatched referencing rows introduce NULLs on the referenced side,
+	 * and UNIQUE ensures no referenced row is duplicated by multiple
+	 * referencing matches.
 	 */
 	if ((fk_dir == FKDIR_TO && join_type == JOIN_LEFT) ||
 		(fk_dir == FKDIR_FROM && join_type == JOIN_RIGHT) ||
-		join_type == JOIN_FULL)
+		(join_type == JOIN_FULL && fk_cols_not_null && fk_cols_unique))
 	{
 		result = list_concat(result, referenced_fds);
 	}

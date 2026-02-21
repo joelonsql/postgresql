@@ -1660,7 +1660,6 @@ ERROR:  foreign key join violation
 LINE 3: JOIN t_full_child c FOR KEY (ref_id) -> v (ref_id);
                             ^
 DETAIL:  referenced relation does not preserve all rows
-
 -- Cleanup
 DROP VIEW v_full_pres, v_full_pres_rev, v_full_nouniq, v_full_nullable;
 DROP TABLE t_full_child, t_full_fk, t_full_fk_nouniq, t_full_fk_nullable, t_full_ref;
