@@ -1218,3 +1218,83 @@ DROP TABLE t_other;
 DROP VIEW v_child_parent;
 DROP TABLE t_self CASCADE;
 
+--
+-- Test FULL JOIN preservation (Rule 3: NOT NULL + UNIQUE → referenced preserved)
+--
+CREATE TABLE t_full_ref (id int PRIMARY KEY);
+CREATE TABLE t_full_fk (
+    fk_id int PRIMARY KEY,
+    ref_id int NOT NULL UNIQUE REFERENCES t_full_ref(id)
+);
+CREATE TABLE t_full_child (
+    ch_id int PRIMARY KEY,
+    ref_id int NOT NULL REFERENCES t_full_ref(id)
+);
+
+INSERT INTO t_full_ref VALUES (1), (2), (3);
+INSERT INTO t_full_fk VALUES (10, 1), (20, 2);
+INSERT INTO t_full_child VALUES (100, 1), (200, 2), (300, 3);
+
+-- View with FULL JOIN: should preserve t_full_ref (referenced side)
+-- FK ref_id is NOT NULL + UNIQUE → Rule 3 applies
+CREATE VIEW v_full_pres AS
+SELECT t_full_ref.id AS ref_id, t_full_fk.fk_id, t_full_fk.ref_id AS fk_ref_id
+FROM t_full_ref FULL JOIN t_full_fk FOR KEY (ref_id) -> t_full_ref (id);
+
+-- Use the view as referenced — requires preservation of t_full_ref
+SELECT v.ref_id, v.fk_id, c.ch_id
+FROM v_full_pres v
+JOIN t_full_child c FOR KEY (ref_id) -> v (ref_id)
+ORDER BY v.ref_id;
+
+-- Reverse table order: same FK, same preservation
+CREATE VIEW v_full_pres_rev AS
+SELECT t_full_ref.id AS ref_id, t_full_fk.fk_id
+FROM t_full_fk FULL JOIN t_full_ref FOR KEY (id) <- t_full_fk (ref_id);
+
+SELECT v.ref_id, v.fk_id, c.ch_id
+FROM v_full_pres_rev v
+JOIN t_full_child c FOR KEY (ref_id) -> v (ref_id)
+ORDER BY v.ref_id;
+
+-- NOT NULL dependency: DROP NOT NULL should FAIL (view depends on it)
+ALTER TABLE t_full_fk ALTER COLUMN ref_id DROP NOT NULL;
+
+-- Negative test: FULL JOIN without UNIQUE should NOT preserve
+CREATE TABLE t_full_fk_nouniq (
+    fk_id int PRIMARY KEY,
+    ref_id int NOT NULL REFERENCES t_full_ref(id)
+    -- ref_id is NOT NULL but NOT UNIQUE
+);
+INSERT INTO t_full_fk_nouniq VALUES (10, 1), (20, 2), (30, 1);
+
+CREATE VIEW v_full_nouniq AS
+SELECT t_full_ref.id AS ref_id, t_full_fk_nouniq.fk_id
+FROM t_full_ref FULL JOIN t_full_fk_nouniq FOR KEY (ref_id) -> t_full_ref (id);
+
+-- Should fail: view doesn't preserve t_full_ref (FK not unique)
+SELECT v.ref_id, c.ch_id
+FROM v_full_nouniq v
+JOIN t_full_child c FOR KEY (ref_id) -> v (ref_id);
+
+-- Negative test: FULL JOIN without NOT NULL should NOT preserve
+CREATE TABLE t_full_fk_nullable (
+    fk_id int PRIMARY KEY,
+    ref_id int UNIQUE REFERENCES t_full_ref(id)
+    -- ref_id is UNIQUE but NULLABLE
+);
+INSERT INTO t_full_fk_nullable VALUES (10, 1), (20, 2), (30, NULL);
+
+CREATE VIEW v_full_nullable AS
+SELECT t_full_ref.id AS ref_id, t_full_fk_nullable.fk_id
+FROM t_full_ref FULL JOIN t_full_fk_nullable FOR KEY (ref_id) -> t_full_ref (id);
+
+-- Should fail: view doesn't preserve t_full_ref (FK nullable)
+SELECT v.ref_id, c.ch_id
+FROM v_full_nullable v
+JOIN t_full_child c FOR KEY (ref_id) -> v (ref_id);
+
+-- Cleanup
+DROP VIEW v_full_pres, v_full_pres_rev, v_full_nouniq, v_full_nullable;
+DROP TABLE t_full_child, t_full_fk, t_full_fk_nouniq, t_full_fk_nullable, t_full_ref;
+

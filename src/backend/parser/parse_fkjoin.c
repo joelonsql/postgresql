@@ -232,15 +232,19 @@ transformAndValidateForeignKeyJoin(ParseState *pstate, JoinExpr *join,
 	fkjn_node->referencedRteid = referenced_rteid;
 
 	/*
-	 * Check NOT NULL and uniqueness of FK columns on the referencing side.
-	 *
-	 * Collect NOT NULL constraint OIDs when the referencing table is on the
-	 * "inner" side of the join (the side whose rows can be filtered out).
-	 * This creates a dependency so that DROP NOT NULL is blocked when needed:
-	 *   - INNER JOIN: always track (unmatched rows are lost on both sides)
-	 *   - LEFT JOIN + FKDIR_TO (referencing on right): track (right is inner)
-	 *   - RIGHT JOIN + FKDIR_FROM (referencing on left): track (left is inner)
-	 *   - Otherwise: don't track (referencing side is preserved by outer join)
+	 * Check uniqueness of FK columns first (needed for FULL JOIN tracking).
+	 */
+	fkjn_node->fkColsUnique = check_fk_cols_unique(referencing_rteid->relid,
+													referencing_base_attnums);
+
+	/*
+	 * Check NOT NULL and collect constraint OIDs when the referencing
+	 * table is on the "inner" side of the join:
+	 *   - INNER JOIN: always track
+	 *   - LEFT JOIN + FKDIR_TO (referencing on right): track
+	 *   - RIGHT JOIN + FKDIR_FROM (referencing on left): track
+	 *   - FULL JOIN + fkColsUnique: track (preservation needs NOT NULL)
+	 *   - Otherwise: don't track
 	 */
 	{
 		bool		track_notnull;
@@ -248,16 +252,14 @@ transformAndValidateForeignKeyJoin(ParseState *pstate, JoinExpr *join,
 
 		track_notnull = (join->jointype == JOIN_INNER ||
 						 (join->jointype == JOIN_LEFT && fkjn->fkdir == FKDIR_TO) ||
-						 (join->jointype == JOIN_RIGHT && fkjn->fkdir == FKDIR_FROM));
+						 (join->jointype == JOIN_RIGHT && fkjn->fkdir == FKDIR_FROM) ||
+						 (join->jointype == JOIN_FULL && fkjn_node->fkColsUnique));
 
 		fkjn_node->fkColsNotNull = check_fk_cols_not_null(referencing_rteid->relid,
 														   referencing_base_attnums,
 														   track_notnull ? &notnull_oids : NULL);
 		fkjn_node->notNullConstraints = notnull_oids;
 	}
-
-	fkjn_node->fkColsUnique = check_fk_cols_unique(referencing_rteid->relid,
-													referencing_base_attnums);
 
 	join->fkJoin = (Node *) fkjn_node;
 }

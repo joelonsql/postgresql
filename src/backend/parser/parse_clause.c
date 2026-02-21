@@ -1614,6 +1614,7 @@ transformFromClauseItem(ParseState *pstate, Node *n,
 			 *   (P_p, P_f,  LEFT,  TO,   _,    true) -> preserved_p
 			 *   (P_p, _,    RIGHT, TO,   _,    _   ) -> preserved_f
 			 *   (P_p, P_f,  RIGHT, FROM, _,    true) -> preserved_p
+			 *   (P_p, P_f,  FULL,  _,    true, true) -> preserved_p
 			 *   otherwise                             -> NULL
 			 */
 			if (P_p &&
@@ -1636,6 +1637,11 @@ transformFromClauseItem(ParseState *pstate, Node *n,
 			else if (P_p && P_f &&
 					 j->jointype == JOIN_RIGHT &&
 					 fkjn_node->fkdir == FKDIR_FROM &&
+					 fkjn_node->fkColsUnique)
+				nsitem->p_rte->fkPreservedRteid = preserved_p;
+			else if (P_p && P_f &&
+					 j->jointype == JOIN_FULL &&
+					 fkjn_node->fkColsNotNull &&
 					 fkjn_node->fkColsUnique)
 				nsitem->p_rte->fkPreservedRteid = preserved_p;
 		}
