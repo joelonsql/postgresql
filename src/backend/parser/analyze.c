@@ -1680,34 +1680,40 @@ transformSelectStmt(ParseState *pstate, SelectStmt *stmt,
 				if (IsA(te->expr, Var))
 				{
 					Var		   *var = (Var *) te->expr;
-					RangeTblEntry *var_rte;
 
-					var_rte = rt_fetch(var->varno, qry->rtable);
-
-					if (var_rte->rtekind == RTE_GROUP &&
-						var->varattno >= 1 &&
-						var->varattno <= list_length(var_rte->groupexprs))
+					if (var->varlevelsup == 0)
 					{
-						/*
-						 * This Var references the RTE_GROUP RTE, meaning
-						 * the column came from a GROUP BY expression.
-						 * Look up the original expression in groupexprs
-						 * and trace through to the base table.
-						 */
-						Node   *groupexpr;
+						RangeTblEntry *var_rte;
 
-						groupexpr = (Node *) list_nth(var_rte->groupexprs,
-													  var->varattno - 1);
-						if (IsA(groupexpr, Var))
-							resolve_var_fk_colmap((Var *) groupexpr,
-												  qry->rtable,
+						var_rte = rt_fetch(var->varno, qry->rtable);
+
+						if (var_rte->rtekind == RTE_GROUP &&
+							var->varattno >= 1 &&
+							var->varattno <= list_length(var_rte->groupexprs))
+						{
+							/*
+							 * This Var references the RTE_GROUP RTE,
+							 * meaning the column came from a GROUP BY
+							 * expression.  Look up the original expression
+							 * in groupexprs and trace through to the base
+							 * table.
+							 */
+							Node   *groupexpr;
+
+							groupexpr = (Node *) list_nth(var_rte->groupexprs,
+														  var->varattno - 1);
+							if (IsA(groupexpr, Var))
+								resolve_var_fk_colmap((Var *) groupexpr,
+													  qry->rtable,
+													  &col_rteid, &col_attnum);
+						}
+						else
+						{
+							resolve_var_fk_colmap(var, qry->rtable,
 												  &col_rteid, &col_attnum);
+						}
 					}
-					else
-					{
-						resolve_var_fk_colmap(var, qry->rtable,
-											  &col_rteid, &col_attnum);
-					}
+					/* else: outer-level Var, skip (col_rteid stays NULL) */
 				}
 
 				qry->fkColBaseRteids =
