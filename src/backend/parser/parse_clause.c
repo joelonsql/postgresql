@@ -1571,79 +1571,180 @@ transformFromClauseItem(ParseState *pstate, Node *n,
 		Assert(res_colindex == list_length(nsitem->p_names->colnames));
 
 		/*
-		 * Compute FK preservation for this join.  For FK joins, apply
-		 * the preservation rule from the spec.  For non-FK joins, no base
-		 * table is preserved.  Result is stored directly on the join RTE.
+		 * Compute FK four-set preservation for this join.  For FK joins,
+		 * apply the four-set algorithm.  For non-FK joins, all sets are NIL
+		 * (conservative, correct).  Result is stored on the join RTE.
 		 */
-		nsitem->p_rte->fkPreservedRteid = NULL;
+		nsitem->p_rte->fkPreservedU = NIL;
+		nsitem->p_rte->fkPreservedR = NIL;
+		nsitem->p_rte->fkPreservedN = NIL;
+		nsitem->p_rte->fkPreservedC = NIL;
 		if (j->fkJoin && IsA(j->fkJoin, ForeignKeyJoinNode))
 		{
 			ForeignKeyJoinNode *fkjn_node = (ForeignKeyJoinNode *) j->fkJoin;
 			RangeTblEntry *l_rte = rt_fetch(l_nsitem->p_rtindex, pstate->p_rtable);
 			RangeTblEntry *r_rte = rt_fetch(r_nsitem->p_rtindex, pstate->p_rtable);
-			RTEId	   *l_preserved = l_rte->fkPreservedRteid;
-			RTEId	   *r_preserved = r_rte->fkPreservedRteid;
-			RTEId	   *preserved_f,
-					   *preserved_p;
-			bool		P_p,
-						P_f;
+			List	   *U_f, *R_f, *N_f, *C_f;
+			List	   *U_p, *R_p, *N_p, *C_p;
+			List	   *U_out, *R_out, *N_out, *C_out;
+			RTEId	   *f_rteid = fkjn_node->referencingRteid;
+			RTEId	   *p_rteid = fkjn_node->referencedRteid;
+			bool		nn = fkjn_node->fkColsNotNull;
+			bool		unique_f = fkjn_node->fkColsUnique;
+			bool		outer_preserves_f;
+			bool		outer_preserves_p;
 
-			/* Map left/right to referencing/referenced based on FK direction */
+			/* Map left/right to referencing(f)/referenced(p) based on FK direction */
 			if (fkjn_node->fkdir == FKDIR_FROM)
 			{
-				preserved_f = l_preserved;
-				preserved_p = r_preserved;
+				U_f = l_rte->fkPreservedU; R_f = l_rte->fkPreservedR;
+				N_f = l_rte->fkPreservedN; C_f = l_rte->fkPreservedC;
+				U_p = r_rte->fkPreservedU; R_p = r_rte->fkPreservedR;
+				N_p = r_rte->fkPreservedN; C_p = r_rte->fkPreservedC;
 			}
 			else
 			{
-				preserved_f = r_preserved;
-				preserved_p = l_preserved;
+				U_f = r_rte->fkPreservedU; R_f = r_rte->fkPreservedR;
+				N_f = r_rte->fkPreservedN; C_f = r_rte->fkPreservedC;
+				U_p = l_rte->fkPreservedU; R_p = l_rte->fkPreservedR;
+				N_p = l_rte->fkPreservedN; C_p = l_rte->fkPreservedC;
 			}
 
-			P_p = (preserved_p != NULL &&
-				   fkjn_node->referencedRteid != NULL &&
-				   preserved_p->baserelindex == fkjn_node->referencedRteid->baserelindex);
-			P_f = (preserved_f != NULL &&
-				   fkjn_node->referencingRteid != NULL &&
-				   preserved_f->baserelindex == fkjn_node->referencingRteid->baserelindex);
+			/*
+			 * Determine outer preservation based on join type and FK direction.
+			 *
+			 * "outer preserves X" means X is on the outer (preserved) side of
+			 * the join, so its rows survive even without a match.
+			 *
+			 * For FKDIR_FROM: left=f, right=p
+			 *   INNER: neither outer
+			 *   LEFT:  f outer (left preserved)
+			 *   RIGHT: p outer (right preserved)
+			 *   FULL:  both outer
+			 *
+			 * For FKDIR_TO: left=p, right=f
+			 *   INNER: neither outer
+			 *   LEFT:  p outer (left preserved)
+			 *   RIGHT: f outer (right preserved)
+			 *   FULL:  both outer
+			 */
+			if (fkjn_node->fkdir == FKDIR_FROM)
+			{
+				outer_preserves_f = (j->jointype == JOIN_LEFT || j->jointype == JOIN_FULL);
+				outer_preserves_p = (j->jointype == JOIN_RIGHT || j->jointype == JOIN_FULL);
+			}
+			else
+			{
+				outer_preserves_f = (j->jointype == JOIN_RIGHT || j->jointype == JOIN_FULL);
+				outer_preserves_p = (j->jointype == JOIN_LEFT || j->jointype == JOIN_FULL);
+			}
 
 			/*
-			 * Apply the preservation rule from the spec:
-			 *   (P_p, _,    INNER, true, _,    _   ) -> preserved_f
-			 *   (P_p, _,    LEFT,  FROM, _,    _   ) -> preserved_f
-			 *   (P_p, P_f,  LEFT,  TO,   _,    true) -> preserved_p
-			 *   (P_p, _,    RIGHT, TO,   _,    _   ) -> preserved_f
-			 *   (P_p, P_f,  RIGHT, FROM, _,    true) -> preserved_p
-			 *   (P_p, P_f,  FULL,  _,    true, true) -> preserved_p
-			 *   otherwise                             -> NULL
+			 * U computation: propagate U_p when f is unique and its
+			 * uniqueness is preserved.  Null-padding doesn't affect
+			 * uniqueness — the N set handles null concerns separately.
 			 */
-			if (P_p &&
-				j->jointype == JOIN_INNER &&
-				fkjn_node->fkColsNotNull)
-				nsitem->p_rte->fkPreservedRteid = preserved_f;
-			else if (P_p &&
-					 j->jointype == JOIN_LEFT &&
-					 fkjn_node->fkdir == FKDIR_FROM)
-				nsitem->p_rte->fkPreservedRteid = preserved_f;
-			else if (P_p && P_f &&
-					 j->jointype == JOIN_LEFT &&
-					 fkjn_node->fkdir == FKDIR_TO &&
-					 fkjn_node->fkColsUnique)
-				nsitem->p_rte->fkPreservedRteid = preserved_p;
-			else if (P_p &&
-					 j->jointype == JOIN_RIGHT &&
-					 fkjn_node->fkdir == FKDIR_TO)
-				nsitem->p_rte->fkPreservedRteid = preserved_f;
-			else if (P_p && P_f &&
-					 j->jointype == JOIN_RIGHT &&
-					 fkjn_node->fkdir == FKDIR_FROM &&
-					 fkjn_node->fkColsUnique)
-				nsitem->p_rte->fkPreservedRteid = preserved_p;
-			else if (P_p && P_f &&
-					 j->jointype == JOIN_FULL &&
-					 fkjn_node->fkColsNotNull &&
-					 fkjn_node->fkColsUnique)
-				nsitem->p_rte->fkPreservedRteid = preserved_p;
+			U_out = list_copy(U_f);
+			if (unique_f && rteid_list_member(U_f, f_rteid))
+				U_out = rteid_list_union(U_out, U_p);
+
+			/* Phase 1: Outer preservation for R and C */
+			R_out = NIL;
+			C_out = NIL;
+			if (outer_preserves_f)
+			{
+				R_out = rteid_list_union(R_out, R_f);
+				C_out = chain_set_union(C_out, C_f);
+			}
+			if (outer_preserves_p)
+			{
+				R_out = rteid_list_union(R_out, R_p);
+				C_out = chain_set_union(C_out, C_p);
+			}
+
+			/* Phase 1b: N computation - union minus null-padded side.
+			 *
+			 * When outer_preserves_f, the p side gets null-padded by
+			 * unmatched f rows.  But if nn=true (FK cols NOT NULL), every
+			 * f row matches a p row, so no unmatched f rows exist and p
+			 * is never null-padded.  Gate the removal on !nn.
+			 */
+			N_out = rteid_list_union(N_f, N_p);
+			if (outer_preserves_f && !nn)
+			{
+				/* p side is null-padded, remove its N entries */
+				ListCell *lc2;
+				foreach(lc2, N_p)
+				{
+					RTEId *item = (RTEId *) lfirst(lc2);
+					N_out = rteid_list_remove(N_out, item);
+				}
+			}
+			if (outer_preserves_p)
+			{
+				/* f side is null-padded, remove its N entries */
+				ListCell *lc2;
+				foreach(lc2, N_f)
+				{
+					RTEId *item = (RTEId *) lfirst(lc2);
+					N_out = rteid_list_remove(N_out, item);
+				}
+			}
+
+			/* Phase 2: Guard - skip chain extension if guard fails */
+			if (nn && rteid_list_member(N_f, f_rteid) &&
+				rteid_list_member(R_p, p_rteid))
+			{
+				/* Phase 3: Chain extension */
+				List	   *anchor_set = NIL;
+				ListCell   *lc2;
+
+				/* Build anchor set: {A : (A,f) in C_f} union ({f} if f in R_f) */
+				foreach(lc2, C_f)
+				{
+					List   *pair = (List *) lfirst(lc2);
+					RTEId  *t = (RTEId *) lsecond(pair);
+
+					if (t->baserelindex == f_rteid->baserelindex)
+					{
+						RTEId  *a = (RTEId *) linitial(pair);
+						anchor_set = rteid_list_add(anchor_set, a);
+					}
+				}
+				if (rteid_list_member(R_f, f_rteid))
+					anchor_set = rteid_list_add(anchor_set, f_rteid);
+
+				/* Extend R_out with anchor_set */
+				R_out = rteid_list_union(R_out, anchor_set);
+
+				/* Add chains from C_f whose source is in anchor_set */
+				C_out = chain_set_union(C_out,
+										chain_set_filter_by_source(C_f, anchor_set));
+
+				/* For each anchor, add (A, p) and extend through C_p */
+				foreach(lc2, anchor_set)
+				{
+					RTEId  *a = (RTEId *) lfirst(lc2);
+					ListCell *lc3;
+
+					C_out = chain_set_add(C_out, a, p_rteid);
+
+					foreach(lc3, C_p)
+					{
+						List   *pair = (List *) lfirst(lc3);
+						RTEId  *ps = (RTEId *) linitial(pair);
+						RTEId  *py = (RTEId *) lsecond(pair);
+
+						if (ps->baserelindex == p_rteid->baserelindex)
+							C_out = chain_set_add(C_out, a, py);
+					}
+				}
+			}
+
+			nsitem->p_rte->fkPreservedU = U_out;
+			nsitem->p_rte->fkPreservedR = R_out;
+			nsitem->p_rte->fkPreservedN = N_out;
+			nsitem->p_rte->fkPreservedC = C_out;
 		}
 
 		/*

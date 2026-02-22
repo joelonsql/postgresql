@@ -1298,3 +1298,81 @@ JOIN t_full_child c FOR KEY (ref_id) -> v (ref_id);
 DROP VIEW v_full_pres, v_full_pres_rev, v_full_nouniq, v_full_nullable;
 DROP TABLE t_full_child, t_full_fk, t_full_fk_nouniq, t_full_fk_nullable, t_full_ref;
 
+-- ================================================
+-- Four-set preservation: NOT NULL chain tracking
+-- ================================================
+-- This tests that LEFT JOIN null-padding breaks NOT NULL constraints,
+-- preventing downstream INNER JOINs from falsely claiming preservation.
+
+CREATE TABLE t4s_departments (
+    id int PRIMARY KEY
+);
+CREATE TABLE t4s_employees (
+    id int PRIMARY KEY,
+    department_id int NOT NULL REFERENCES t4s_departments(id)
+);
+CREATE TABLE t4s_tasks (
+    id int PRIMARY KEY,
+    assignee_id int REFERENCES t4s_employees(id)  -- NULLABLE
+);
+CREATE TABLE t4s_time_entries (
+    id int PRIMARY KEY,
+    task_id int NOT NULL REFERENCES t4s_tasks(id)
+);
+
+INSERT INTO t4s_departments VALUES (1), (2);
+INSERT INTO t4s_employees VALUES (1, 1), (2, 2);
+INSERT INTO t4s_tasks VALUES (1, 1), (2, 2), (3, NULL);  -- task 3 has no assignee
+INSERT INTO t4s_time_entries VALUES (1, 1), (2, 2), (3, 3);
+
+-- Bug test: LEFT JOIN with nullable FK, then INNER JOIN relying on NOT NULL.
+-- The LEFT JOIN null-pads employees for task 3 (no assignee), making
+-- department_id NULL.  The INNER JOIN with departments would drop task 3.
+-- A downstream FK join referencing tasks should correctly reject this.
+WITH task_employees AS (
+    SELECT t4s_tasks.id AS task_id, t4s_tasks.assignee_id,
+           t4s_employees.id AS emp_id, t4s_employees.department_id
+    FROM t4s_tasks
+    LEFT JOIN t4s_employees FOR KEY (id) <- t4s_tasks (assignee_id)
+),
+task_employee_departments AS (
+    SELECT task_employees.task_id, task_employees.department_id,
+           t4s_departments.id AS dept_id
+    FROM task_employees
+    JOIN t4s_departments FOR KEY (id) <- task_employees (department_id)
+)
+SELECT ted.task_id
+FROM task_employee_departments ted
+JOIN t4s_time_entries FOR KEY (task_id) -> ted (task_id);  -- should ERROR
+
+-- Variant: same structure but with NOT NULL assignee_id should succeed
+CREATE TABLE t4s_tasks_nn (
+    id int PRIMARY KEY,
+    assignee_id int NOT NULL REFERENCES t4s_employees(id)
+);
+CREATE TABLE t4s_time_entries_nn (
+    id int PRIMARY KEY,
+    task_id int NOT NULL REFERENCES t4s_tasks_nn(id)
+);
+INSERT INTO t4s_tasks_nn VALUES (1, 1), (2, 2);
+INSERT INTO t4s_time_entries_nn VALUES (1, 1), (2, 2);
+
+WITH task_employees AS (
+    SELECT t4s_tasks_nn.id AS task_id, t4s_tasks_nn.assignee_id,
+           t4s_employees.id AS emp_id, t4s_employees.department_id
+    FROM t4s_tasks_nn
+    LEFT JOIN t4s_employees FOR KEY (id) <- t4s_tasks_nn (assignee_id)
+),
+task_employee_departments AS (
+    SELECT task_employees.task_id, task_employees.department_id,
+           t4s_departments.id AS dept_id
+    FROM task_employees
+    JOIN t4s_departments FOR KEY (id) <- task_employees (department_id)
+)
+SELECT ted.task_id, ted.department_id
+FROM task_employee_departments ted
+JOIN t4s_time_entries_nn FOR KEY (task_id) -> ted (task_id);  -- should succeed
+
+-- Cleanup
+DROP TABLE t4s_time_entries_nn, t4s_time_entries, t4s_tasks_nn, t4s_tasks, t4s_employees, t4s_departments;
+

@@ -1551,10 +1551,14 @@ transformSelectStmt(ParseState *pstate, SelectStmt *stmt,
 		parseCheckAggregates(pstate, qry);
 
 	/*
-	 * Compute FK preservation for this query.  A query preserves a base
-	 * table only if it has no disqualifying clauses and a single FROM item.
+	 * Compute FK four-set preservation for this query.  All four sets
+	 * propagate only when there are no disqualifying clauses and a single
+	 * FROM item.
 	 */
-	qry->fkPreservedRteid = NULL;
+	qry->fkPreservedU = NIL;
+	qry->fkPreservedR = NIL;
+	qry->fkPreservedN = NIL;
+	qry->fkPreservedC = NIL;
 	if (qual == NULL &&						/* no WHERE */
 		qry->havingQual == NULL &&			/* no HAVING */
 		qry->limitOffset == NULL &&			/* no OFFSET */
@@ -1582,7 +1586,10 @@ transformSelectStmt(ParseState *pstate, SelectStmt *stmt,
 			{
 				RangeTblEntry *rte = rt_fetch(rtindex, qry->rtable);
 
-				qry->fkPreservedRteid = rte->fkPreservedRteid;
+				qry->fkPreservedU = rte->fkPreservedU;
+				qry->fkPreservedR = rte->fkPreservedR;
+				qry->fkPreservedN = rte->fkPreservedN;
+				qry->fkPreservedC = rte->fkPreservedC;
 			}
 		}
 	}

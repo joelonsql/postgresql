@@ -368,8 +368,8 @@ UpdateViewFKInfo(Oid viewOid, Query *viewParse)
 	if (!HeapTupleIsValid(classtup))
 		elog(ERROR, "cache lookup failed for relation %u", viewOid);
 	classform = (Form_pg_class) GETSTRUCT(classtup);
-	classform->relfkpreserved = viewParse->fkPreservedRteid ?
-		(int32) viewParse->fkPreservedRteid->baserelindex : 0;
+	classform->relfkpreserved = (viewParse->fkPreservedR != NIL) ?
+		(int32) ((RTEId *) linitial(viewParse->fkPreservedR))->baserelindex : 0;
 	{
 		Relation	pg_class_rel = table_open(RelationRelationId, RowExclusiveLock);
 

@@ -243,12 +243,18 @@ typedef struct Query
 	List	   *constraintDeps pg_node_attr(query_jumble_ignore);
 
 	/*
-	 * FK join preservation: RTEId of the base table instance preserved by
-	 * this query's result, or NULL if no base table is preserved.  Computed
-	 * at the end of parse analysis.  Persisted in view queries for use at
-	 * view-use time.
+	 * FK join four-set preservation tracking.  Computed at the end of parse
+	 * analysis.  Persisted in view queries for use at view-use time.
+	 *
+	 * fkPreservedU: base tables whose uniqueness is preserved (List of RTEId *)
+	 * fkPreservedR: base tables whose complete row set is present (List of RTEId *)
+	 * fkPreservedN: base tables whose null preservation is intact (List of RTEId *)
+	 * fkPreservedC: NOT NULL FK chain pairs (List of List(RTEId *, RTEId *))
 	 */
-	RTEId	   *fkPreservedRteid pg_node_attr(equal_ignore, query_jumble_ignore);
+	List	   *fkPreservedU pg_node_attr(equal_ignore, query_jumble_ignore);
+	List	   *fkPreservedR pg_node_attr(equal_ignore, query_jumble_ignore);
+	List	   *fkPreservedN pg_node_attr(equal_ignore, query_jumble_ignore);
+	List	   *fkPreservedC pg_node_attr(equal_ignore, query_jumble_ignore);
 
 	/*
 	 * FK join column mapping: per output column, the source base table RTEId
@@ -1241,12 +1247,12 @@ typedef struct RangeTblEntry
 	Alias	   *join_using_alias pg_node_attr(query_jumble_ignore);
 
 	/*
-	 * FK join preservation: RTEId of the base table instance preserved by
-	 * this relation.  For a base table, this is its own RTEId.  For a join
-	 * RTE, this is the RTEId preserved through the join (if any).  NULL
-	 * means no base table is preserved.
+	 * FK join four-set preservation tracking.  See Query node for details.
 	 */
-	RTEId	   *fkPreservedRteid pg_node_attr(equal_ignore, query_jumble_ignore);
+	List	   *fkPreservedU pg_node_attr(equal_ignore, query_jumble_ignore);
+	List	   *fkPreservedR pg_node_attr(equal_ignore, query_jumble_ignore);
+	List	   *fkPreservedN pg_node_attr(equal_ignore, query_jumble_ignore);
+	List	   *fkPreservedC pg_node_attr(equal_ignore, query_jumble_ignore);
 
 	/*
 	 * FK join column mapping: per output column, the source base table RTEId

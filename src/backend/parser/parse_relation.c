@@ -33,6 +33,7 @@
 #include "utils/builtins.h"
 #include "utils/lsyscache.h"
 #include "utils/syscache.h"
+#include "rewrite/rewriteHandler.h"
 #include "utils/varlena.h"
 
 /* Static variable for global base relation indexing */
@@ -1492,18 +1493,22 @@ set_rte_fk_info_for_relation(RangeTblEntry *rte, Relation rel)
 	int		natts = RelationGetNumberOfAttributes(rel);
 	char	relkind = rel->rd_rel->relkind;
 
-	rte->fkPreservedRteid = NULL;
+	rte->fkPreservedU = NIL;
+	rte->fkPreservedR = NIL;
+	rte->fkPreservedN = NIL;
+	rte->fkPreservedC = NIL;
 	rte->fkColBaseRteids = NIL;
 	rte->fkColBaseAttnums = NIL;
 
 	if (relkind == RELKIND_RELATION || relkind == RELKIND_PARTITIONED_TABLE)
 	{
 		/*
-		 * Base tables: use runtime RTEId directly. The RTE must already have
-		 * its rteid assigned before calling this function.
+		 * Base tables: U=R=N={self}, C={}
 		 */
 		Assert(rte->rteid != NULL);
-		rte->fkPreservedRteid = rte->rteid;
+		rte->fkPreservedU = list_make1(rte->rteid);
+		rte->fkPreservedR = list_make1(rte->rteid);
+		rte->fkPreservedN = list_make1(rte->rteid);
 
 		for (int i = 0; i < natts; i++)
 		{
@@ -1517,12 +1522,9 @@ set_rte_fk_info_for_relation(RangeTblEntry *rte, Relation rel)
 	else if (relkind == RELKIND_VIEW)
 	{
 		/*
-		 * Views: reconstruct RTEIds from catalog data.
-		 * relfkpreserved stores the baserelindex of the preserved instance.
-		 * Per-column attfkbaserelid/attfkbaserelindex identify the instance.
+		 * Views: load FK column mapping from catalog attributes, and load
+		 * the four-set preservation data from the view's stored Query.
 		 */
-		int32	preserved_bri = rel->rd_rel->relfkpreserved;
-
 		for (int i = 0; i < natts; i++)
 		{
 			Form_pg_attribute attr = TupleDescAttr(rel->rd_att, i);
@@ -1537,15 +1539,6 @@ set_rte_fk_info_for_relation(RangeTblEntry *rte, Relation rel)
 				col_rteid->procnumber = 0;
 
 				rte->fkColBaseRteids = lappend(rte->fkColBaseRteids, col_rteid);
-
-				/*
-				 * If this column's baserelindex matches the preserved one,
-				 * use this RTEId as the preservation RTEId.
-				 */
-				if (preserved_bri != 0 &&
-					attr->attfkbaserelindex == preserved_bri &&
-					rte->fkPreservedRteid == NULL)
-					rte->fkPreservedRteid = col_rteid;
 			}
 			else
 			{
@@ -1557,18 +1550,17 @@ set_rte_fk_info_for_relation(RangeTblEntry *rte, Relation rel)
 		}
 
 		/*
-		 * If we have a preserved baserelindex but no matching column was
-		 * found, construct a standalone RTEId for preservation.
+		 * Load four-set preservation from the view's stored Query (in the
+		 * rewrite rule).  The Query has the four sets serialized via the
+		 * auto-generated node serialization.
 		 */
-		if (preserved_bri != 0 && rte->fkPreservedRteid == NULL)
 		{
-			RTEId  *pres_rteid = makeNode(RTEId);
+			Query  *viewquery = get_view_query(rel);
 
-			pres_rteid->baserelindex = (Index) preserved_bri;
-			pres_rteid->relid = InvalidOid;
-			pres_rteid->fxid = 0;
-			pres_rteid->procnumber = 0;
-			rte->fkPreservedRteid = pres_rteid;
+			rte->fkPreservedU = list_copy(viewquery->fkPreservedU);
+			rte->fkPreservedR = list_copy(viewquery->fkPreservedR);
+			rte->fkPreservedN = list_copy(viewquery->fkPreservedN);
+			rte->fkPreservedC = list_copy(viewquery->fkPreservedC);
 		}
 	}
 	/* else: other relkinds get NULL/NIL defaults set above */
@@ -1882,9 +1874,12 @@ addRangeTableEntryForSubquery(ParseState *pstate,
 	rte->inFromCl = inFromCl;
 
 	/*
-	 * Propagate FK join preservation info from the subquery.
+	 * Propagate FK join four-set preservation info from the subquery.
 	 */
-	rte->fkPreservedRteid = subquery->fkPreservedRteid;
+	rte->fkPreservedU = list_copy(subquery->fkPreservedU);
+	rte->fkPreservedR = list_copy(subquery->fkPreservedR);
+	rte->fkPreservedN = list_copy(subquery->fkPreservedN);
+	rte->fkPreservedC = list_copy(subquery->fkPreservedC);
 	rte->fkColBaseRteids = list_copy(subquery->fkColBaseRteids);
 	rte->fkColBaseAttnums = list_copy(subquery->fkColBaseAttnums);
 
@@ -2619,7 +2614,10 @@ addRangeTableEntryForCTE(ParseState *pstate,
 	{
 		Query  *ctequery = (Query *) cte->ctequery;
 
-		rte->fkPreservedRteid = ctequery->fkPreservedRteid;
+		rte->fkPreservedU = list_copy(ctequery->fkPreservedU);
+		rte->fkPreservedR = list_copy(ctequery->fkPreservedR);
+		rte->fkPreservedN = list_copy(ctequery->fkPreservedN);
+		rte->fkPreservedC = list_copy(ctequery->fkPreservedC);
 		rte->fkColBaseRteids = list_copy(ctequery->fkColBaseRteids);
 		rte->fkColBaseAttnums = list_copy(ctequery->fkColBaseAttnums);
 	}

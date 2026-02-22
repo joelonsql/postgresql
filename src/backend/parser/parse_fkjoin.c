@@ -192,12 +192,13 @@ transformAndValidateForeignKeyJoin(ParseState *pstate, JoinExpr *join,
 	Assert(referencing_rteid != NULL && referenced_rteid != NULL);
 
 	/*
-	 * Check that the referenced side preserves the referenced base table
-	 * instance.  Compare by baserelindex to distinguish different instances
-	 * of the same base table (e.g., self-joins).
+	 * Check that the referenced side preserves the referenced base table:
+	 * it must be in R (rows preserved), U (uniqueness preserved), and
+	 * N (null preservation intact — no null-padded PK values).
 	 */
-	if (referenced_rte->fkPreservedRteid == NULL ||
-		referenced_rte->fkPreservedRteid->baserelindex != referenced_rteid->baserelindex)
+	if (!rteid_list_member(referenced_rte->fkPreservedR, referenced_rteid) ||
+		!rteid_list_member(referenced_rte->fkPreservedU, referenced_rteid) ||
+		!rteid_list_member(referenced_rte->fkPreservedN, referenced_rteid))
 		ereport(ERROR,
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 				 errmsg("referenced relation does not preserve the referenced base table"),
@@ -669,5 +670,166 @@ check_fk_cols_unique(Oid relid, List *attnums)
 	table_close(conrel, AccessShareLock);
 
 	return found;
+}
+
+/*
+ * RTEId set helper functions
+ *
+ * These operate on Lists of RTEId pointers, comparing by baserelindex
+ * to distinguish different instances of the same base table.
+ */
+
+/*
+ * rteid_list_member
+ *		Check if an RTEId is in the list (by baserelindex).
+ */
+bool
+rteid_list_member(List *list, RTEId *rteid)
+{
+	ListCell   *lc;
+
+	if (rteid == NULL)
+		return false;
+
+	foreach(lc, list)
+	{
+		RTEId  *item = (RTEId *) lfirst(lc);
+
+		if (item != NULL && item->baserelindex == rteid->baserelindex)
+			return true;
+	}
+	return false;
+}
+
+/*
+ * rteid_list_add
+ *		Add an RTEId to the list if not already present.
+ */
+List *
+rteid_list_add(List *list, RTEId *rteid)
+{
+	if (rteid == NULL || rteid_list_member(list, rteid))
+		return list;
+	return lappend(list, rteid);
+}
+
+/*
+ * rteid_list_remove
+ *		Remove an RTEId from the list (by baserelindex).
+ */
+List *
+rteid_list_remove(List *list, RTEId *rteid)
+{
+	List	   *result = NIL;
+	ListCell   *lc;
+
+	if (rteid == NULL)
+		return list;
+
+	foreach(lc, list)
+	{
+		RTEId  *item = (RTEId *) lfirst(lc);
+
+		if (item == NULL || item->baserelindex != rteid->baserelindex)
+			result = lappend(result, item);
+	}
+	return result;
+}
+
+/*
+ * rteid_list_union
+ *		Union of two RTEId lists (no duplicates by baserelindex).
+ */
+List *
+rteid_list_union(List *a, List *b)
+{
+	List	   *result;
+	ListCell   *lc;
+
+	result = list_copy(a);
+	foreach(lc, b)
+	{
+		RTEId  *item = (RTEId *) lfirst(lc);
+
+		result = rteid_list_add(result, item);
+	}
+	return result;
+}
+
+/*
+ * Chain set helper functions
+ *
+ * A chain set is a List of two-element Lists, where each inner list
+ * contains [source_RTEId, target_RTEId].  These track NOT NULL FK
+ * chain pairs for transitive preservation reasoning.
+ */
+
+/*
+ * chain_set_add
+ *		Add a (source, target) pair if not already present.
+ */
+List *
+chain_set_add(List *chains, RTEId *source, RTEId *target)
+{
+	ListCell   *lc;
+
+	if (source == NULL || target == NULL)
+		return chains;
+
+	foreach(lc, chains)
+	{
+		List   *pair = (List *) lfirst(lc);
+		RTEId  *s = (RTEId *) linitial(pair);
+		RTEId  *t = (RTEId *) lsecond(pair);
+
+		if (s->baserelindex == source->baserelindex &&
+			t->baserelindex == target->baserelindex)
+			return chains;
+	}
+
+	return lappend(chains, list_make2(source, target));
+}
+
+/*
+ * chain_set_union
+ *		Union of two chain sets.
+ */
+List *
+chain_set_union(List *a, List *b)
+{
+	List	   *result;
+	ListCell   *lc;
+
+	result = list_copy(a);
+	foreach(lc, b)
+	{
+		List   *pair = (List *) lfirst(lc);
+		RTEId  *s = (RTEId *) linitial(pair);
+		RTEId  *t = (RTEId *) lsecond(pair);
+
+		result = chain_set_add(result, s, t);
+	}
+	return result;
+}
+
+/*
+ * chain_set_filter_by_source
+ *		Return only chain pairs whose source is in the given RTEId list.
+ */
+List *
+chain_set_filter_by_source(List *chains, List *sources)
+{
+	List	   *result = NIL;
+	ListCell   *lc;
+
+	foreach(lc, chains)
+	{
+		List   *pair = (List *) lfirst(lc);
+		RTEId  *s = (RTEId *) linitial(pair);
+
+		if (rteid_list_member(sources, s))
+			result = lappend(result, pair);
+	}
+	return result;
 }
 

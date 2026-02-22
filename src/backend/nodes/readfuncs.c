@@ -435,7 +435,10 @@ _readRangeTblEntry(void)
 			break;
 	}
 
-	READ_NODE_FIELD(fkPreservedRteid);
+	READ_NODE_FIELD(fkPreservedU);
+	READ_NODE_FIELD(fkPreservedR);
+	READ_NODE_FIELD(fkPreservedN);
+	READ_NODE_FIELD(fkPreservedC);
 	READ_NODE_FIELD(fkColBaseRteids);
 	READ_NODE_FIELD(fkColBaseAttnums);
 

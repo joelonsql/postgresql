@@ -17,4 +17,15 @@
 
 extern void transformAndValidateForeignKeyJoin(ParseState *pstate, JoinExpr *j, ParseNamespaceItem *r_nsitem, List *l_namespace);
 
+/* RTEId set helper functions */
+extern bool rteid_list_member(List *list, RTEId *rteid);
+extern List *rteid_list_add(List *list, RTEId *rteid);
+extern List *rteid_list_remove(List *list, RTEId *rteid);
+extern List *rteid_list_union(List *a, List *b);
+
+/* Chain set helper functions */
+extern List *chain_set_add(List *chains, RTEId *source, RTEId *target);
+extern List *chain_set_union(List *a, List *b);
+extern List *chain_set_filter_by_source(List *chains, List *sources);
+
 #endif							/* PARSE_FKJOIN_H */
