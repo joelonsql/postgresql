@@ -123,7 +123,12 @@ test: plancache limit plpgsql copy2 temp domain rangefuncs prepare conversion tr
 # The stats test resets stats, so nothing else needing stats access can be in
 # this group.
 # ----------
-test: partition_merge partition_split partition_join partition_prune reloptions hash_part indexing partition_aggregate partition_info tuplesort explain compression compression_lz4 memoize stats predicate numa eager_aggregate foreign_key_join
+test: partition_merge partition_split partition_join partition_prune reloptions hash_part indexing partition_aggregate partition_info tuplesort explain compression compression_lz4 memoize stats predicate numa eager_aggregate
+
+# foreign_key_join tests use common table names (t1, t2, t3) and must run alone
+test: foreign_key_join
+test: foreign_key_join_group_by
+test: foreign_key_join_cte
 
 # event_trigger depends on create_am and cannot run concurrently with
 # any test that runs DDL

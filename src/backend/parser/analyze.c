@@ -24,7 +24,9 @@
 
 #include "postgres.h"
 
+#include "access/genam.h"
 #include "access/sysattr.h"
+#include "access/table.h"
 #include "catalog/dependency.h"
 #include "catalog/pg_proc.h"
 #include "catalog/pg_type.h"
@@ -41,6 +43,7 @@
 #include "parser/parse_collate.h"
 #include "parser/parse_cte.h"
 #include "parser/parse_expr.h"
+#include "parser/parse_fkjoin.h"
 #include "parser/parse_func.h"
 #include "parser/parse_merge.h"
 #include "parser/parse_oper.h"
@@ -97,6 +100,7 @@ static Query *transformCallStmt(ParseState *pstate,
 								CallStmt *stmt);
 static void transformLockingClause(ParseState *pstate, Query *qry,
 								   LockingClause *lc, bool pushedDown);
+static List *check_group_by_preserves_uniqueness(Query *qry);
 #ifdef DEBUG_NODE_TESTS_ENABLED
 static bool test_raw_expression_coverage(Node *node, void *context);
 #endif
@@ -1554,22 +1558,24 @@ transformSelectStmt(ParseState *pstate, SelectStmt *stmt,
 	 * Compute FK four-set preservation for this query.  All four sets
 	 * propagate only when there are no disqualifying clauses and a single
 	 * FROM item.
+	 *
+	 * GROUP BY is handled specially: it doesn't block propagation of R, N, C
+	 * (as long as there's no HAVING), and can restore uniqueness (U) when the
+	 * GROUP BY columns cover a unique key on a base table.
 	 */
 	qry->fkPreservedU = NIL;
 	qry->fkPreservedR = NIL;
 	qry->fkPreservedN = NIL;
 	qry->fkPreservedC = NIL;
 	if (qual == NULL &&						/* no WHERE */
-		qry->havingQual == NULL &&			/* no HAVING */
 		qry->limitOffset == NULL &&			/* no OFFSET */
 		qry->limitCount == NULL &&			/* no LIMIT */
 		qry->distinctClause == NIL &&		/* no DISTINCT */
-		qry->groupClause == NIL &&			/* no GROUP BY */
 		qry->groupingSets == NIL &&			/* no GROUPING SETS */
 		!qry->hasWindowFuncs &&				/* no window functions */
-		qry->setOperations == NULL &&		/* no UNION/INTERSECT/EXCEPT */
-		qry->hasAggs == false)				/* no aggregates */
+		qry->setOperations == NULL)			/* no UNION/INTERSECT/EXCEPT */
 	{
+		bool		has_group_by = (qry->groupClause != NIL || qry->hasAggs);
 		List	   *fromlist = qry->jointree->fromlist;
 
 		if (list_length(fromlist) == 1)
@@ -1586,10 +1592,43 @@ transformSelectStmt(ParseState *pstate, SelectStmt *stmt,
 			{
 				RangeTblEntry *rte = rt_fetch(rtindex, qry->rtable);
 
-				qry->fkPreservedU = rte->fkPreservedU;
-				qry->fkPreservedR = rte->fkPreservedR;
-				qry->fkPreservedN = rte->fkPreservedN;
-				qry->fkPreservedC = rte->fkPreservedC;
+				if (!has_group_by)
+				{
+					/*
+					 * No GROUP BY or aggregates: propagate all four sets
+					 * directly, but only if there's no HAVING either.
+					 */
+					if (qry->havingQual == NULL)
+					{
+						qry->fkPreservedU = rte->fkPreservedU;
+						qry->fkPreservedR = rte->fkPreservedR;
+						qry->fkPreservedN = rte->fkPreservedN;
+						qry->fkPreservedC = rte->fkPreservedC;
+					}
+				}
+				else
+				{
+					/*
+					 * GROUP BY present.  R, N, C propagate from the FROM item
+					 * as long as there's no HAVING (which can filter groups).
+					 * U is determined by whether GROUP BY columns cover a
+					 * unique key.
+					 */
+					if (qry->havingQual == NULL)
+					{
+						qry->fkPreservedR = rte->fkPreservedR;
+						qry->fkPreservedN = rte->fkPreservedN;
+						qry->fkPreservedC = rte->fkPreservedC;
+					}
+
+					/*
+					 * Check if GROUP BY restores uniqueness.  This works even
+					 * with HAVING, since uniqueness is about deduplication,
+					 * not row completeness.
+					 */
+					qry->fkPreservedU =
+						check_group_by_preserves_uniqueness(qry);
+				}
 			}
 		}
 	}
@@ -1623,9 +1662,37 @@ transformSelectStmt(ParseState *pstate, SelectStmt *stmt,
 					continue;
 
 				if (IsA(te->expr, Var))
-					resolve_var_fk_colmap((Var *) te->expr,
-										  qry->rtable,
-										  &col_rteid, &col_attnum);
+				{
+					Var		   *var = (Var *) te->expr;
+					RangeTblEntry *var_rte;
+
+					var_rte = rt_fetch(var->varno, qry->rtable);
+
+					if (var_rte->rtekind == RTE_GROUP &&
+						var->varattno >= 1 &&
+						var->varattno <= list_length(var_rte->groupexprs))
+					{
+						/*
+						 * This Var references the RTE_GROUP RTE, meaning
+						 * the column came from a GROUP BY expression.
+						 * Look up the original expression in groupexprs
+						 * and trace through to the base table.
+						 */
+						Node   *groupexpr;
+
+						groupexpr = (Node *) list_nth(var_rte->groupexprs,
+													  var->varattno - 1);
+						if (IsA(groupexpr, Var))
+							resolve_var_fk_colmap((Var *) groupexpr,
+												  qry->rtable,
+												  &col_rteid, &col_attnum);
+					}
+					else
+					{
+						resolve_var_fk_colmap(var, qry->rtable,
+											  &col_rteid, &col_attnum);
+					}
+				}
 
 				qry->fkColBaseRteids =
 					lappend(qry->fkColBaseRteids, col_rteid);
@@ -3778,6 +3845,190 @@ applyLockingClause(Query *qry, Index rtindex,
 	rc->waitPolicy = waitPolicy;
 	rc->pushedDown = pushedDown;
 	qry->rowMarks = lappend(qry->rowMarks, rc);
+}
+
+/*
+ * check_group_by_preserves_uniqueness
+ *		Check if a GROUP BY clause preserves uniqueness by verifying that
+ *		the GROUP BY columns cover a unique key on an underlying base table.
+ *
+ * This is called after parseCheckAggregates, so the query's target entries
+ * have already been rewritten to reference the RTE_GROUP RTE.  We examine
+ * the RTE_GROUP's groupexprs to find the original column references.
+ *
+ * Returns a list of RTEId pointers for base tables whose uniqueness is
+ * preserved by the GROUP BY (typically zero or one entry), or NIL if
+ * uniqueness is not preserved.
+ */
+static List *
+check_group_by_preserves_uniqueness(Query *qry)
+{
+	ListCell   *lc;
+	RangeTblEntry *group_rte = NULL;
+	Bitmapset  *group_cols = NULL;
+	Index		base_varno = 0;
+	RangeTblEntry *base_rte = NULL;
+	Relation	rel;
+	List	   *indexoidlist;
+	ListCell   *indexoidscan;
+	bool		found_unique = false;
+	RTEId	   *base_rteid = NULL;
+
+	if (qry->groupClause == NIL)
+		return NIL;
+
+	/* Find the RTE_GROUP RTE */
+	for (int i = 1; i <= list_length(qry->rtable); i++)
+	{
+		RangeTblEntry *rte = rt_fetch(i, qry->rtable);
+
+		if (rte->rtekind == RTE_GROUP)
+		{
+			group_rte = rte;
+			break;
+		}
+	}
+
+	if (group_rte == NULL || group_rte->groupexprs == NIL)
+		return NIL;
+
+	/*
+	 * Examine the GROUP BY expressions (from the RTE_GROUP's groupexprs).
+	 * All must be simple Var references to the same underlying base relation.
+	 */
+	foreach(lc, group_rte->groupexprs)
+	{
+		Node	   *expr = (Node *) lfirst(lc);
+		Var		   *v;
+		RangeTblEntry *v_rte;
+
+		if (!IsA(expr, Var))
+			return NIL;			/* non-Var GROUP BY expression */
+
+		v = (Var *) expr;
+		if (v->varlevelsup != 0 || v->varattno < 1)
+			return NIL;
+
+		v_rte = rt_fetch(v->varno, qry->rtable);
+
+		if (v_rte->rtekind == RTE_RELATION)
+		{
+			/* Direct reference to a base table */
+			if (base_varno == 0)
+			{
+				base_varno = v->varno;
+				base_rte = v_rte;
+			}
+			else if (base_varno != v->varno)
+				return NIL;		/* mixed tables in GROUP BY */
+
+			group_cols = bms_add_member(group_cols, v->varattno);
+		}
+		else if (v_rte->rtekind == RTE_SUBQUERY || v_rte->rtekind == RTE_JOIN)
+		{
+			/*
+			 * The GROUP BY column references a subquery or join RTE.
+			 * Try to trace through using the FK column mapping.
+			 */
+			RTEId  *col_rteid = NULL;
+			int		col_attnum = 0;
+
+			resolve_var_fk_colmap(v, qry->rtable, &col_rteid, &col_attnum);
+			if (col_rteid == NULL || col_attnum == 0)
+				return NIL;
+
+			if (base_rteid == NULL)
+			{
+				base_rteid = col_rteid;
+			}
+			else if (base_rteid->baserelindex != col_rteid->baserelindex)
+				return NIL;		/* mixed tables in GROUP BY */
+
+			group_cols = bms_add_member(group_cols, col_attnum);
+		}
+		else
+		{
+			return NIL;			/* unsupported RTE kind */
+		}
+	}
+
+	if (bms_is_empty(group_cols))
+		return NIL;
+
+	/*
+	 * Determine which base table to check.  If we traced through a subquery
+	 * or join, use the RTEId from the FK column mapping.  Otherwise, use
+	 * the direct base table.
+	 */
+	if (base_rte != NULL)
+	{
+		/* Direct base table reference */
+		Assert(base_rte->rtekind == RTE_RELATION);
+		base_rteid = base_rte->rteid;
+	}
+
+	if (base_rteid == NULL || !OidIsValid(base_rteid->relid))
+	{
+		bms_free(group_cols);
+		return NIL;
+	}
+
+	/*
+	 * Check if the GROUP BY columns cover a unique index on the base table.
+	 */
+	rel = table_open(base_rteid->relid, AccessShareLock);
+	indexoidlist = RelationGetIndexList(rel);
+
+	foreach(indexoidscan, indexoidlist)
+	{
+		Oid			indexoid = lfirst_oid(indexoidscan);
+		Relation	indexRel;
+		Form_pg_index indexForm;
+		Bitmapset  *index_cols = NULL;
+		int			nindexattrs;
+
+		indexRel = index_open(indexoid, AccessShareLock);
+		indexForm = indexRel->rd_index;
+
+		if (!indexForm->indisunique)
+		{
+			index_close(indexRel, AccessShareLock);
+			continue;
+		}
+
+		nindexattrs = indexForm->indnatts;
+		for (int j = 0; j < nindexattrs; j++)
+		{
+			AttrNumber	attnum = indexForm->indkey.values[j];
+
+			if (attnum > 0)
+				index_cols = bms_add_member(index_cols, attnum);
+		}
+
+		index_close(indexRel, AccessShareLock);
+
+		/*
+		 * The GROUP BY columns must cover all columns of the unique index
+		 * (i.e., the index columns are a subset of the GROUP BY columns).
+		 */
+		if (bms_is_subset(index_cols, group_cols))
+		{
+			found_unique = true;
+			bms_free(index_cols);
+			break;
+		}
+
+		bms_free(index_cols);
+	}
+
+	list_free(indexoidlist);
+	table_close(rel, AccessShareLock);
+	bms_free(group_cols);
+
+	if (found_unique && base_rteid != NULL)
+		return list_make1(base_rteid);
+
+	return NIL;
 }
 
 #ifdef DEBUG_NODE_TESTS_ENABLED

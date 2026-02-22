@@ -2,6 +2,9 @@
 -- Test Foreign Key Joins.
 --
 
+-- Clean up any leftover tables from other tests that share the same names
+DROP TABLE IF EXISTS t3, t2, t1 CASCADE;
+
 CREATE TABLE t1
 (
     c1 int not null,

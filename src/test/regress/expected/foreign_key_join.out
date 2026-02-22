@@ -1,6 +1,8 @@
 --
 -- Test Foreign Key Joins.
 --
+-- Clean up any leftover tables from other tests that share the same names
+DROP TABLE IF EXISTS t3, t2, t1 CASCADE;
 CREATE TABLE t1
 (
     c1 int not null,
@@ -874,10 +876,10 @@ SELECT * FROM
     SELECT c1, count(*) FROM t1 GROUP BY c1 HAVING c2 > 100
 ) AS u
 JOIN t2 FOR KEY (c3) -> u (c1);
-ERROR:  foreign key joins require direct column references
+ERROR:  referenced relation does not preserve the referenced base table
 LINE 5: JOIN t2 FOR KEY (c3) -> u (c1);
                 ^
-DETAIL:  Column "c1" is not a direct reference to a base table column.
+DETAIL:  The referenced side of a foreign key join must preserve the referenced base table's rows without loss or duplication.
 -- invalid, since u is filtered and is the referenced table
 SELECT * FROM (SELECT c1 FROM t1 LIMIT 1) AS u
 JOIN t2 FOR KEY (c3) -> u (c1);
@@ -1147,6 +1149,7 @@ SELECT
 FROM customers AS c
 JOIN customer_addresses AS ca FOR KEY (customer_id) -> c (id)
 JOIN addresses AS a FOR KEY (id) <- ca (address_id);
+ERROR:  virtual foreign key constraint violation while re-validating view "public.orders_by_country"
 --
 -- Test various error conditions
 --
