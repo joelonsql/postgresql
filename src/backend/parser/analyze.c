@@ -100,7 +100,7 @@ static Query *transformCallStmt(ParseState *pstate,
 								CallStmt *stmt);
 static void transformLockingClause(ParseState *pstate, Query *qry,
 								   LockingClause *lc, bool pushedDown);
-static List *check_group_by_preserves_uniqueness(Query *qry);
+static List *check_group_by_preserves_uniqueness(Query *qry, bool *all_notnull);
 #ifdef DEBUG_NODE_TESTS_ENABLED
 static bool test_raw_expression_coverage(Node *node, void *context);
 #endif
@@ -1608,26 +1608,42 @@ transformSelectStmt(ParseState *pstate, SelectStmt *stmt,
 				}
 				else
 				{
+					bool	group_key_all_notnull = false;
+
 					/*
-					 * GROUP BY present.  R, N, C propagate from the FROM item
+					 * GROUP BY present.  R and C propagate from the FROM item
 					 * as long as there's no HAVING (which can filter groups).
 					 * U is determined by whether GROUP BY columns cover a
 					 * unique key.
+					 *
+					 * N (null preservation) only propagates if the GROUP BY
+					 * key columns are all NOT NULL.  When a nullable column
+					 * is part of the unique key, GROUP BY collapses multiple
+					 * NULL rows into one group, violating null preservation.
 					 */
-					if (qry->havingQual == NULL)
-					{
-						qry->fkPreservedR = rte->fkPreservedR;
-						qry->fkPreservedN = rte->fkPreservedN;
-						qry->fkPreservedC = rte->fkPreservedC;
-					}
 
 					/*
 					 * Check if GROUP BY restores uniqueness.  This works even
 					 * with HAVING, since uniqueness is about deduplication,
-					 * not row completeness.
+					 * not row completeness.  Also reports whether the matched
+					 * unique key columns are all NOT NULL.
 					 */
 					qry->fkPreservedU =
-						check_group_by_preserves_uniqueness(qry);
+						check_group_by_preserves_uniqueness(qry,
+														   &group_key_all_notnull);
+
+					if (qry->havingQual == NULL)
+					{
+						qry->fkPreservedR = rte->fkPreservedR;
+						qry->fkPreservedC = rte->fkPreservedC;
+
+						/*
+						 * N propagates only if the GROUP BY key is fully
+						 * NOT NULL, otherwise NULLs get collapsed.
+						 */
+						if (group_key_all_notnull)
+							qry->fkPreservedN = rte->fkPreservedN;
+					}
 				}
 			}
 		}
@@ -3859,9 +3875,14 @@ applyLockingClause(Query *qry, Index rtindex,
  * Returns a list of RTEId pointers for base tables whose uniqueness is
  * preserved by the GROUP BY (typically zero or one entry), or NIL if
  * uniqueness is not preserved.
+ *
+ * If all_notnull is not NULL, sets *all_notnull to true when all columns
+ * of the matched unique index have NOT NULL constraints, false otherwise.
+ * This is needed because GROUP BY on a nullable unique key collapses
+ * multiple NULL rows into one group, violating null preservation.
  */
 static List *
-check_group_by_preserves_uniqueness(Query *qry)
+check_group_by_preserves_uniqueness(Query *qry, bool *all_notnull)
 {
 	ListCell   *lc;
 	RangeTblEntry *group_rte = NULL;
@@ -4005,8 +4026,6 @@ check_group_by_preserves_uniqueness(Query *qry)
 				index_cols = bms_add_member(index_cols, attnum);
 		}
 
-		index_close(indexRel, AccessShareLock);
-
 		/*
 		 * The GROUP BY columns must cover all columns of the unique index
 		 * (i.e., the index columns are a subset of the GROUP BY columns).
@@ -4014,10 +4033,34 @@ check_group_by_preserves_uniqueness(Query *qry)
 		if (bms_is_subset(index_cols, group_cols))
 		{
 			found_unique = true;
+
+			/* Check if all index columns have NOT NULL constraints */
+			if (all_notnull != NULL)
+			{
+				*all_notnull = true;
+				for (int j = 0; j < nindexattrs; j++)
+				{
+					AttrNumber	attnum = indexForm->indkey.values[j];
+
+					if (attnum > 0)
+					{
+						Form_pg_attribute attr = TupleDescAttr(rel->rd_att,
+															   attnum - 1);
+						if (!attr->attnotnull)
+						{
+							*all_notnull = false;
+							break;
+						}
+					}
+				}
+			}
+
+			index_close(indexRel, AccessShareLock);
 			bms_free(index_cols);
 			break;
 		}
 
+		index_close(indexRel, AccessShareLock);
 		bms_free(index_cols);
 	}
 

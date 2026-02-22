@@ -1,401 +1,458 @@
-# Formal Specification of Foreign Key Joins
+# Foreign Key Joins — Mathematical Specification
 
-This document gives a formal specification of the row-preservation and
-NOT NULL FK chain computation implemented by `update_row_preserving` in
-`src/backend/parser/parse_fkjoin.c`. The intended audience is someone
-comfortable with basic set theory and relational algebra who wants to
-understand the algorithm without reading C.
+## 1. Notation
 
-## 1. Problem Statement
+Relations are multisets (bags) of tuples. We write π_X(M) for the
+multiset projection of M onto columns X: each tuple in M is
+restricted to the columns in X, preserving multiplicities. The join
+of relations R and S on predicate θ is written R ⋈_θ S.
 
-A foreign key join over derived relations (views, CTEs, subqueries)
-is valid only if the referenced side preserves its base table's
-uniqueness and complete row set. When multiple FK joins are composed
-into a tree, each inner join filters rows: a referencing row survives
-only if its FK value matches a row on the referenced side. We need to
-track, at every node in the join tree, (a) which base tables still
-have all their rows in the result, and (b) which base tables are
-transitively "reachable" from which others through NOT NULL FK links.
-These two properties together let us decide whether a derived relation
-on the referenced side of a new FK join still represents the full,
-unfiltered base table.
+## 2. Foreign Key Join
 
-## 2. Definitions
+**Definition 1** (Foreign Key Join). A foreign key join combines a
+referencing relation R with a referenced relation S on column lists
+**a** ⊆ cols(R) and **b** ⊆ cols(S).
 
-### 2.1 Join Tree Nodes
+**Traceability.** Every column in **a** traces — by projection and
+renaming only, no expressions or aggregation — to a column of a
+single base table r. Likewise every column in **b** traces to a
+single base table s. Write **a′**, **b′** for the corresponding
+base-table columns.
+
+**Validity.** The foreign key join is valid if and only if:
+
+1. A referential constraint FK(r, **a′**, s, **b′**) exists.
+2. Multiset equality[^1] holds:
+
+        π_b(S) = π_b′(s)
+
+**Result.** A valid foreign key join produces
+
+    R ⋈_{a = b} S
+
+under any join type τ ∈ {inner, left, right, full}.
+
+Condition 2 is trivially satisfied when S is the base table s itself.
+For derived relations (views, CTEs, subqueries), the database must
+verify it statically from the schema and query structure.
+
+[^1]: Two multisets are equal if and only if every element appears
+    with the same multiplicity, including elements containing NULL.
+
+## 3. Static Verification
+
+For base tables, Condition 2 holds trivially: π_b(S) = π_b′(s) when
+S = s and **b** = **b′**.
+
+For derived relations, the database cannot evaluate π_b(S) at parse
+time — it depends on the data. Instead, it must verify Condition 2
+from the query structure alone.
+
+We define a static analysis that is *sound* but not *complete*: if it
+accepts, Condition 2 is guaranteed to hold (soundness); but it may
+reject some queries for which Condition 2 does in fact hold
+(incompleteness). Soundness means no false positives (accepting
+invalid joins); incompleteness means some false negatives (rejecting
+valid ones).
+
+The approach: track four properties — uniqueness, row preservation,
+null preservation, and chain reachability — bottom-up through the
+join tree, then check three conditions at the entry point.
+
+## 4. Join Trees
+
+### 4.1. Nodes
 
 A join tree is built from:
 
-- **Leaf nodes**: a single base table `t`. When the table is accessed
-  through a derived relation (subquery, CTE, or view) whose query
-  applies filtering (WHERE, LIMIT, HAVING), the algorithm traverses
-  into the derived relation and reaches the base table — but marks it
-  as not row-preserving because the enclosing query may discard rows.
-- **Join nodes**: `J = (J_f ⋈[f→p, nn, τ, δ] J_p)` where:
-  - `J_f` is the subtree containing the referencing relation
-  - `J_p` is the subtree containing the referenced relation
-  - `f` is the RTEId of the referencing base table
-  - `p` is the RTEId of the referenced base table
-  - `nn` is a boolean: true iff the FK columns carry NOT NULL constraints
-  - `τ ∈ {INNER, LEFT, RIGHT, FULL}` is the SQL join type
-  - `δ ∈ {FROM, TO}` is the FK direction, determining which SQL side
-    (left/right arg) is the referencing vs. referenced relation
+- **Leaf nodes**: a base table t, optionally marked as *filtered*. A
+  leaf is filtered when the base table is accessed through a derived
+  relation whose query restricts rows (through selection, limit, or
+  similar mechanisms). An unfiltered leaf accesses the complete base
+  table.
 
-### 2.2 Properties of a Node
+- **FK join nodes**: J = (J_f ⋈[f→p, nn, τ] J_p) with parameters:
+  - J_f: the subtree containing the referencing relation
+  - J_p: the subtree containing the referenced relation
+  - f: the base table identifier of the referencing table
+  - p: the base table identifier of the referenced table
+  - nn: a boolean — true iff the FK columns carry NOT NULL constraints
+  - τ ∈ {inner, left, right, full}: the join type
 
-Each node `J` carries four sets computed bottom-up:
+Only FK joins appear as join nodes. Non-FK joins inside a derived
+relation prevent analysis — the algorithm cannot reason about their
+row-preservation properties, so their output sets are empty.
+
+### 4.2. Outer Preservation
+
+Define the predicate outer(side, τ) as true when the given side is on
+the outer (preserved) side of the join. In a FK join
+J = (J_f ⋈ J_p), "left" corresponds to J_f (referencing) and "right"
+corresponds to J_p (referenced):
+
+| τ | outer_f (referencing preserved) | outer_p (referenced preserved) |
+|---|---|---|
+| inner | false | false |
+| left | true | false |
+| right | false | true |
+| full | true | true |
+
+When a side is preserved, all its rows appear in the output. Rows
+without a match on the other side are padded with NULLs.
+
+## 5. Tracked Properties
+
+Each node J carries four properties computed bottom-up over the
+universe T of base table identifiers in J's subtree:
 
 | Symbol | Name | Type | Meaning |
 |--------|------|------|---------|
-| **U** | uniqueness preservation | ⊆ T | Base tables whose primary/unique key uniqueness is preserved through the joins in J's subtree |
-| **R** | row-preserving set | ⊆ T | Base tables whose complete row set appears in J's result |
-| **C** | NOT NULL FK chains | ⊆ T × T | Binary relation where (A, B) ∈ C means A ∈ R and A reaches B through a directed path of NOT NULL FK joins, each step's referenced table being row-preserving at the time the step was processed |
-| **N** | null-preserving set | ⊆ T | Base tables whose key-column values are preserved (not overwritten by NULLs from outer-join ghost rows or GROUP BY on nullable columns). Membership in N is good: p ∈ N means the table's key columns are trustworthy |
+| **U** | uniqueness | ⊆ T | Tables whose unique-key uniqueness is preserved through all joins in J's subtree |
+| **R** | row preservation | ⊆ T | Tables whose complete row set appears in J's result |
+| **N** | null preservation | ⊆ T | Tables whose key-column values are intact (not overwritten by NULLs from outer-join padding) |
+| **C** | chains | ⊆ T × T | (A, B) ∈ C means A reaches B via a directed NOT NULL FK path with A ∈ R |
 
-where T is the universe of base table RTEIds in J's subtree.
+**Chain invariant.** (A, B) ∈ C if and only if there exists a
+directed path A = t₀ → t₁ → ··· → tₖ = B where:
 
-C is stored as a flat list of alternating (determinant, dependent)
-RTEId pairs in the implementation.
+1. A ∈ R (A's complete row set appears in J's result)
+2. Each edge tᵢ → tᵢ₊₁ corresponds to a NOT NULL FK join with tᵢ as
+   the referencing table and tᵢ₊₁ as the referenced table
+3. At the time edge tᵢ → tᵢ₊₁ was processed, tᵢ₊₁ was row-preserving
+   (tᵢ₊₁ ∈ R of the referenced subtree at that node)
 
-### 2.3 FK Direction and SQL Sides
+## 6. Base Cases
 
-The FK direction δ maps the abstract referencing/referenced roles to
-the concrete left/right arguments of the SQL JOIN:
+At a leaf node for base table t:
 
-| δ | Left arg | Right arg |
-|---|----------|-----------|
-| FROM | referencing (J_f) | referenced (J_p) |
-| TO | referenced (J_p) | referencing (J_f) |
+**Unfiltered:**
 
-This mapping matters for outer joins, where LEFT JOIN preserves the
-left arg and RIGHT JOIN preserves the right arg.
+    U = {t},  R = {t},  N = {t},  C = ∅
 
-## 3. Base Cases (Leaf Nodes)
+**Filtered:**
 
-When the recursive traversal (`analyze_join_tree`) reaches a base
-table `t` — either directly or after drilling through derived
-relations — it initializes the properties as follows:
+    U = {t},  R = ∅,  N = {t},  C = ∅
 
-**Unfiltered** (the base table is accessed directly, or every
-enclosing derived relation's query has no WHERE, LIMIT, OFFSET, or
-HAVING):
+Uniqueness is always preserved: filtering cannot create duplicate
+keys. Row preservation is lost because filtering may exclude rows.
+Null preservation holds because no join padding has occurred.
 
-    U = {t},  R = {t},  C = ∅,  N = {t}
+## 7. Propagation Rules
 
-**Filtered** (some enclosing derived relation applies WHERE, LIMIT,
-OFFSET, or HAVING):
+Given J = (J_f ⋈[f→p, nn, τ] J_p) with input properties
+(U_f, R_f, N_f, C_f) from the referencing subtree and
+(U_p, R_p, N_p, C_p) from the referenced subtree, compute the output
+properties (U', R', N', C').
 
-    U = {t},  R = ∅,  C = ∅,  N = {t}
+### 7.1. Outer Preservation Predicate
 
-Uniqueness is always preserved (filtering cannot break a unique
-constraint). Row preservation is lost because the enclosing query may
-exclude rows from `t`.
+The shorthand outer_f and outer_p denotes whether the referencing and
+referenced sides are outer-preserved, as defined in §4.2:
 
-## 4. Uniqueness Preservation (U)
+| τ | outer_f | outer_p |
+|---|---------|---------|
+| inner | false | false |
+| left | true | false |
+| right | false | true |
+| full | true | true |
 
-Uniqueness is handled by a separate function
-(`update_uniqueness_preservation`) but is included here for
-completeness, since the entry point checks U before accepting an FK
-join.
+### 7.2. Uniqueness (U)
 
-At a join node `J = (J_f ⋈[f→p, nn, τ, δ] J_p)`:
+    U' = U_f ∪ (U_p if unique(f) ∧ f ∈ U_f else ∅)
 
-    U = U_f  ∪  (U_p  if  unique(f) ∧ f ∈ U_f  else  ∅)
+where unique(f) means the FK columns form a unique key on f.
 
-where `unique(f)` means the FK columns on the referencing base table
-form a unique key (UNIQUE or PRIMARY KEY constraint). The referencing
-side's uniqueness set is always inherited. The referenced side's set
-is added only when the FK columns are unique *and* the referencing
-base table itself preserves uniqueness — in that case the join is
-one-to-one and cannot duplicate referenced rows.
+The referencing side's uniqueness set is always inherited. The
+referenced side's set is inherited only when the FK columns are unique
+and f itself preserves uniqueness — making the join one-to-one, so no
+referenced rows are duplicated.
 
-## 5. Row Preservation and Chains (R, C, N) — `update_row_preserving`
+### 7.3. Null Preservation (N)
 
-This is the core algorithm. Given a join node
-`J = (J_f ⋈[f→p, nn, τ, δ] J_p)` with inputs
-`(R_f, C_f, N_f)` from the referencing subtree and `(R_p, C_p, N_p)` from the
-referenced subtree, compute the output `(R', C', N')`.
-
-The computation proceeds in three phases.
-
-### Phase 1 — Outer Join Preservation
-
-Define the predicate `outer_preserves(side, τ, δ)` that is true when
-the SQL outer join unconditionally preserves a side's rows (padding
-unmatched rows with NULLs):
-
-| | Referencing side preserved | Referenced side preserved |
-|---|---|---|
-| INNER | no | no |
-| LEFT, δ=FROM | yes (referencing is left) | no |
-| LEFT, δ=TO | no | yes (referenced is left) |
-| RIGHT, δ=FROM | no | yes (referenced is right) |
-| RIGHT, δ=TO | yes (referencing is right) | no |
-| FULL | yes | yes |
-
-When a side is preserved by the outer join, its R and C are copied
-directly into the result:
-
-    R'_outer = (R_f  if outer_preserves(referencing, τ, δ)  else  ∅)
-             ∪ (R_p  if outer_preserves(referenced, τ, δ)  else  ∅)
-    C'_outer = (C_f  if outer_preserves(referencing, τ, δ)  else  ∅)
-             ∪ (C_p  if outer_preserves(referenced, τ, δ)  else  ∅)
-
-The outer join guarantee is unconditional — it does not depend on
-NOT NULL or FK properties.
-
-### Phase 1b — Null-Preserving Set (N)
-
-Compute the null-preserving set for the combined node.  N tracks
-which base tables still have their key-column values intact (not
-overwritten by NULLs from ghost rows).  Membership in N is good:
-p ∈ N means the table's key columns are trustworthy.
-
-**Propagate** from both inputs:
+Start with the union of both inputs:
 
     N' = N_f ∪ N_p
 
-**Restore** — the inner side of the join filters ghost rows for the
-specific base table in the FK equi-join condition. Ghost rows have
-NULLs in *all* of that table's columns (including the join column),
-so they cannot match the equi-join and are eliminated. The table's
-key columns become trustworthy again:
+Then remove entries from the null-padded (inner) side:
 
-    if ¬outer_preserves(referencing, τ, δ):  N' = N' ∪ {f}
-    if ¬outer_preserves(referenced, τ, δ):   N' = N' ∪ {p}
+- If outer_f ∧ ¬nn: set N' = N' \ N_p.
 
-**Remove** — the preserved (outer) side of an outer join introduces
-new ghost rows on the inner side, breaking null-preservation. When
-all FK columns are NOT NULL, the FK guarantee ensures every
-referencing row matches a referenced row, so no ghost rows appear on
-the referenced side:
+  When the referencing side is preserved, unmatched referencing rows
+  produce ghost rows with NULLs on the referenced side. All tables
+  from J_p have their column values corrupted in these ghost rows.
 
-    if outer_preserves(referenced, τ, δ):                N' = N' \ {f}
-    if outer_preserves(referencing, τ, δ) ∧ ¬nn:         N' = N' \ {p}
+  Exception: if nn holds, the FK guarantee ensures every referencing
+  row matches a referenced row (the FK value is non-null and the
+  constraint ensures a match exists). No unmatched referencing rows
+  exist, so no ghost rows appear and N_p is not removed.
 
-Summary of the net effect on f and p after restore + remove:
+- If outer_p: set N' = N' \ N_f.
 
-| τ | f in N'? | p in N'? |
-|---|-----------|-----------|
-| INNER | restored | restored |
-| LEFT (referencing preserved) | restored | removed if ¬nn, else restored |
-| LEFT (referenced preserved) | removed | restored |
-| RIGHT | mirror of LEFT | mirror of LEFT |
-| FULL | removed | removed if ¬nn, else inherited |
+  When the referenced side is preserved, unmatched referenced rows
+  produce ghost rows with NULLs on the referencing side. All tables
+  from J_f have their column values corrupted. This removal is
+  unconditional — the FK constraint provides no guarantee in this
+  direction (not every referenced row need be referenced).
 
-(Plus any entries inherited from N_f ∪ N_p for other base tables.)
+**Net effect on entries from each side:**
 
-### Phase 1c — GROUP BY on Nullable Columns
+| τ | N_f entries | N_p entries |
+|---|-------------|-------------|
+| inner | inherited | inherited |
+| left | inherited | removed if ¬nn; inherited if nn |
+| right | removed | inherited |
+| full | removed | removed if ¬nn; inherited if nn |
 
-When a derived relation contains a GROUP BY clause that restores
-uniqueness (the grouped columns cover a unique index), the base
-table is added back to U.  However, if any of the grouped columns
-is nullable, GROUP BY collapses all NULL values into a single group,
-effectively injecting a NULL key value that may not exist in the base
-data.  In this case the base table is removed from N:
+Here "inherited" means the entries pass through from the input, and
+"removed" means they are unconditionally absent from the output.
 
-    if GROUP BY restores uniqueness ∧ ¬all_cols_not_null:
-        N' = N' \ {t}
+### 7.4. Row Preservation and Chains (R, C)
 
-This is computed by `check_group_by_preserves_uniqueness` and
-propagated through the `null_preserving` parameter in
-`analyze_join_tree`.
+The computation proceeds in three phases.
 
-### Phase 2 — Guard Condition
+**Phase 1 — Outer join preservation.** Entries from preserved sides
+are copied unconditionally:
 
-If `¬nn ∨ p ∉ R_p`, no new chains can be derived and the result is
-`R' = R'_outer, C' = C'_outer`.
+    R'_outer = (R_f if outer_f else ∅) ∪ (R_p if outer_p else ∅)
+    C'_outer = (C_f if outer_f else ∅) ∪ (C_p if outer_p else ∅)
 
-**Rationale.** If the FK columns are nullable (`¬nn`), a referencing
-row with NULL FK values will not match any referenced row, so it may
-be lost in an inner join. If the referenced base table is not
-row-preserving (`p ∉ R_p`), some referenced rows may be missing, and
-a valid non-null FK value might fail to find its match.
+**Phase 2 — Guard.** If any of the following conditions fail, set
+R' = R'_outer, C' = C'_outer, and stop:
 
-### Phase 3 — Chain Extension
+    nn  ∧  f ∈ N_f  ∧  p ∈ R_p
 
-When `nn ∧ p ∈ R_p`, the FK constraint guarantees that *every*
-referencing row will match exactly one referenced row (the FK value is
-non-null and the referenced table is complete). Therefore, any table
-whose rows were all reaching `f` through prior joins will continue to
-have all its rows in the combined result.
+The guard requires three things:
 
-**Step 3a.** Compute `anchor_set`: the set of tables
-that "reach" the referencing base table f:
+- nn: the FK columns carry NOT NULL constraints on the base table.
+- f ∈ N_f: the FK columns have not been corrupted by null-padding
+  from prior outer joins. Even with NOT NULL base constraints, prior
+  joins may have introduced ghost rows with NULL FK values; f ∈ N_f
+  confirms this has not happened.
+- p ∈ R_p: the referenced base table's complete row set appears in
+  J_p's result.
 
-    anchor_set = { A : (A, f) ∈ C_f }  ∪  ( {f}  if  f ∈ R_f )
+Without all three, a referencing row may fail to find its match:
+either because its FK value is NULL or corrupted, or because the
+matching referenced row is missing.
 
-Intuitively, `anchor_set` contains every table A such that A is
-row-preserving and has a NOT NULL FK chain ending at f. This includes
-f itself when it is directly row-preserving.
+**Phase 3 — Chain extension.** When the guard passes:
 
-**Step 3b.** Inherit from the referencing side. Selectively copy R
-and C entries rooted at `anchor_set` members:
+*Step 3a.* Compute the anchor set — tables that reach f:
 
-    R'_inherit = anchor_set
-    C'_inherit = { (A, Y) ∈ C_f : A ∈ anchor_set }
+    anchor = {A : (A, f) ∈ C_f} ∪ ({f} if f ∈ R_f)
 
-When `outer_preserves(referencing, τ, δ)`, R'_outer ⊇ R'_inherit and
-C'_outer ⊇ C'_inherit (since anchor_set ⊆ R_f), so the inherit sets
-are redundant — the implementation skips this step as an optimization.
+Each member of anchor is row-preserving and connected to f through a
+NOT NULL FK chain (or is f itself when f ∈ R_f).
 
-The unconditional `R'_inherit = anchor_set` (rather than filtering by
-R_f membership) is valid because every member of `anchor_set` is
-guaranteed to be in R_f: each (A, f) ∈ C_f implies A ∈ R_f by the
-invariant on C (Section 6), and f is only added to `anchor_set` when
-f ∈ R_f (Step 3a).
+*Step 3b.* Inherit from the referencing side. Copy R and C entries
+rooted at anchor members:
 
-Only `anchor_set` members (and their chains) survive — tables in R_f or
-C_f that do not reach f are *not* inherited, because the inner join
-may have dropped some of their rows.
+    R'_inherit = anchor
+    C'_inherit = {(A, Y) ∈ C_f : A ∈ anchor}
 
-**Step 3c.** Extend chains across the FK boundary. Every table in
-`anchor_set` now reaches p (and transitively everything p reaches):
+Every member of anchor is in R_f (by the chain invariant and the
+condition on f in Step 3a), so R'_inherit ⊆ R_f. Tables in R_f that
+do not reach f are excluded because the join may drop some of their
+rows.
 
-    C'_extend = { (A, p) : A ∈ anchor_set }
-              ∪ { (A, Y) : A ∈ anchor_set, (p, Y) ∈ C_p }
+*Step 3c.* Extend chains across the FK boundary. Each anchor member
+now reaches p, and transitively everything p reaches:
+
+    C'_extend = {(A, p) : A ∈ anchor}
+              ∪ {(A, Y) : A ∈ anchor, (p, Y) ∈ C_p}
 
 **Final result:**
 
     R' = R'_outer ∪ R'_inherit
     C' = C'_outer ∪ C'_inherit ∪ C'_extend
 
-### Complete Formal Rule
+### 7.5. GROUP BY
 
-Putting it all together for an INNER join (τ = INNER, no outer
-preservation, so R'_outer = C'_outer = ∅):
+When a derived relation applies GROUP BY, it modifies the four
+properties of the underlying relation's output before the result is
+used in further joins. Let (U_in, R_in, N_in, C_in) be the properties
+of the underlying relation.
 
-    if ¬nn ∨ p ∉ R_p:
-        R' = ∅,  C' = ∅
+**Conditions for uniqueness restoration.** GROUP BY can restore
+uniqueness when:
 
-    if nn ∧ p ∈ R_p:
-        anchor_set = { A : (A, f) ∈ C_f } ∪ ( {f} if f ∈ R_f )
-        R' = anchor_set
-        C' = { (A, Y) ∈ C_f : A ∈ anchor_set }
-           ∪ { (A, p) : A ∈ anchor_set }
-           ∪ { (A, Y) : A ∈ anchor_set, (p, Y) ∈ C_p }
+- Every grouping expression is a direct column reference (no computed
+  expressions)
+- All grouping columns reference the same base table t
+- The grouping columns cover all columns of some unique key on t
 
-For outer joins, the outer-preserved sides' R and C are always
-included additively, and the chain extension logic applies on top.
+**Effect on the four properties.** When the conditions above are met:
 
-## 6. Correctness Argument
+- **U**: add t to U_in (uniqueness restored). This holds even when a
+  group-level filter is present, since uniqueness is about
+  deduplication, not row completeness.
+- **R**: propagate R_in, but only if no group-level filter is present
+  (a group-level filter may discard groups, breaking row
+  preservation).
+- **C**: propagate C_in (same condition as R).
+- **N**: propagate N_in only if all columns of the matched unique key
+  carry NOT NULL constraints. If any column is nullable, GROUP BY
+  collapses all NULL values in that column into a single group,
+  producing a NULL key value that may not correspond to any base
+  table row. In this case, N is set to ∅.
 
-### Invariant
+When GROUP BY does not restore uniqueness, or when a group-level
+filter is present, R, C, and N are not propagated.
 
-After processing node J, the following invariant holds:
+## 8. Acceptance Criterion
 
-> **(A, B) ∈ C** iff there exists a directed path
-> `A = t₀ → t₁ → ... → tₖ = B` in the join tree where:
-> 1. A ∈ R (A's complete row set appears in J's result)
-> 2. Each edge `tᵢ → tᵢ₊₁` corresponds to a NOT NULL FK join
->    where `tᵢ` is the referencing table and `tᵢ₊₁` is the
->    referenced table
-> 3. At the time edge `tᵢ → tᵢ₊₁` was processed, `tᵢ₊₁` was
->    row-preserving (i.e., `tᵢ₊₁ ∈ R` of the referenced subtree)
+At the entry point, the algorithm computes the four properties for the
+referenced subtree J_p. The FK join is accepted if and only if:
 
-### Base Case
+    p ∈ U  ∧  p ∈ R  ∧  p ∈ N
 
-At a leaf node, C = ∅ and the invariant holds vacuously.
+where U, R, N are the output properties of J_p.
 
-### Inductive Step
-
-Assume the invariant holds for both subtrees J_f and J_p. We show it
-holds for the combined node J.
-
-**Outer-join-preserved entries.** When an outer join preserves a
-side, every row from that side appears in the result (possibly padded
-with NULLs). The R and C entries from that side remain valid because
-no rows are lost. The invariant is maintained by direct copy.
-
-**Guard condition.** When `¬nn ∨ p ∉ R_p`, no new chain can be
-valid: either null FK values could cause row loss (violating condition
-1 of the invariant), or the referenced table is incomplete (violating
-condition 3). Returning with only outer-preserved sets is correct.
-
-**Chain extension.** When `nn ∧ p ∈ R_p`:
-
-*Key lemma.* If A ∈ `anchor_set`, then every row of A in J_f's result
-successfully joins with exactly one row in J_p's result.
-
-*Proof.* A ∈ `anchor_set` means either A = f with f ∈ R_f, or (A, f)
-∈ C_f. In both cases, A has a NOT NULL FK chain ending at f, so every
-row of A in J_f's result is associated with a specific value of f's FK
-columns. Since nn holds, these FK column values are non-null. Since p
-∈ R_p, the referenced table is complete. The FK constraint guarantees
-that every non-null FK value has a match. Therefore every row of A
-survives the join, so A ∈ R' is justified.
-
-*Inherit step.* We copy (A, Y) from C_f only when A ∈ `anchor_set`. By
-the lemma, A remains row-preserving. The chain A → ... → Y was valid
-in J_f (by the inductive hypothesis), and its rows are preserved, so
-the chain remains valid in J.
-
-*Extend step.* Adding (A, p): A ∈ `anchor_set` ensures A ∈ R', the
-edge f → p is a NOT NULL FK join, and p ∈ R_p at the time of
-processing. So conditions 1-3 of the invariant hold. Adding (A, Y)
-for (p, Y) ∈ C_p extends the path through p; by the inductive
-hypothesis on J_p, the chain p → ... → Y was valid, and prepending
-the path from A through f to p preserves validity.
-
-### Null-Preserving Set (N)
-
-- **Base case.** N = {t} is trivially correct: a single base table
-  has no joins and no GROUP BY, so its key-column values are intact.
-
-- **Restore step.** When a side is inner (not preserved), the FK
-  equi-join filters rows where the join column is NULL. Ghost rows
-  for a base table have NULLs in *all* of that table's columns
-  (including the join column), so they cannot match the equi-join
-  and are eliminated. Adding the table back to N is correct.
-
-- **Remove step (outer joins).** When a side is preserved (outer),
-  unmatched rows from the other side produce ghost rows with
-  all-NULL columns on the inner side. Removing the inner-side base
-  table from N is correct. Exception: when the FK columns carry NOT
-  NULL constraints and the referencing side is preserved, every
-  referencing row has a non-null FK value and the FK constraint
-  guarantees a match exists. Therefore no unmatched referencing rows
-  exist and no ghost rows appear on the referenced side.
-
-- **Remove step (GROUP BY).** When GROUP BY on a nullable UNIQUE
-  column restores uniqueness, it collapses all NULL values in that
-  column into a single group. This group's key value is NULL, which
-  does not correspond to any row in the base table (the base table
-  may have multiple rows with NULL in the column, or none). Removing
-  the base table from N is correct because the derived relation now
-  contains a NULL key value that the FK constraint cannot match.
-
-**Selective inheritance.** Tables in R_f that are *not* in `anchor_set`
-are correctly excluded from R'. Such a table B has no NOT NULL FK
-chain to f. An inner join on f's FK columns may drop rows of B (when
-B's rows pair with f-rows that happen to have null FK values or that
-don't match). Without a guarantee that all of B's rows survive, B
-cannot be in R'.
-
-## 7. Entry Point Validation
-
-At the top level, `transformAndValidateForeignKeyJoin` invokes the
-recursive `analyze_join_tree` on each side of the FK join and then
-checks three conditions on the referenced side:
-
-1. **p ∈ U** — the referenced base table's uniqueness is preserved
-   through all joins in the referenced subtree. This ensures the
-   join produces at most one match per referencing row.
-
-2. **p ∈ R** — the referenced base table's complete row set appears
-   in the referenced subtree's result. This ensures every valid FK
-   value will find its match.
-
-3. **p ∈ N** — the referenced base table preserves its key-column
-   values (no NULLs injected by outer joins or GROUP BY on nullable
-   columns).  Loss of null-preservation violates the PK-like
-   invariant (unique and not null) that the FK join depends on.
+- **p ∈ U**: the referenced base table's unique key is preserved,
+  ensuring each referencing row matches at most one referenced row.
+- **p ∈ R**: the referenced base table's complete row set appears,
+  ensuring every valid FK value finds its match.
+- **p ∈ N**: the referenced base table's key-column values are intact,
+  ensuring the unique key functions correctly (no spurious NULLs from
+  outer-join padding or GROUP BY on nullable columns).
 
 For base tables accessed directly (not through a derived relation),
-all three conditions hold trivially and the checks are skipped.
+all three conditions hold trivially.
 
-These conditions are necessary for the FK constraint's guarantee
-("every non-null FK value references an existing row") to hold
-through derived relations. Without uniqueness preservation, the join
-could fan out rows. Without row preservation, valid FK values could
-fail to match.
+## 9. Soundness
+
+**Theorem.** If the acceptance criterion holds (p ∈ U ∧ p ∈ R ∧ p ∈ N
+on the referenced side's output), then π_b(S) = π_b′(s).
+
+*Proof sketch.* The three conditions together establish that the
+referenced side S contains the same key values as the base table s
+with the same multiplicities:
+
+- p ∈ R guarantees that all rows of s appear in S (no row loss). Every
+  key value in π_b′(s) appears in π_b(S) with at least its original
+  multiplicity.
+- p ∈ U guarantees that p's unique key is preserved through all joins
+  in J_p (no row duplication). Since the key columns of s carry a
+  unique constraint, and this uniqueness is preserved, no key value in
+  π_b(S) appears with multiplicity greater than one.
+- p ∈ N guarantees that the key-column values have not been corrupted
+  by NULLs. Without this, ghost rows from outer joins could introduce
+  NULL key values, or GROUP BY could collapse multiple NULL rows into
+  one, violating the multiset equality.
+
+Together, these imply π_b(S) = π_b′(s): every key value appears
+exactly once, and no spurious values are introduced.
+
+### 9.1. Chain Invariant Proof
+
+The chain invariant (§5) is proved by structural induction on the
+join tree.
+
+**Base case.** At a leaf node, C = ∅ and the invariant holds
+vacuously.
+
+**Inductive step.** Assume the invariant holds for both subtrees J_f
+and J_p. We show it holds for J = (J_f ⋈[f→p, nn, τ] J_p).
+
+*Outer-preserved entries.* When a side is preserved by the outer join,
+all its rows appear in the result (possibly padded with NULLs on the
+other side). The R and C entries from that side remain valid because no
+rows are lost. The invariant is maintained by direct copy.
+
+*Guard condition.* When ¬nn ∨ f ∉ N_f ∨ p ∉ R_p, no new chain is
+valid: either NULL FK values could cause row loss (violating condition
+1 of the invariant), or the FK columns have been corrupted by prior
+outer joins (also violating condition 1), or the referenced table is
+incomplete (violating condition 3). Returning with only
+outer-preserved sets is correct.
+
+*Chain extension — key lemma.* If A ∈ anchor, then every row of A in
+J_f's result survives the join.
+
+*Proof.* A ∈ anchor means either A = f with f ∈ R_f, or (A, f) ∈ C_f.
+In both cases, A has a NOT NULL FK chain ending at f, so every row of
+A in J_f is associated with a specific value of f's FK columns. Since
+f ∈ N_f (from the guard), these FK values have not been corrupted by
+prior joins. Since nn holds, they are non-null. Since p ∈ R_p, the
+referenced table is complete. The FK constraint guarantees that every
+non-null FK value references an existing row. Therefore every row of A
+matches exactly one row in J_p and survives the join.
+
+*Inherit step.* Chains (A, Y) from C_f are copied only when
+A ∈ anchor. By the lemma, A remains row-preserving. By the inductive
+hypothesis, the chain from A to Y was valid in J_f. Since A's rows are
+preserved, the chain remains valid in J.
+
+*Extend step.* The new chain (A, p) is valid: A ∈ anchor ensures
+A ∈ R', the edge f → p is a NOT NULL FK join, and p ∈ R_p holds at
+the time of processing — satisfying all three conditions of the chain
+invariant. Extensions (A, Y) for (p, Y) ∈ C_p compose the path from A
+through p to Y; by the inductive hypothesis on J_p, the chain
+p → ··· → Y was valid, and prepending the path from A through f to p
+preserves validity.
+
+### 9.2. Null Preservation Correctness
+
+*Base case.* N = {t} is trivially correct: a single base table has no
+joins, so its key-column values are intact.
+
+*Remove step (outer joins).* When a side is outer-preserved, unmatched
+rows from the preserved side produce ghost rows with all-NULL columns
+on the inner side. Removing the inner side's N entries is correct
+because those tables' key columns may now contain spurious NULLs.
+
+Exception: when the referencing side is outer-preserved and nn holds,
+every referencing row has a non-null FK value and the FK constraint
+guarantees a match. No unmatched referencing rows exist, so no ghost
+rows appear on the referenced side. Therefore N_p is not removed.
+
+*Remove step (GROUP BY).* When GROUP BY on a nullable column restores
+uniqueness, it collapses all NULL values into a single group. This
+group's key value is NULL, which may not correspond to any base table
+row (the base table may have multiple rows with NULL in that column,
+or none). Removing the table from N is correct.
+
+### 9.3. Selective Inheritance
+
+Tables in R_f that are not in anchor are correctly excluded from R'.
+Such a table B has no NOT NULL FK chain to f. The join on f's FK
+columns may drop some of B's rows — specifically, rows paired with
+f-rows whose FK values are NULL or whose FK columns have been
+corrupted by prior joins. Without a guarantee that all of B's rows
+survive, B cannot be in R'.
+
+## 10. Conservativeness
+
+The analysis is deliberately conservative. The following classes of
+valid queries are rejected:
+
+1. **Non-FK joins preserving rows.** A non-FK join inside a derived
+   relation may happen to preserve all rows (e.g., a join whose
+   condition matches every row), but the analysis cannot determine
+   this. Any non-FK join causes all tracked properties to be lost.
+
+2. **Set operations.** Operations that combine multiple relations
+   (union, intersection, difference) are not analyzed, even when they
+   might preserve the required properties.
+
+3. **Complex grouping.** The analysis requires grouping columns to be
+   direct column references from a single base table covering a unique
+   key. It rejects grouping on expressions (even deterministic ones),
+   grouping on columns from multiple tables, and grouping on columns
+   from nested derived relations.
+
+4. **Deduplication.** Even when deduplication would not change the
+   result (e.g., applied to an already-unique relation), it is
+   rejected because the analysis cannot verify this statically.
+
+5. **Semantically vacuous filters.** A filter that happens to exclude
+   no rows (e.g., a tautological predicate) breaks row preservation
+   in the analysis, even though the data is unchanged.
+
+6. **Transitive reasoning across non-FK joins.** If two FK chains are
+   connected by a non-FK join that happens to preserve rows, the
+   analysis cannot chain through the non-FK join.
+
+This conservativeness is by design: false negatives (rejecting valid
+joins) are acceptable; false positives (accepting invalid joins)
+are not.

@@ -1,0 +1,673 @@
+\documentclass[11pt]{article}
+
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{booktabs}
+\usepackage{enumitem}
+\usepackage{hyperref}
+\usepackage{parskip}
+
+\hypersetup{
+  colorlinks=true,
+  linkcolor=blue,
+  urlcolor=blue,
+}
+
+% Theorem environments
+\newtheorem{theorem}{Theorem}
+\newtheorem{lemma}[theorem]{Lemma}
+\theoremstyle{definition}
+\newtheorem{definition}{Definition}
+
+% Shortcuts
+\newcommand{\joins}{\bowtie}
+\newcommand{\fkjoin}[1]{\joins\![#1]}
+\newcommand{\set}[1]{\{#1\}}
+\newcommand{\Uf}{U_f}
+\newcommand{\Up}{U_p}
+\newcommand{\Rf}{R_f}
+\newcommand{\Rp}{R_p}
+\newcommand{\Nf}{N_f}
+\newcommand{\Np}{N_p}
+\newcommand{\Cf}{C_f}
+\newcommand{\Cp}{C_p}
+\newcommand{\Jf}{J_f}
+\newcommand{\Jp}{J_p}
+\newcommand{\outerf}{\mathrm{outer}_f}
+\newcommand{\outerp}{\mathrm{outer}_p}
+\newcommand{\nn}{\mathrm{nn}}
+\newcommand{\unique}{\mathrm{unique}}
+\newcommand{\anchor}{\mathrm{anchor}}
+\newcommand{\cols}{\mathrm{cols}}
+\newcommand{\FK}{\mathrm{FK}}
+
+\title{Foreign Key Joins --- Mathematical Specification}
+\author{}
+\date{}
+
+\begin{document}
+\maketitle
+
+\tableofcontents
+\bigskip
+
+%% ====================================================================
+\section{Notation}
+
+Relations are multisets (bags) of tuples.  We write $\pi_X(M)$ for
+the multiset projection of $M$ onto columns $X$: each tuple in $M$
+is restricted to the columns in~$X$, preserving multiplicities.  The
+join of relations $R$ and $S$ on predicate~$\theta$ is written
+$R \joins_\theta S$.
+
+
+%% ====================================================================
+\section{Foreign Key Join}
+
+\begin{definition}[Foreign Key Join]
+A \emph{foreign key join} combines a referencing relation~$R$ with a
+referenced relation~$S$ on column lists
+$\mathbf{a} \subseteq \cols(R)$ and
+$\mathbf{b} \subseteq \cols(S)$.
+\end{definition}
+
+\paragraph{Traceability.}
+Every column in $\mathbf{a}$ traces---by projection and renaming
+only, no expressions or aggregation---to a column of a single base
+table~$r$.  Likewise every column in $\mathbf{b}$ traces to a single
+base table~$s$.  Write $\mathbf{a'}$, $\mathbf{b'}$ for the
+corresponding base-table columns.
+
+\paragraph{Validity.}
+The foreign key join is \emph{valid} if and only if:
+\begin{enumerate}
+\item A referential constraint
+  $\FK(r,\;\mathbf{a'},\;s,\;\mathbf{b'})$ exists.
+\item Multiset equality\footnote{Two multisets are equal if and only
+  if every element appears with the same multiplicity, including
+  elements containing \textsc{null}.} holds:
+  \[
+    \pi_{\mathbf{b}}(S) \;=\; \pi_{\mathbf{b'}}(s)
+  \]
+\end{enumerate}
+
+\paragraph{Result.}
+A valid foreign key join produces
+\[
+  R \joins_{\mathbf{a}=\mathbf{b}} S
+\]
+under any join type
+$\tau \in \{\text{inner},\;\text{left},\;\text{right},\;\text{full}\}$.
+
+Condition~2 is trivially satisfied when $S$ is the base table~$s$
+itself.  For derived relations (views, CTEs, subqueries), the database
+must verify it statically from the schema and query structure.
+
+
+%% ====================================================================
+\section{Static Verification}
+
+For base tables, Condition~2 holds trivially:
+$\pi_{\mathbf{b}}(S) = \pi_{\mathbf{b'}}(s)$ when $S = s$ and
+$\mathbf{b} = \mathbf{b'}$.
+
+For derived relations, the database cannot evaluate $\pi_{\mathbf{b}}(S)$
+at parse time---it depends on the data.  Instead, it must verify
+Condition~2 from the query structure alone.
+
+We define a static analysis that is \emph{sound} but not
+\emph{complete}: if it accepts, Condition~2 is guaranteed to hold
+(soundness); but it may reject some queries for which Condition~2 does
+in fact hold (incompleteness).  Soundness means no false positives
+(accepting invalid joins); incompleteness means some false negatives
+(rejecting valid ones).
+
+The approach: track four properties---uniqueness, row preservation,
+null preservation, and chain reachability---bottom-up through the join
+tree, then check three conditions at the entry point.
+
+
+%% ====================================================================
+\section{Join Trees}
+
+\subsection{Nodes}
+
+A join tree is built from:
+
+\begin{itemize}
+\item \textbf{Leaf nodes}: a base table~$t$, optionally marked as
+  \emph{filtered}.  A leaf is filtered when the base table is
+  accessed through a derived relation whose query restricts rows
+  (through selection, limit, or similar mechanisms).  An unfiltered
+  leaf accesses the complete base table.
+
+\item \textbf{FK join nodes}:
+  $J = (\Jf \fkjoin{f \to p,\;\nn,\;\tau} \Jp)$ with parameters:
+  \begin{itemize}[nosep]
+  \item $\Jf$: the subtree containing the referencing relation
+  \item $\Jp$: the subtree containing the referenced relation
+  \item $f$: the base table identifier of the referencing table
+  \item $p$: the base table identifier of the referenced table
+  \item $\nn$: a boolean---true iff the FK columns carry
+    \textsc{not null} constraints
+  \item $\tau \in
+    \{\text{inner},\;\text{left},\;\text{right},\;\text{full}\}$:
+    the join type
+  \end{itemize}
+\end{itemize}
+
+Only FK joins appear as join nodes.  Non-FK joins inside a derived
+relation prevent analysis---the algorithm cannot reason about their
+row-preservation properties, so their output sets are empty.
+
+
+\subsection{Outer Preservation}
+
+Define the predicate $\mathrm{outer}(\mathit{side}, \tau)$ as true
+when the given side is on the outer (preserved) side of the join.  In
+a FK join $J = (\Jf \joins \Jp)$, ``left'' corresponds to~$\Jf$
+(referencing) and ``right'' corresponds to~$\Jp$ (referenced):
+
+\begin{center}
+\begin{tabular}{lcc}
+\toprule
+$\tau$ & $\outerf$ (referencing preserved)
+       & $\outerp$ (referenced preserved) \\
+\midrule
+inner & false & false \\
+left  & true  & false \\
+right & false & true  \\
+full  & true  & true  \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+When a side is preserved, all its rows appear in the output.  Rows
+without a match on the other side are padded with \textsc{null}s.
+
+
+%% ====================================================================
+\section{Tracked Properties}
+
+Each node~$J$ carries four properties computed bottom-up over the
+universe~$T$ of base table identifiers in $J$'s subtree:
+
+\begin{center}
+\begin{tabular}{clcl}
+\toprule
+Symbol & Name & Type & Meaning \\
+\midrule
+$U$ & uniqueness
+    & $\subseteq T$
+    & Tables whose unique-key uniqueness is preserved \\
+$R$ & row preservation
+    & $\subseteq T$
+    & Tables whose complete row set appears in $J$'s result \\
+$N$ & null preservation
+    & $\subseteq T$
+    & Tables whose key-column values are intact \\
+$C$ & chains
+    & $\subseteq T \times T$
+    & $(A,B) \in C$ means $A$ reaches $B$ via a NOT NULL FK path \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\paragraph{Chain invariant.}
+$(A, B) \in C$ if and only if there exists a directed path
+$A = t_0 \to t_1 \to \cdots \to t_k = B$ where:
+\begin{enumerate}
+\item $A \in R$ \quad ($A$'s complete row set appears in $J$'s result)
+\item Each edge $t_i \to t_{i+1}$ corresponds to a NOT NULL FK join
+  with $t_i$ as the referencing table and $t_{i+1}$ as the referenced
+  table
+\item At the time edge $t_i \to t_{i+1}$ was processed, $t_{i+1}$
+  was row-preserving ($t_{i+1} \in R$ of the referenced subtree at
+  that node)
+\end{enumerate}
+
+
+%% ====================================================================
+\section{Base Cases}
+
+At a leaf node for base table~$t$:
+
+\paragraph{Unfiltered.}
+\[
+  U = \set{t},\quad R = \set{t},\quad N = \set{t},\quad C = \emptyset
+\]
+
+\paragraph{Filtered.}
+\[
+  U = \set{t},\quad R = \emptyset,\quad N = \set{t},\quad C = \emptyset
+\]
+
+Uniqueness is always preserved: filtering cannot create duplicate
+keys.  Row preservation is lost because filtering may exclude rows.
+Null preservation holds because no join padding has occurred.
+
+
+%% ====================================================================
+\section{Propagation Rules}
+
+Given $J = (\Jf \fkjoin{f \to p,\;\nn,\;\tau} \Jp)$ with input
+properties $(\Uf, \Rf, \Nf, \Cf)$ from the referencing subtree and
+$(\Up, \Rp, \Np, \Cp)$ from the referenced subtree, compute the
+output properties $(U', R', N', C')$.
+
+
+\subsection{Outer Preservation Predicate}
+
+The shorthand $\outerf$ and $\outerp$ denotes whether the
+referencing and referenced sides are outer-preserved, as defined in
+\S4.2:
+
+\begin{center}
+\begin{tabular}{lcc}
+\toprule
+$\tau$ & $\outerf$ & $\outerp$ \\
+\midrule
+inner & false & false \\
+left  & true  & false \\
+right & false & true  \\
+full  & true  & true  \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+
+\subsection{Uniqueness (\texorpdfstring{$U$}{U})}
+
+\[
+  U' = \Uf \;\cup\;
+    \begin{cases}
+      \Up & \text{if } \unique(f) \land f \in \Uf \\
+      \emptyset & \text{otherwise}
+    \end{cases}
+\]
+where $\unique(f)$ means the FK columns form a unique key on~$f$.
+
+The referencing side's uniqueness set is always inherited.  The
+referenced side's set is inherited only when the FK columns are unique
+and $f$ itself preserves uniqueness---making the join one-to-one, so
+no referenced rows are duplicated.
+
+
+\subsection{Null Preservation (\texorpdfstring{$N$}{N})}
+
+Start with the union of both inputs:
+\[
+  N' = \Nf \cup \Np
+\]
+
+Then remove entries from the null-padded (inner) side:
+
+\begin{itemize}
+\item If $\outerf \land \lnot\nn$: set $N' = N' \setminus \Np$.
+
+  When the referencing side is preserved, unmatched referencing rows
+  produce ghost rows with \textsc{null}s on the referenced side.  All
+  tables from $\Jp$ have their column values corrupted in these ghost
+  rows.
+
+  Exception: if $\nn$ holds, the FK guarantee ensures every
+  referencing row matches a referenced row (the FK value is non-null
+  and the constraint ensures a match exists).  No unmatched
+  referencing rows exist, so no ghost rows appear and $\Np$ is not
+  removed.
+
+\item If $\outerp$: set $N' = N' \setminus \Nf$.
+
+  When the referenced side is preserved, unmatched referenced rows
+  produce ghost rows with \textsc{null}s on the referencing side.
+  All tables from $\Jf$ have their column values corrupted.  This
+  removal is unconditional---the FK constraint provides no guarantee
+  in this direction (not every referenced row need be referenced).
+\end{itemize}
+
+\paragraph{Net effect on entries from each side:}
+
+\begin{center}
+\begin{tabular}{lll}
+\toprule
+$\tau$ & $\Nf$ entries & $\Np$ entries \\
+\midrule
+inner & inherited & inherited \\
+left  & inherited & removed if $\lnot\nn$;\; inherited if $\nn$ \\
+right & removed   & inherited \\
+full  & removed   & removed if $\lnot\nn$;\; inherited if $\nn$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Here ``inherited'' means the entries pass through from the input, and
+``removed'' means they are unconditionally absent from the output.
+
+
+\subsection{Row Preservation and Chains (\texorpdfstring{$R$, $C$}{R, C})}
+
+The computation proceeds in three phases.
+
+\paragraph{Phase 1 --- Outer join preservation.}
+Entries from preserved sides are copied unconditionally:
+\begin{align*}
+  R'_{\mathrm{outer}} &=
+    \bigl(\Rf \text{ if } \outerf \text{ else } \emptyset\bigr)
+    \;\cup\;
+    \bigl(\Rp \text{ if } \outerp \text{ else } \emptyset\bigr)
+  \\
+  C'_{\mathrm{outer}} &=
+    \bigl(\Cf \text{ if } \outerf \text{ else } \emptyset\bigr)
+    \;\cup\;
+    \bigl(\Cp \text{ if } \outerp \text{ else } \emptyset\bigr)
+\end{align*}
+
+\paragraph{Phase 2 --- Guard.}
+If any of the following conditions fail, set
+$R' = R'_{\mathrm{outer}}$, $C' = C'_{\mathrm{outer}}$, and stop:
+\[
+  \nn \;\land\; f \in \Nf \;\land\; p \in \Rp
+\]
+
+The guard requires three things:
+\begin{itemize}[nosep]
+\item $\nn$: the FK columns carry \textsc{not null} constraints on the
+  base table.
+\item $f \in \Nf$: the FK columns have not been corrupted by
+  null-padding from prior outer joins.  Even with \textsc{not null}
+  base constraints, prior joins may have introduced ghost rows with
+  \textsc{null} FK values; $f \in \Nf$ confirms this has not happened.
+\item $p \in \Rp$: the referenced base table's complete row set
+  appears in $\Jp$'s result.
+\end{itemize}
+Without all three, a referencing row may fail to find its match:
+either because its FK value is \textsc{null} or corrupted, or because
+the matching referenced row is missing.
+
+\paragraph{Phase 3 --- Chain extension.}
+When the guard passes:
+
+\medskip\noindent
+\emph{Step 3a.}\; Compute the anchor set---tables that reach~$f$:
+\[
+  \anchor = \set{A : (A, f) \in \Cf}
+    \;\cup\; \bigl(\set{f} \text{ if } f \in \Rf\bigr)
+\]
+Each member of $\anchor$ is row-preserving and connected to~$f$
+through a NOT NULL FK chain (or is $f$ itself when $f \in \Rf$).
+
+\medskip\noindent
+\emph{Step 3b.}\; Inherit from the referencing side.  Copy $R$ and $C$
+entries rooted at anchor members:
+\begin{align*}
+  R'_{\mathrm{inherit}} &= \anchor \\
+  C'_{\mathrm{inherit}} &=
+    \set{(A, Y) \in \Cf : A \in \anchor}
+\end{align*}
+Every member of $\anchor$ is in $\Rf$ (by the chain invariant and
+the condition on $f$ in Step~3a), so
+$R'_{\mathrm{inherit}} \subseteq \Rf$.  Tables in $\Rf$ that do not
+reach~$f$ are excluded because the join may drop some of their rows.
+
+\medskip\noindent
+\emph{Step 3c.}\; Extend chains across the FK boundary.  Each anchor
+member now reaches~$p$, and transitively everything $p$ reaches:
+\[
+  C'_{\mathrm{extend}} =
+    \set{(A, p) : A \in \anchor}
+    \;\cup\;
+    \set{(A, Y) : A \in \anchor,\; (p, Y) \in \Cp}
+\]
+
+\paragraph{Final result:}
+\begin{align*}
+  R' &= R'_{\mathrm{outer}} \cup R'_{\mathrm{inherit}} \\
+  C' &= C'_{\mathrm{outer}} \cup C'_{\mathrm{inherit}}
+       \cup C'_{\mathrm{extend}}
+\end{align*}
+
+
+\subsection{GROUP BY}
+
+When a derived relation applies GROUP BY, it modifies the four
+properties of the underlying relation's output before the result is
+used in further joins.  Let $(U_{\mathrm{in}}, R_{\mathrm{in}},
+N_{\mathrm{in}}, C_{\mathrm{in}})$ be the properties of the
+underlying relation.
+
+\paragraph{Conditions for uniqueness restoration.}
+GROUP BY can restore uniqueness when:
+\begin{itemize}[nosep]
+\item Every grouping expression is a direct column reference (no
+  computed expressions)
+\item All grouping columns reference the same base table~$t$
+\item The grouping columns cover all columns of some unique key on~$t$
+\end{itemize}
+
+\paragraph{Effect on the four properties.}
+When the conditions above are met:
+\begin{itemize}
+\item $U$: add $t$ to $U_{\mathrm{in}}$ (uniqueness restored).  This
+  holds even when a group-level filter is present, since uniqueness is
+  about deduplication, not row completeness.
+\item $R$: propagate $R_{\mathrm{in}}$, but only if no group-level
+  filter is present (a group-level filter may discard groups, breaking
+  row preservation).
+\item $C$: propagate $C_{\mathrm{in}}$ (same condition as $R$).
+\item $N$: propagate $N_{\mathrm{in}}$ only if all columns of the
+  matched unique key carry \textsc{not null} constraints.  If any
+  column is nullable, GROUP BY collapses all \textsc{null} values in
+  that column into a single group, producing a \textsc{null} key value
+  that may not correspond to any base table row.  In this case, $N$ is
+  set to~$\emptyset$.
+\end{itemize}
+
+When GROUP BY does not restore uniqueness, or when a group-level
+filter is present, $R$, $C$, and $N$ are not propagated.
+
+
+%% ====================================================================
+\section{Acceptance Criterion}
+
+At the entry point, the algorithm computes the four properties for the
+referenced subtree~$\Jp$.  The FK join is accepted if and only if:
+\[
+  p \in U \;\land\; p \in R \;\land\; p \in N
+\]
+where $U$, $R$, $N$ are the output properties of~$\Jp$.
+
+\begin{itemize}
+\item $p \in U$: the referenced base table's unique key is preserved,
+  ensuring each referencing row matches at most one referenced row.
+\item $p \in R$: the referenced base table's complete row set appears,
+  ensuring every valid FK value finds its match.
+\item $p \in N$: the referenced base table's key-column values are
+  intact, ensuring the unique key functions correctly (no spurious
+  \textsc{null}s from outer-join padding or GROUP BY on nullable
+  columns).
+\end{itemize}
+
+For base tables accessed directly (not through a derived relation),
+all three conditions hold trivially.
+
+
+%% ====================================================================
+\section{Soundness}
+
+\begin{theorem}
+If the acceptance criterion holds ($p \in U \land p \in R \land p \in N$
+on the referenced side's output), then
+$\pi_{\mathbf{b}}(S) = \pi_{\mathbf{b'}}(s)$.
+\end{theorem}
+
+\begin{proof}[Proof sketch]
+The three conditions together establish that the referenced side~$S$
+contains the same key values as the base table~$s$ with the same
+multiplicities:
+\begin{itemize}
+\item $p \in R$ guarantees that all rows of $s$ appear in $S$ (no row
+  loss).  Every key value in $\pi_{\mathbf{b'}}(s)$ appears in
+  $\pi_{\mathbf{b}}(S)$ with at least its original multiplicity.
+\item $p \in U$ guarantees that $p$'s unique key is preserved through
+  all joins in $\Jp$ (no row duplication).  Since the key columns
+  of~$s$ carry a unique constraint, and this uniqueness is preserved,
+  no key value in $\pi_{\mathbf{b}}(S)$ appears with multiplicity
+  greater than one.
+\item $p \in N$ guarantees that the key-column values have not been
+  corrupted by \textsc{null}s.  Without this, ghost rows from outer
+  joins could introduce \textsc{null} key values, or GROUP BY could
+  collapse multiple \textsc{null} rows into one, violating the
+  multiset equality.
+\end{itemize}
+Together, these imply $\pi_{\mathbf{b}}(S) = \pi_{\mathbf{b'}}(s)$:
+every key value appears exactly once, and no spurious values are
+introduced.
+\end{proof}
+
+
+\subsection{Chain Invariant Proof}
+
+The chain invariant (\S5) is proved by structural induction on the
+join tree.
+
+\paragraph{Base case.}
+At a leaf node, $C = \emptyset$ and the invariant holds vacuously.
+
+\paragraph{Inductive step.}
+Assume the invariant holds for both subtrees $\Jf$ and $\Jp$.  We
+show it holds for $J = (\Jf \fkjoin{f \to p,\;\nn,\;\tau} \Jp)$.
+
+\medskip\noindent
+\emph{Outer-preserved entries.}\;
+When a side is preserved by the outer join, all its rows appear in the
+result (possibly padded with \textsc{null}s on the other side).  The
+$R$ and $C$ entries from that side remain valid because no rows are
+lost.  The invariant is maintained by direct copy.
+
+\medskip\noindent
+\emph{Guard condition.}\;
+When $\lnot\nn \lor f \notin \Nf \lor p \notin \Rp$, no new chain is
+valid: either \textsc{null} FK values could cause row loss (violating
+condition~1 of the invariant), or the FK columns have been corrupted
+by prior outer joins (also violating condition~1), or the referenced
+table is incomplete (violating condition~3).  Returning with only
+outer-preserved sets is correct.
+
+\begin{lemma}[Key lemma]
+If $A \in \anchor$, then every row of $A$ in $\Jf$'s result survives
+the join.
+\end{lemma}
+
+\begin{proof}
+$A \in \anchor$ means either $A = f$ with $f \in \Rf$, or
+$(A, f) \in \Cf$.  In both cases, $A$ has a NOT NULL FK chain ending
+at~$f$, so every row of~$A$ in $\Jf$ is associated with a specific
+value of $f$'s FK columns.  Since $f \in \Nf$ (from the guard), these
+FK values have not been corrupted by prior joins.  Since $\nn$ holds,
+they are non-null.  Since $p \in \Rp$, the referenced table is
+complete.  The FK constraint guarantees that every non-null FK value
+references an existing row.  Therefore every row of~$A$ matches
+exactly one row in $\Jp$ and survives the join.
+\end{proof}
+
+\noindent
+\emph{Inherit step.}\;
+Chains $(A, Y)$ from $\Cf$ are copied only when $A \in \anchor$.  By
+the lemma, $A$ remains row-preserving.  By the inductive hypothesis,
+the chain from $A$ to $Y$ was valid in~$\Jf$.  Since $A$'s rows are
+preserved, the chain remains valid in~$J$.
+
+\medskip\noindent
+\emph{Extend step.}\;
+The new chain $(A, p)$ is valid: $A \in \anchor$ ensures $A \in R'$,
+the edge $f \to p$ is a NOT NULL FK join, and $p \in \Rp$ holds at
+the time of processing---satisfying all three conditions of the chain
+invariant.  Extensions $(A, Y)$ for $(p, Y) \in \Cp$ compose the path
+from $A$ through $p$ to $Y$; by the inductive hypothesis on~$\Jp$,
+the chain $p \to \cdots \to Y$ was valid, and prepending the path from
+$A$ through $f$ to $p$ preserves validity.
+
+
+\subsection{Null Preservation Correctness}
+
+\emph{Base case.}\;
+$N = \set{t}$ is trivially correct: a single base table has no joins,
+so its key-column values are intact.
+
+\medskip\noindent
+\emph{Remove step (outer joins).}\;
+When a side is outer-preserved, unmatched rows from the preserved side
+produce ghost rows with all-\textsc{null} columns on the inner side.
+Removing the inner side's $N$ entries is correct because those tables'
+key columns may now contain spurious \textsc{null}s.
+
+Exception: when the referencing side is outer-preserved and $\nn$
+holds, every referencing row has a non-null FK value and the FK
+constraint guarantees a match.  No unmatched referencing rows exist,
+so no ghost rows appear on the referenced side.  Therefore $\Np$ is
+not removed.
+
+\medskip\noindent
+\emph{Remove step (GROUP BY).}\;
+When GROUP BY on a nullable column restores uniqueness, it collapses
+all \textsc{null} values into a single group.  This group's key value
+is \textsc{null}, which may not correspond to any base table row (the
+base table may have multiple rows with \textsc{null} in that column,
+or none).  Removing the table from $N$ is correct.
+
+
+\subsection{Selective Inheritance}
+
+Tables in $\Rf$ that are not in $\anchor$ are correctly excluded from
+$R'$.  Such a table~$B$ has no NOT NULL FK chain to~$f$.  The join on
+$f$'s FK columns may drop some of $B$'s rows---specifically, rows
+paired with $f$-rows whose FK values are \textsc{null} or whose FK
+columns have been corrupted by prior joins.  Without a guarantee that
+all of $B$'s rows survive, $B$ cannot be in~$R'$.
+
+
+%% ====================================================================
+\section{Conservativeness}
+
+The analysis is deliberately conservative.  The following classes of
+valid queries are rejected:
+
+\begin{enumerate}
+\item \textbf{Non-FK joins preserving rows.}\;
+  A non-FK join inside a derived relation may happen to preserve all
+  rows (e.g., a join whose condition matches every row), but the
+  analysis cannot determine this.  Any non-FK join causes all tracked
+  properties to be lost.
+
+\item \textbf{Set operations.}\;
+  Operations that combine multiple relations (union, intersection,
+  difference) are not analyzed, even when they might preserve the
+  required properties.
+
+\item \textbf{Complex grouping.}\;
+  The analysis requires grouping columns to be direct column
+  references from a single base table covering a unique key.  It
+  rejects grouping on expressions (even deterministic ones), grouping
+  on columns from multiple tables, and grouping on columns from nested
+  derived relations.
+
+\item \textbf{Deduplication.}\;
+  Even when deduplication would not change the result (e.g., applied
+  to an already-unique relation), it is rejected because the analysis
+  cannot verify this statically.
+
+\item \textbf{Semantically vacuous filters.}\;
+  A filter that happens to exclude no rows (e.g., a tautological
+  predicate) breaks row preservation in the analysis, even though the
+  data is unchanged.
+
+\item \textbf{Transitive reasoning across non-FK joins.}\;
+  If two FK chains are connected by a non-FK join that happens to
+  preserve rows, the analysis cannot chain through the non-FK join.
+\end{enumerate}
+
+This conservativeness is by design: false negatives (rejecting valid
+joins) are acceptable; false positives (accepting invalid joins) are
+not.
+
+\end{document}

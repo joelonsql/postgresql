@@ -168,3 +168,84 @@ SELECT * FROM
 ) q JOIN t5 FOR KEY (t5_t4_id_1, t5_t4_id_2) -> q (t4_id_1, t4_id_2);
 
 DROP TABLE t1, t2, t3, t4, t5;
+
+-- Test: GROUP BY on nullable unique key should NOT preserve N-set
+-- When GROUP BY uses a nullable unique key, multiple NULL rows collapse
+-- into one group, violating null preservation.
+
+CREATE TABLE nu_t1
+(
+    nu_t1_id INT,
+    UNIQUE (nu_t1_id)
+);
+
+CREATE TABLE nu_t2
+(
+    nu_t2_id INT NOT NULL,
+    nu_t2_t1_id INT,
+    PRIMARY KEY (nu_t2_id),
+    FOREIGN KEY (nu_t2_t1_id) REFERENCES nu_t1 (nu_t1_id)
+);
+
+CREATE TABLE nu_t3
+(
+    nu_t3_id INT NOT NULL,
+    nu_t3_t1_id INT,
+    PRIMARY KEY (nu_t3_id),
+    FOREIGN KEY (nu_t3_t1_id) REFERENCES nu_t1 (nu_t1_id)
+);
+
+-- error: GROUP BY on nullable unique key does not preserve null rows
+-- The LEFT JOIN preserves all nu_t1 rows (R), but GROUP BY on the
+-- nullable nu_t1_id collapses multiple NULLs into one group (loses N).
+-- Without N preservation, the FK join should be rejected.
+SELECT * FROM
+(
+    SELECT nu_t1.nu_t1_id, COUNT(*)
+    FROM nu_t1
+    LEFT JOIN nu_t2 FOR KEY (nu_t2_t1_id) -> nu_t1 (nu_t1_id)
+    GROUP BY nu_t1.nu_t1_id
+) q
+JOIN nu_t3 FOR KEY (nu_t3_t1_id) -> q (nu_t1_id);
+
+-- ok: same tables but with NOT NULL on the unique key
+-- This confirms that adding NOT NULL makes it work
+CREATE TABLE nn_t1
+(
+    nn_t1_id INT NOT NULL,
+    UNIQUE (nn_t1_id)
+);
+
+CREATE TABLE nn_t2
+(
+    nn_t2_id INT NOT NULL,
+    nn_t2_t1_id INT NOT NULL,
+    PRIMARY KEY (nn_t2_id),
+    FOREIGN KEY (nn_t2_t1_id) REFERENCES nn_t1 (nn_t1_id)
+);
+
+CREATE TABLE nn_t3
+(
+    nn_t3_id INT NOT NULL,
+    nn_t3_t1_id INT NOT NULL,
+    PRIMARY KEY (nn_t3_id),
+    FOREIGN KEY (nn_t3_t1_id) REFERENCES nn_t1 (nn_t1_id)
+);
+
+INSERT INTO nn_t1 VALUES (1), (2), (3);
+INSERT INTO nn_t2 VALUES (10, 1), (20, 1), (30, 2);
+INSERT INTO nn_t3 VALUES (100, 1), (200, 3);
+
+-- ok: GROUP BY on NOT NULL unique key preserves N-set
+SELECT nn_t3.nn_t3_id, q.nn_t1_id, q.count FROM
+(
+    SELECT nn_t1.nn_t1_id, COUNT(*)
+    FROM nn_t1
+    LEFT JOIN nn_t2 FOR KEY (nn_t2_t1_id) -> nn_t1 (nn_t1_id)
+    GROUP BY nn_t1.nn_t1_id
+) q
+JOIN nn_t3 FOR KEY (nn_t3_t1_id) -> q (nn_t1_id)
+ORDER BY nn_t3.nn_t3_id;
+
+DROP TABLE nu_t1, nu_t2, nu_t3;
+DROP TABLE nn_t1, nn_t2, nn_t3;
