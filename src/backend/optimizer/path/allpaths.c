@@ -43,6 +43,7 @@
 #include "optimizer/prep.h"
 #include "optimizer/tlist.h"
 #include "parser/parse_clause.h"
+#include "parser/parse_fkjoin.h"
 #include "parser/parsetree.h"
 #include "partitioning/partbounds.h"
 #include "port/pg_bitutils.h"
@@ -150,6 +151,9 @@ static void set_result_pathlist(PlannerInfo *root, RelOptInfo *rel,
 static void set_worktable_pathlist(PlannerInfo *root, RelOptInfo *rel,
 								   RangeTblEntry *rte);
 static RelOptInfo *make_rel_from_joinlist(PlannerInfo *root, List *joinlist);
+static RelOptInfo *try_snowflake_join_search(PlannerInfo *root,
+											int levels_needed,
+											List *initial_rels);
 static bool subquery_is_pushdown_safe(Query *subquery, Query *topquery,
 									  pushdown_safety_info *safetyInfo);
 static bool recurse_pushdown_safe(Node *setOp, Query *topquery,
@@ -3898,11 +3902,239 @@ make_rel_from_joinlist(PlannerInfo *root, List *joinlist)
 
 		if (join_search_hook)
 			return (*join_search_hook) (root, levels_needed, initial_rels);
-		else if (enable_geqo && levels_needed >= geqo_threshold)
-			return geqo(root, levels_needed, initial_rels);
 		else
-			return standard_join_search(root, levels_needed, initial_rels);
+		{
+			RelOptInfo *result;
+
+			/* Try snowflake FK join fast path before DP/GEQO */
+			if (enable_fk_snowflake_join)
+			{
+				result = try_snowflake_join_search(root, levels_needed,
+												   initial_rels);
+				if (result != NULL)
+					return result;
+			}
+
+			if (enable_geqo && levels_needed >= geqo_threshold)
+				return geqo(root, levels_needed, initial_rels);
+			else
+				return standard_join_search(root, levels_needed, initial_rels);
+		}
 	}
+}
+
+/*
+ * Comparator for sorting dimension rels by rows (smallest first).
+ */
+static int
+rel_rows_cmp(const void *a, const void *b)
+{
+	RelOptInfo *rela = *(RelOptInfo **) a;
+	RelOptInfo *relb = *(RelOptInfo **) b;
+
+	if (rela->rows < relb->rows)
+		return -1;
+	if (rela->rows > relb->rows)
+		return 1;
+	return 0;
+}
+
+/*
+ * try_snowflake_join_search
+ *		Attempt to use a fast O(N) join search for snowflake/star schema
+ *		patterns where all joins are FK joins to a single fact table.
+ *
+ * When FK preservation metadata identifies a single fully-preserved base
+ * table (the "fact table"), and all other relations in the query are
+ * connected to it via foreign key constraints, we can skip the expensive
+ * O(3^N) dynamic programming search and build a left-deep plan directly.
+ *
+ * Returns the final join relation if the fast path applies, or NULL if
+ * we should fall back to standard planning.
+ */
+static RelOptInfo *
+try_snowflake_join_search(PlannerInfo *root, int levels_needed,
+						  List *initial_rels)
+{
+	Query	   *parse = root->parse;
+	ListCell   *lc;
+	RTEId	   *preserved = NULL;
+	Index		fact_relid = 0;
+	RelOptInfo *fact_rel = NULL;
+	RelOptInfo **dim_rels;
+	int			ndims = 0;
+	int			i;
+	RelOptInfo *current;
+
+	elog(DEBUG1, "FK snowflake: checking %d-way join for snowflake pattern",
+		 levels_needed);
+
+	/* Step 1: Find the single fully-preserved base table (fact table) */
+	if (parse->fkPreservedU == NIL ||
+		parse->fkPreservedR == NIL ||
+		parse->fkPreservedN == NIL)
+	{
+		elog(DEBUG1, "FK snowflake: falling back to standard planning (no FK preservation metadata)");
+		return NULL;
+	}
+
+	foreach(lc, parse->fkPreservedU)
+	{
+		RTEId  *rteid = (RTEId *) lfirst(lc);
+
+		if (rteid_list_member(parse->fkPreservedR, rteid) &&
+			rteid_list_member(parse->fkPreservedN, rteid))
+		{
+			if (preserved != NULL)
+			{
+				/* Multiple preserved tables — shouldn't happen but bail out */
+				elog(DEBUG1, "FK snowflake: falling back to standard planning (multiple preserved tables)");
+				return NULL;
+			}
+			preserved = rteid;
+		}
+	}
+
+	if (preserved == NULL)
+	{
+		elog(DEBUG1, "FK snowflake: falling back to standard planning (no fully preserved table)");
+		return NULL;
+	}
+
+	/*
+	 * Map the preserved RTEId to a planner relid by scanning the RTE array.
+	 * The preserved RTEId's baserelindex corresponds to an RTE in the
+	 * *subquery's* range table.  At this level, we need to find which
+	 * initial_rel corresponds to this base table by OID.
+	 */
+	for (i = 1; i < root->simple_rel_array_size; i++)
+	{
+		RangeTblEntry *rte = root->simple_rte_array[i];
+
+		if (rte == NULL)
+			continue;
+		if (rte->rtekind == RTE_RELATION && rte->relid == preserved->relid)
+		{
+			fact_relid = i;
+			break;
+		}
+	}
+
+	if (fact_relid == 0)
+	{
+		elog(DEBUG1, "FK snowflake: falling back to standard planning (preserved table not in range table)");
+		return NULL;
+	}
+
+	/* Step 2: Verify all initial_rels are base rels and identify fact vs dims */
+	dim_rels = (RelOptInfo **) palloc(levels_needed * sizeof(RelOptInfo *));
+
+	foreach(lc, initial_rels)
+	{
+		RelOptInfo *rel = (RelOptInfo *) lfirst(lc);
+
+		/* All rels must be simple base relations */
+		if (rel->reloptkind != RELOPT_BASEREL ||
+			bms_num_members(rel->relids) != 1)
+		{
+			elog(DEBUG1, "FK snowflake: falling back to standard planning (non-base rel found)");
+			pfree(dim_rels);
+			return NULL;
+		}
+
+		if (bms_is_member(fact_relid, rel->relids))
+		{
+			fact_rel = rel;
+			elog(DEBUG1, "FK snowflake: fact table is %s (relid %u, %.0f rows)",
+				 get_rel_name(preserved->relid), fact_relid, rel->rows);
+		}
+		else
+		{
+			dim_rels[ndims++] = rel;
+		}
+	}
+
+	if (fact_rel == NULL)
+	{
+		elog(DEBUG1, "FK snowflake: falling back to standard planning (fact table not in initial rels)");
+		pfree(dim_rels);
+		return NULL;
+	}
+
+	/* Verify each dimension has an FK connection to the fact table */
+	for (i = 0; i < ndims; i++)
+	{
+		RelOptInfo *dim = dim_rels[i];
+		Index		dim_relid = bms_singleton_member(dim->relids);
+		bool		found_fk = false;
+
+		foreach(lc, root->fkey_list)
+		{
+			ForeignKeyOptInfo *fkinfo = (ForeignKeyOptInfo *) lfirst(lc);
+
+			/*
+			 * Check if this FK connects the dimension to the fact table
+			 * (in either direction).
+			 */
+			if ((fkinfo->con_relid == dim_relid && fkinfo->ref_relid == fact_relid) ||
+				(fkinfo->con_relid == fact_relid && fkinfo->ref_relid == dim_relid))
+			{
+				/*
+				 * Verify all FK columns are matched by equijoin quals.
+				 * nmatched_ec + nmatched_ri should cover all FK columns.
+				 */
+				if (fkinfo->nmatched_ec + fkinfo->nmatched_ri >= fkinfo->nkeys)
+				{
+					found_fk = true;
+					break;
+				}
+			}
+		}
+
+		if (!found_fk)
+		{
+			elog(DEBUG1, "FK snowflake: falling back to standard planning (non-FK join found for rel %u)",
+				 dim_relid);
+			pfree(dim_rels);
+			return NULL;
+		}
+
+		elog(DEBUG1, "FK snowflake: dimension table %s (relid %u, %.0f rows)",
+			 get_rel_name(root->simple_rte_array[dim_relid]->relid),
+			 dim_relid, dim->rows);
+	}
+
+	/* Step 3: Build left-deep join tree, smallest dimensions first */
+	if (ndims > 1)
+		qsort(dim_rels, ndims, sizeof(RelOptInfo *), rel_rows_cmp);
+
+	current = fact_rel;
+	for (i = 0; i < ndims; i++)
+	{
+		RelOptInfo *joinrel;
+
+		joinrel = make_join_rel(root, current, dim_rels[i]);
+		if (joinrel == NULL)
+		{
+			elog(DEBUG1, "FK snowflake: falling back to standard planning (make_join_rel failed at dimension %d)", i);
+			pfree(dim_rels);
+			return NULL;
+		}
+
+		/* Generate paths and find cheapest for intermediate joins */
+		generate_partitionwise_join_paths(root, joinrel);
+		if (i < ndims - 1)
+			generate_useful_gather_paths(root, joinrel, false);
+		set_cheapest(joinrel);
+
+		current = joinrel;
+	}
+
+	elog(DEBUG1, "FK snowflake: using fast path for %d-way join (fact table %s + %d dimensions)",
+		 levels_needed, get_rel_name(preserved->relid), ndims);
+
+	pfree(dim_rels);
+	return current;
 }
 
 /*

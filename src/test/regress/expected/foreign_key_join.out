@@ -3,6 +3,9 @@
 --
 -- Clean up any leftover tables from other tests that share the same names
 DROP TABLE IF EXISTS t3, t2, t1 CASCADE;
+NOTICE:  table "t3" does not exist, skipping
+NOTICE:  table "t2" does not exist, skipping
+NOTICE:  table "t1" does not exist, skipping
 CREATE TABLE t1
 (
     c1 int not null,

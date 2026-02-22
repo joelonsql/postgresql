@@ -87,6 +87,7 @@
 
 #include "access/amapi.h"
 #include "access/htup_details.h"
+#include "catalog/pg_class.h"
 #include "access/tsmapi.h"
 #include "executor/executor.h"
 #include "executor/nodeAgg.h"
@@ -104,9 +105,11 @@
 #include "optimizer/plancat.h"
 #include "optimizer/restrictinfo.h"
 #include "parser/parsetree.h"
+#include "parser/parse_fkjoin.h"
 #include "utils/lsyscache.h"
 #include "utils/selfuncs.h"
 #include "utils/spccache.h"
+#include "utils/syscache.h"
 #include "utils/tuplesort.h"
 
 
@@ -155,6 +158,7 @@ bool		enable_material = true;
 bool		enable_memoize = true;
 bool		enable_mergejoin = true;
 bool		enable_hashjoin = true;
+bool		enable_fk_snowflake_join = true;
 bool		enable_gathermerge = true;
 bool		enable_partitionwise_join = false;
 bool		enable_partitionwise_aggregate = false;
@@ -6032,6 +6036,79 @@ get_foreign_key_join_selectivity(PlannerInfo *root,
 }
 
 /*
+ * get_fk_preserved_base_table_tuples
+ *		If the RTE has FK preservation metadata indicating a single fully
+ *		preserved base table (in U ∩ R ∩ N), return that table's reltuples
+ *		from pg_class.  Otherwise return -1.
+ *
+ * A base table T is fully preserved when it appears in all three sets:
+ * U (uniqueness), R (row completeness), and N (null preservation).
+ * This means the derived relation has exactly the same number of rows as T.
+ */
+static double
+get_fk_preserved_base_table_tuples(RangeTblEntry *rte)
+{
+	ListCell   *lc;
+	RTEId	   *preserved = NULL;
+#ifdef USE_ASSERT_CHECKING
+	int			count = 0;
+#endif
+
+	/* Must have all three sets non-empty */
+	if (rte->fkPreservedU == NIL ||
+		rte->fkPreservedR == NIL ||
+		rte->fkPreservedN == NIL)
+		return -1;
+
+	/* Find RTEIds that appear in all three sets (U ∩ R ∩ N) */
+	foreach(lc, rte->fkPreservedU)
+	{
+		RTEId  *rteid = (RTEId *) lfirst(lc);
+
+		if (rteid_list_member(rte->fkPreservedR, rteid) &&
+			rteid_list_member(rte->fkPreservedN, rteid))
+		{
+			preserved = rteid;
+#ifdef USE_ASSERT_CHECKING
+			count++;
+#endif
+		}
+	}
+
+	/* At most one table should be fully preserved (N-removal invariant) */
+	Assert(count <= 1);
+
+	if (preserved == NULL || !OidIsValid(preserved->relid))
+		return -1;
+
+	/*
+	 * Look up reltuples from pg_class.  If the table has never been
+	 * ANALYZEd (reltuples == -1 or 0), fall back to heuristic estimates.
+	 */
+	{
+		HeapTuple	tp;
+		Form_pg_class classForm;
+		double		reltuples;
+
+		tp = SearchSysCache1(RELOID, ObjectIdGetDatum(preserved->relid));
+		if (!HeapTupleIsValid(tp))
+			return -1;
+
+		classForm = (Form_pg_class) GETSTRUCT(tp);
+		reltuples = (double) classForm->reltuples;
+		ReleaseSysCache(tp);
+
+		if (reltuples <= 0)
+			return -1;
+
+		elog(DEBUG1, "FK preservation: base table %s has %.0f tuples",
+			 get_rel_name(preserved->relid), reltuples);
+
+		return reltuples;
+	}
+}
+
+/*
  * set_subquery_size_estimates
  *		Set the size estimates for a base relation that is a subquery.
  *
@@ -6045,19 +6122,36 @@ void
 set_subquery_size_estimates(PlannerInfo *root, RelOptInfo *rel)
 {
 	PlannerInfo *subroot = rel->subroot;
+	RangeTblEntry *rte;
 	RelOptInfo *sub_final_rel;
+	double		fk_tuples;
 	ListCell   *lc;
 
 	/* Should only be applied to base relations that are subqueries */
 	Assert(rel->relid > 0);
-	Assert(planner_rt_fetch(rel->relid, root)->rtekind == RTE_SUBQUERY);
+	rte = planner_rt_fetch(rel->relid, root);
+	Assert(rte->rtekind == RTE_SUBQUERY);
 
 	/*
 	 * Copy raw number of output rows from subquery.  All of its paths should
 	 * have the same output rowcount, so just look at cheapest-total.
 	 */
 	sub_final_rel = fetch_upper_rel(subroot, UPPERREL_FINAL, NULL);
-	rel->tuples = sub_final_rel->cheapest_total_path->rows;
+
+	/*
+	 * If FK preservation metadata indicates a fully preserved base table,
+	 * use its actual reltuples instead of the subquery's heuristic estimate.
+	 */
+	fk_tuples = enable_fk_snowflake_join ?
+		get_fk_preserved_base_table_tuples(rte) : -1;
+	if (fk_tuples > 0)
+	{
+		elog(DEBUG1, "FK preservation: subquery rel %u row estimate %.0f -> %.0f (preserved base table)",
+			 rel->relid, sub_final_rel->cheapest_total_path->rows, fk_tuples);
+		rel->tuples = fk_tuples;
+	}
+	else
+		rel->tuples = sub_final_rel->cheapest_total_path->rows;
 
 	/*
 	 * Compute per-output-column width estimates by examining the subquery's
@@ -6234,8 +6328,22 @@ set_cte_size_estimates(PlannerInfo *root, RelOptInfo *rel, double cte_rows)
 	}
 	else
 	{
-		/* Otherwise just believe the CTE's rowcount estimate */
-		rel->tuples = cte_rows;
+		double	fk_tuples;
+
+		/*
+		 * If FK preservation metadata indicates a fully preserved base table,
+		 * use its actual reltuples instead of the CTE's heuristic estimate.
+		 */
+		fk_tuples = enable_fk_snowflake_join ?
+			get_fk_preserved_base_table_tuples(rte) : -1;
+		if (fk_tuples > 0)
+		{
+			elog(DEBUG1, "FK preservation: CTE rel %u row estimate %.0f -> %.0f (preserved base table)",
+				 rel->relid, cte_rows, fk_tuples);
+			rel->tuples = fk_tuples;
+		}
+		else
+			rel->tuples = cte_rows;
 	}
 
 	/* Now estimate number of output rows, etc */

@@ -842,6 +842,13 @@
   boot_val => 'true',
 },
 
+{ name => 'enable_fk_snowflake_join', type => 'bool', context => 'PGC_USERSET', group => 'QUERY_TUNING_METHOD',
+  short_desc => 'Enables the planner\'s FK join snowflake fast path.',
+  flags => 'GUC_EXPLAIN',
+  variable => 'enable_fk_snowflake_join',
+  boot_val => 'true',
+},
+
 { name => 'enable_gathermerge', type => 'bool', context => 'PGC_USERSET', group => 'QUERY_TUNING_METHOD',
   short_desc => 'Enables the planner\'s use of gather merge plans.',
   flags => 'GUC_EXPLAIN',
@@ -862,7 +869,6 @@
   variable => 'enable_hashagg',
   boot_val => 'true',
 },
-
 { name => 'enable_hashjoin', type => 'bool', context => 'PGC_USERSET', group => 'QUERY_TUNING_METHOD',
   short_desc => 'Enables the planner\'s use of hash join plans.',
   flags => 'GUC_EXPLAIN',
