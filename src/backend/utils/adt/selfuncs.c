@@ -4456,9 +4456,6 @@ estimate_hash_bucket_stats(PlannerInfo *root, Node *hashkey, double nbuckets,
 	else
 		stanullfrac = 0.0;
 
-	/* Compute avg freq of all distinct data values in raw relation */
-	avgfreq = (1.0 - stanullfrac) / ndistinct;
-
 	/*
 	 * Adjust ndistinct to account for restriction clauses.  Observe we are
 	 * assuming that the data distribution is affected uniformly by the
@@ -4472,6 +4469,9 @@ estimate_hash_bucket_stats(PlannerInfo *root, Node *hashkey, double nbuckets,
 		ndistinct *= vardata.rel->rows / vardata.rel->tuples;
 		ndistinct = clamp_row_est(ndistinct);
 	}
+
+	/* Compute avg freq of all distinct data values in the filtered relation */
+	avgfreq = (1.0 - stanullfrac) / ndistinct;
 
 	/*
 	 * Initial estimate of bucketsize fraction is 1/nbuckets as long as the
