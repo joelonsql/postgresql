@@ -4487,7 +4487,11 @@ estimate_hash_bucket_stats(PlannerInfo *root, Node *hashkey, double nbuckets,
 	 * Adjust estimated bucketsize upward to account for skewed distribution.
 	 */
 	if (avgfreq > 0.0 && *mcv_freq > avgfreq)
+	{
+		elog(DEBUG1, "estimate_hash_bucket_stats: mcv_freq=%g, avgfreq=%g, skew_ratio=%g",
+			 *mcv_freq, avgfreq, *mcv_freq / avgfreq);
 		estfract *= *mcv_freq / avgfreq;
+	}
 
 	/*
 	 * Clamp bucketsize to sane range (the above adjustment could easily
