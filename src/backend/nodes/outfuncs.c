@@ -437,6 +437,7 @@ _outForeignKeyOptInfo(StringInfo str, const ForeignKeyOptInfo *node)
 
 	WRITE_UINT_FIELD(con_relid);
 	WRITE_UINT_FIELD(ref_relid);
+	WRITE_OID_FIELD(conoid);
 	WRITE_INT_FIELD(nkeys);
 	WRITE_ATTRNUMBER_ARRAY(conkey, node->nkeys);
 	WRITE_ATTRNUMBER_ARRAY(confkey, node->nkeys);

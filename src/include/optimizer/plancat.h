@@ -28,6 +28,8 @@ extern PGDLLIMPORT get_relation_info_hook_type get_relation_info_hook;
 extern void get_relation_info(PlannerInfo *root, Oid relationObjectId,
 							  bool inhparent, RelOptInfo *rel);
 
+extern void populate_fkjoins_to_fkey_list(PlannerInfo *root);
+
 extern void get_relation_notnullatts(PlannerInfo *root, Relation relation);
 
 extern Bitmapset *find_relation_notnullatts(PlannerInfo *root, Oid relid);

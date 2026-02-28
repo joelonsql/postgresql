@@ -1457,6 +1457,8 @@ typedef struct ForeignKeyOptInfo
 	Index		con_relid;
 	/* RT index of the referenced table */
 	Index		ref_relid;
+	/* pg_constraint OID of the foreign key, if known */
+	Oid			conoid;
 	/* number of columns in the foreign key */
 	int			nkeys;
 	/* cols in referencing table */

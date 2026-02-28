@@ -27,6 +27,7 @@
 #include "optimizer/pathnode.h"
 #include "optimizer/paths.h"
 #include "optimizer/placeholder.h"
+#include "optimizer/plancat.h"
 #include "optimizer/planmain.h"
 
 
@@ -160,6 +161,12 @@ query_planner(PlannerInfo *root,
 			}
 		}
 	}
+
+	/*
+	 * Pre-populate ForeignKeyOptInfo entries from any parse-time FK join
+	 * detections, so that get_relation_foreign_keys() can skip them.
+	 */
+	populate_fkjoins_to_fkey_list(root);
 
 	/*
 	 * Construct RelOptInfo nodes for all base relations used in the query.

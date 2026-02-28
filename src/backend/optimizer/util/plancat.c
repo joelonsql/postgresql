@@ -28,6 +28,7 @@
 #include "catalog/catalog.h"
 #include "catalog/heap.h"
 #include "catalog/pg_am.h"
+#include "catalog/pg_constraint.h"
 #include "catalog/pg_proc.h"
 #include "catalog/pg_statistic_ext.h"
 #include "catalog/pg_statistic_ext_data.h"
@@ -69,6 +70,10 @@ typedef struct NotnullHashEntry
 
 static void get_relation_foreign_keys(PlannerInfo *root, RelOptInfo *rel,
 									  Relation relation, bool inhparent);
+static void populate_fkjoins_to_fkey_list_recurse(PlannerInfo *root,
+												  Node *jtnode);
+static bool fkjoin_already_in_fkey_list(PlannerInfo *root, Oid conoid,
+										Index con_relid, Index ref_relid);
 static bool infer_collation_opclass_match(InferenceElem *elem, Relation idxRel,
 										  List *idxExprs);
 static List *get_relation_constraints(PlannerInfo *root,
@@ -671,10 +676,16 @@ get_relation_foreign_keys(PlannerInfo *root, RelOptInfo *rel,
 			if (rti == rel->relid)
 				continue;
 
+			/* Skip if already populated from a parse-time FK join */
+			if (fkjoin_already_in_fkey_list(root, cachedfk->conoid,
+											rel->relid, rti))
+				continue;
+
 			/* OK, let's make an entry */
 			info = makeNode(ForeignKeyOptInfo);
 			info->con_relid = rel->relid;
 			info->ref_relid = rti;
+			info->conoid = cachedfk->conoid;
 			info->nkeys = cachedfk->nkeys;
 			memcpy(info->conkey, cachedfk->conkey, sizeof(info->conkey));
 			memcpy(info->confkey, cachedfk->confkey, sizeof(info->confkey));
@@ -691,6 +702,148 @@ get_relation_foreign_keys(PlannerInfo *root, RelOptInfo *rel,
 			root->fkey_list = lappend(root->fkey_list, info);
 		}
 	}
+}
+
+/*
+ * populate_fkjoins_to_fkey_list -
+ *	  Pre-populate ForeignKeyOptInfo entries from parse-time FK join detections.
+ *
+ * When the parser identifies an ON-clause join that matches a foreign key
+ * constraint (via try_detect_fk_join), it attaches a ForeignKeyJoinNode to
+ * the JoinExpr.  We walk the join tree here to find those nodes and create
+ * ForeignKeyOptInfo entries up front, so that get_relation_foreign_keys()
+ * can skip them later (avoiding redundant catalog lookups).
+ */
+void
+populate_fkjoins_to_fkey_list(PlannerInfo *root)
+{
+	populate_fkjoins_to_fkey_list_recurse(root,
+										  (Node *) root->parse->jointree);
+}
+
+static void
+populate_fkjoins_to_fkey_list_recurse(PlannerInfo *root, Node *jtnode)
+{
+	if (jtnode == NULL)
+		return;
+	if (IsA(jtnode, FromExpr))
+	{
+		FromExpr   *f = (FromExpr *) jtnode;
+		ListCell   *l;
+
+		foreach(l, f->fromlist)
+			populate_fkjoins_to_fkey_list_recurse(root, lfirst(l));
+	}
+	else if (IsA(jtnode, RangeTblRef))
+	{
+		/* nothing to do */
+	}
+	else if (IsA(jtnode, JoinExpr))
+	{
+		JoinExpr   *j = (JoinExpr *) jtnode;
+
+		populate_fkjoins_to_fkey_list_recurse(root, j->larg);
+		populate_fkjoins_to_fkey_list_recurse(root, j->rarg);
+
+		if (j->fkJoin != NULL)
+		{
+			ForeignKeyJoinNode *fkjoin = castNode(ForeignKeyJoinNode, j->fkJoin);
+			Oid			conoid = fkjoin->constraint;
+			Index		con_relid = fkjoin->referencingVarno;
+			Index		ref_relid = fkjoin->referencedVarno;
+			HeapTuple	contup;
+			Datum		adatum;
+			bool		isnull;
+			ArrayType  *arr;
+			int			nkeys;
+			ForeignKeyOptInfo *info;
+
+			/* Look up the constraint to get column details */
+			contup = SearchSysCache1(CONSTROID, ObjectIdGetDatum(conoid));
+			if (!HeapTupleIsValid(contup))
+				return;			/* constraint disappeared */
+
+			info = makeNode(ForeignKeyOptInfo);
+			info->con_relid = con_relid;
+			info->ref_relid = ref_relid;
+			info->conoid = conoid;
+
+			/* Extract conkey */
+			adatum = SysCacheGetAttr(CONSTROID, contup,
+									 Anum_pg_constraint_conkey, &isnull);
+			if (isnull)
+			{
+				ReleaseSysCache(contup);
+				pfree(info);
+				return;
+			}
+			arr = DatumGetArrayTypeP(adatum);
+			nkeys = ARR_DIMS(arr)[0];
+			info->nkeys = nkeys;
+			memcpy(info->conkey, ARR_DATA_PTR(arr), nkeys * sizeof(AttrNumber));
+
+			/* Extract confkey */
+			adatum = SysCacheGetAttr(CONSTROID, contup,
+									 Anum_pg_constraint_confkey, &isnull);
+			if (isnull)
+			{
+				ReleaseSysCache(contup);
+				pfree(info);
+				return;
+			}
+			arr = DatumGetArrayTypeP(adatum);
+			memcpy(info->confkey, ARR_DATA_PTR(arr), nkeys * sizeof(AttrNumber));
+
+			/* Extract conpfeqop */
+			adatum = SysCacheGetAttr(CONSTROID, contup,
+									 Anum_pg_constraint_conpfeqop, &isnull);
+			if (isnull)
+			{
+				ReleaseSysCache(contup);
+				pfree(info);
+				return;
+			}
+			arr = DatumGetArrayTypeP(adatum);
+			memcpy(info->conpfeqop, ARR_DATA_PTR(arr), nkeys * sizeof(Oid));
+
+			ReleaseSysCache(contup);
+
+			/* Zero out fields to be filled by match_foreign_keys_to_quals */
+			info->nmatched_ec = 0;
+			info->nconst_ec = 0;
+			info->nmatched_rcols = 0;
+			info->nmatched_ri = 0;
+			memset(info->eclass, 0, sizeof(info->eclass));
+			memset(info->fk_eclass_member, 0, sizeof(info->fk_eclass_member));
+			memset(info->rinfos, 0, sizeof(info->rinfos));
+
+			root->fkey_list = lappend(root->fkey_list, info);
+		}
+	}
+	else
+		elog(ERROR, "unrecognized node type: %d", (int) nodeTag(jtnode));
+}
+
+/*
+ * fkjoin_already_in_fkey_list -
+ *	  Check if a ForeignKeyOptInfo matching the given constraint already exists.
+ */
+static bool
+fkjoin_already_in_fkey_list(PlannerInfo *root, Oid conoid,
+							Index con_relid, Index ref_relid)
+{
+	ListCell   *lc;
+
+	foreach(lc, root->fkey_list)
+	{
+		ForeignKeyOptInfo *info = (ForeignKeyOptInfo *) lfirst(lc);
+
+		if (info->conoid == conoid &&
+			info->con_relid == con_relid &&
+			info->ref_relid == ref_relid)
+			return true;
+	}
+	return false;
 }
 
 /*

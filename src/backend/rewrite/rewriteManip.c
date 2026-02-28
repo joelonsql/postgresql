@@ -426,6 +426,13 @@ OffsetVarNodes_walker(Node *node, OffsetVarNodes_context *context)
 
 		if (j->rtindex && context->sublevels_up == 0)
 			j->rtindex += context->offset;
+		if (j->fkJoin && context->sublevels_up == 0)
+		{
+			ForeignKeyJoinNode *fkjoin = castNode(ForeignKeyJoinNode, j->fkJoin);
+
+			fkjoin->referencingVarno += context->offset;
+			fkjoin->referencedVarno += context->offset;
+		}
 		/* fall through to examine children */
 	}
 	if (IsA(node, PlaceHolderVar))
@@ -599,6 +606,15 @@ ChangeVarNodes_walker(Node *node, ChangeVarNodes_context *context)
 		if (context->sublevels_up == 0 &&
 			j->rtindex == context->rt_index)
 			j->rtindex = context->new_index;
+		if (j->fkJoin && context->sublevels_up == 0)
+		{
+			ForeignKeyJoinNode *fkjoin = castNode(ForeignKeyJoinNode, j->fkJoin);
+
+			if (fkjoin->referencingVarno == context->rt_index)
+				fkjoin->referencingVarno = context->new_index;
+			if (fkjoin->referencedVarno == context->rt_index)
+				fkjoin->referencedVarno = context->new_index;
+		}
 		/* fall through to examine children */
 	}
 	if (IsA(node, PlaceHolderVar))
