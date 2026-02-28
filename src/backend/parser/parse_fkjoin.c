@@ -83,6 +83,7 @@ static void update_row_preserving(List *referencing_chains,
 								  List *referencing_null_preserving,
 								  List *referenced_null_preserving,
 								  List **result_null_preserving);
+static bool join_tree_contains_varno(Node *jtnode, Index varno);
 static void analyze_join_tree(ParseState *pstate, Node *n,
 							  Query *query,
 							  RTEId *rte_id,
@@ -410,6 +411,336 @@ transformAndValidateForeignKeyJoin(ParseState *pstate, JoinExpr *join,
 	fkjn_node->notNullConstraints = notNullConstraints;
 
 	join->fkJoin = (Node *) fkjn_node;
+}
+
+/*
+ * join_tree_contains_varno
+ *		Recursively check if a given varno appears within a join tree node.
+ *
+ * This is used by try_detect_fk_join to determine which side of a JoinExpr
+ * a particular range table entry belongs to, in order to compute the
+ * foreign key direction.
+ */
+static bool
+join_tree_contains_varno(Node *jtnode, Index varno)
+{
+	if (IsA(jtnode, RangeTblRef))
+		return ((RangeTblRef *) jtnode)->rtindex == varno;
+	else if (IsA(jtnode, JoinExpr))
+	{
+		JoinExpr   *j = (JoinExpr *) jtnode;
+
+		return join_tree_contains_varno(j->larg, varno) ||
+			join_tree_contains_varno(j->rarg, varno);
+	}
+	return false;
+}
+
+/*
+ * try_detect_fk_join
+ *		Try to detect if an ON-clause join exactly matches a foreign key
+ *		constraint, and if so, set j->fkJoin accordingly.
+ *
+ * This is called after ON/USING clause transformation for joins that are not
+ * already FOR KEY joins.  If the join quals consist entirely of equality
+ * conditions between two base relations that match a foreign key constraint,
+ * we create a ForeignKeyJoinNode so that the preservation-set machinery in
+ * analyze_join_tree() can handle it.
+ */
+void
+try_detect_fk_join(ParseState *pstate, JoinExpr *j)
+{
+	List	   *qual_list;
+	ListCell   *lc;
+	Index		varno1 = 0;
+	Index		varno2 = 0;
+	List	   *attnums1 = NIL;
+	List	   *attnums2 = NIL;
+	List	   *opnos = NIL;
+	RangeTblEntry *rte1;
+	RangeTblEntry *rte2;
+	Oid			relid1;
+	Oid			relid2;
+	Oid			fkoid;
+	Index		referencing_varno;
+	Index		referenced_varno;
+	List	   *referencing_attnums;
+	List	   *referenced_attnums;
+	ForeignKeyDirection fkdir;
+	ForeignKeyJoinNode *fkjn;
+	Node	   *referencing_arg;
+	List	   *notNullConstraints = NIL;
+
+	/* Already a FOR KEY join, nothing to do */
+	if (j->fkJoin != NULL)
+		return;
+
+	/* No quals means nothing to match */
+	if (j->quals == NULL)
+		return;
+
+	/*
+	 * Flatten the quals into a list of AND'd conditions.  If the top-level
+	 * is a BoolExpr AND, use its args; otherwise treat it as a single-element
+	 * list.
+	 */
+	if (IsA(j->quals, BoolExpr) &&
+		((BoolExpr *) j->quals)->boolop == AND_EXPR)
+		qual_list = ((BoolExpr *) j->quals)->args;
+	else
+		qual_list = list_make1(j->quals);
+
+	/*
+	 * Every qual must be an OpExpr with exactly two Var arguments (after
+	 * stripping implicit coercions).  All Vars must reference exactly two
+	 * distinct varnos.
+	 */
+	foreach(lc, qual_list)
+	{
+		Node	   *qual = (Node *) lfirst(lc);
+		OpExpr	   *op;
+		Node	   *left;
+		Node	   *right;
+		Var		   *lvar;
+		Var		   *rvar;
+
+		if (!IsA(qual, OpExpr))
+			return;
+
+		op = (OpExpr *) qual;
+		if (list_length(op->args) != 2)
+			return;
+
+		left = strip_implicit_coercions((Node *) linitial(op->args));
+		right = strip_implicit_coercions((Node *) lsecond(op->args));
+
+		if (!IsA(left, Var) || !IsA(right, Var))
+			return;
+
+		lvar = (Var *) left;
+		rvar = (Var *) right;
+
+		/* Must be from the current query level */
+		if (lvar->varlevelsup != 0 || rvar->varlevelsup != 0)
+			return;
+
+		/* Establish the two varnos on first qual */
+		if (varno1 == 0)
+		{
+			varno1 = lvar->varno;
+			varno2 = rvar->varno;
+			if (varno1 == varno2)
+				return;			/* self-join conditions don't match FK */
+		}
+
+		/*
+		 * Each qual must reference the same two varnos.  Collect attnums
+		 * in order corresponding to varno1 and varno2.
+		 */
+		if (lvar->varno == varno1 && rvar->varno == varno2)
+		{
+			attnums1 = lappend_int(attnums1, lvar->varattno);
+			attnums2 = lappend_int(attnums2, rvar->varattno);
+		}
+		else if (lvar->varno == varno2 && rvar->varno == varno1)
+		{
+			attnums1 = lappend_int(attnums1, rvar->varattno);
+			attnums2 = lappend_int(attnums2, lvar->varattno);
+		}
+		else
+			return;				/* references a third relation */
+
+		opnos = lappend_oid(opnos, op->opno);
+	}
+
+	/* Need at least one qual */
+	if (varno1 == 0)
+		return;
+
+	/* Both must be plain base relations */
+	rte1 = rt_fetch(varno1, pstate->p_rtable);
+	rte2 = rt_fetch(varno2, pstate->p_rtable);
+
+	if (rte1->rtekind != RTE_RELATION || rte2->rtekind != RTE_RELATION)
+		return;
+
+	relid1 = rte1->relid;
+	relid2 = rte2->relid;
+
+	/*
+	 * Try both directions: varno1 referencing varno2, then varno2
+	 * referencing varno1.
+	 */
+	fkoid = find_foreign_key(relid1, relid2, attnums1, attnums2);
+	if (fkoid != InvalidOid)
+	{
+		referencing_varno = varno1;
+		referenced_varno = varno2;
+		referencing_attnums = attnums1;
+		referenced_attnums = attnums2;
+	}
+	else
+	{
+		fkoid = find_foreign_key(relid2, relid1, attnums2, attnums1);
+		if (fkoid == InvalidOid)
+			return;				/* no FK in either direction */
+
+		referencing_varno = varno2;
+		referenced_varno = varno1;
+		referencing_attnums = attnums2;
+		referenced_attnums = attnums1;
+	}
+
+	/*
+	 * Verify that the operators used in the ON clause match the FK
+	 * constraint's PK=FK equality operators (conpfeqop).
+	 */
+	{
+		HeapTuple	contup;
+		Datum		adatum;
+		bool		isnull;
+		ArrayType  *arr;
+		Oid		   *conpfeqop;
+		int			nkeys;
+		ListCell   *lc_op;
+		ListCell   *lc_ref_att;
+		ListCell   *lc_refd_att;
+
+		contup = SearchSysCache1(CONSTROID, ObjectIdGetDatum(fkoid));
+		if (!HeapTupleIsValid(contup))
+			return;				/* constraint disappeared */
+
+		adatum = SysCacheGetAttr(CONSTROID, contup,
+								 Anum_pg_constraint_conpfeqop, &isnull);
+		if (isnull)
+		{
+			ReleaseSysCache(contup);
+			return;
+		}
+
+		arr = DatumGetArrayTypeP(adatum);
+		nkeys = ARR_DIMS(arr)[0];
+		conpfeqop = (Oid *) ARR_DATA_PTR(arr);
+
+		/*
+		 * For each qual's operator, find which FK column pair it corresponds
+		 * to (by matching attnums) and verify the operator matches.
+		 */
+		{
+			Form_pg_constraint con = (Form_pg_constraint) GETSTRUCT(contup);
+			Datum		conkey_datum;
+			Datum		confkey_datum;
+			bool		conkey_isnull;
+			bool		confkey_isnull;
+			int16	   *conkey;
+			int16	   *confkey;
+
+			conkey_datum = SysCacheGetAttr(CONSTROID, contup,
+										   Anum_pg_constraint_conkey, &conkey_isnull);
+			confkey_datum = SysCacheGetAttr(CONSTROID, contup,
+											Anum_pg_constraint_confkey, &confkey_isnull);
+			if (conkey_isnull || confkey_isnull)
+			{
+				ReleaseSysCache(contup);
+				return;
+			}
+
+			conkey = (int16 *) ARR_DATA_PTR(DatumGetArrayTypeP(conkey_datum));
+			confkey = (int16 *) ARR_DATA_PTR(DatumGetArrayTypeP(confkey_datum));
+
+			forthree(lc_op, opnos, lc_ref_att, referencing_attnums,
+					 lc_refd_att, referenced_attnums)
+			{
+				Oid			opno = lfirst_oid(lc_op);
+				int			ref_att = lfirst_int(lc_ref_att);
+				int			refd_att = lfirst_int(lc_refd_att);
+				bool		matched = false;
+
+				for (int i = 0; i < nkeys; i++)
+				{
+					if (conkey[i] == ref_att && confkey[i] == refd_att)
+					{
+						if (opno == conpfeqop[i])
+							matched = true;
+						break;
+					}
+				}
+
+				if (!matched)
+				{
+					ReleaseSysCache(contup);
+					return;
+				}
+			}
+		}
+
+		ReleaseSysCache(contup);
+	}
+
+	/*
+	 * Determine FK direction based on which side the referencing relation
+	 * is on.
+	 */
+	if (join_tree_contains_varno(j->larg, referencing_varno))
+	{
+		fkdir = FKDIR_FROM;
+		referencing_arg = j->larg;
+	}
+	else
+	{
+		fkdir = FKDIR_TO;
+		referencing_arg = j->rarg;
+	}
+
+	/*
+	 * Collect NOT NULL constraint OIDs when the referencing side is on the
+	 * inner (non-preserved) side of the join.
+	 */
+	{
+		bool		need_not_null_deps = false;
+		Oid			referencing_relid;
+
+		if (referencing_varno == varno1)
+			referencing_relid = relid1;
+		else
+			referencing_relid = relid2;
+
+		switch (j->jointype)
+		{
+			case JOIN_INNER:
+				need_not_null_deps = true;
+				break;
+			case JOIN_LEFT:
+				need_not_null_deps = (referencing_arg == j->rarg);
+				break;
+			case JOIN_RIGHT:
+				need_not_null_deps = (referencing_arg == j->larg);
+				break;
+			case JOIN_FULL:
+				break;
+			default:
+				break;
+		}
+
+		if (need_not_null_deps)
+		{
+			(void) is_referencing_cols_not_null(referencing_relid,
+											   referencing_attnums,
+											   &notNullConstraints);
+		}
+	}
+
+	/* Build and attach the ForeignKeyJoinNode */
+	fkjn = makeNode(ForeignKeyJoinNode);
+	fkjn->fkdir = fkdir;
+	fkjn->referencingVarno = referencing_varno;
+	fkjn->referencingAttnums = referencing_attnums;
+	fkjn->referencedVarno = referenced_varno;
+	fkjn->referencedAttnums = referenced_attnums;
+	fkjn->constraint = fkoid;
+	fkjn->notNullConstraints = notNullConstraints;
+
+	j->fkJoin = (Node *) fkjn;
 }
 
 static void

@@ -1152,6 +1152,279 @@ FROM
 ) AS q JOIN packages FOR KEY (shipment_id) -> q (shipment_id);
 
 --
+-- Test auto-detection of FK-equivalent ON-joins
+--
+-- When a derived table (subquery/view/CTE) used as the referenced side of a
+-- FOR KEY join contains regular ON-joins that match foreign key constraints,
+-- those ON-joins are automatically detected and treated as FK joins.
+--
+
+-- Create tables for single-column auto-detection tests
+CREATE TABLE fk_auto_pk (id int PRIMARY KEY);
+CREATE TABLE fk_auto_mid (
+    id int PRIMARY KEY,
+    pk_id int NOT NULL REFERENCES fk_auto_pk(id)
+);
+CREATE TABLE fk_auto_fk (
+    id int PRIMARY KEY,
+    mid_id int NOT NULL REFERENCES fk_auto_mid(id)
+);
+
+INSERT INTO fk_auto_pk VALUES (1), (2), (3);
+INSERT INTO fk_auto_mid VALUES (10, 1), (20, 2);
+INSERT INTO fk_auto_fk VALUES (100, 10), (200, 20);
+
+-- Basic: single-column FK-equivalent ON-join in referenced subquery
+-- fk_auto_mid.pk_id -> fk_auto_pk.id is the FK being matched
+SELECT *
+FROM
+(
+    SELECT fk_auto_mid.id, fk_auto_mid.pk_id
+    FROM fk_auto_mid JOIN fk_auto_pk ON fk_auto_mid.pk_id = fk_auto_pk.id
+) AS sub
+JOIN fk_auto_fk FOR KEY (mid_id) -> sub (id);
+
+-- Same query with explicit FOR KEY for comparison
+SELECT *
+FROM
+(
+    SELECT fk_auto_mid.id, fk_auto_mid.pk_id
+    FROM fk_auto_mid JOIN fk_auto_pk FOR KEY (id) <- fk_auto_mid (pk_id)
+) AS sub
+JOIN fk_auto_fk FOR KEY (mid_id) -> sub (id);
+
+-- Reversed argument order in ON clause should also be detected
+SELECT *
+FROM
+(
+    SELECT fk_auto_mid.id, fk_auto_mid.pk_id
+    FROM fk_auto_mid JOIN fk_auto_pk ON fk_auto_pk.id = fk_auto_mid.pk_id
+) AS sub
+JOIN fk_auto_fk FOR KEY (mid_id) -> sub (id);
+
+-- Composite FK-equivalent ON-join in referenced subquery
+-- t5(c11,c12) -> t1(c1,c2) is the FK being matched
+SELECT
+    q1.c11,
+    q1.c12,
+    t6.c13,
+    t6.c14
+FROM
+(
+    SELECT
+        t5.c9,
+        t5.c10,
+        t5.c11,
+        t5.c12
+    FROM t5
+    JOIN t1 ON t5.c11 = t1.c1 AND t5.c12 = t1.c2
+) AS q1
+JOIN t6 FOR KEY (c13, c14) -> q1 (c9, c10);
+
+-- Same with explicit FOR KEY for comparison
+SELECT
+    q1.c11,
+    q1.c12,
+    t6.c13,
+    t6.c14
+FROM
+(
+    SELECT
+        t5.c9,
+        t5.c10,
+        t5.c11,
+        t5.c12
+    FROM t5
+    JOIN t1 FOR KEY (c1, c2) <- t5 (c11, c12)
+) AS q1
+JOIN t6 FOR KEY (c13, c14) -> q1 (c9, c10);
+
+-- Multiple auto-detected ON-joins in referenced subquery
+SELECT
+    q1.c11,
+    q1.c12,
+    t6.c13,
+    t6.c14
+FROM
+(
+    SELECT
+        t5.c9,
+        t5.c10,
+        t5.c11,
+        t5.c12
+    FROM t5
+    JOIN t1 ON t5.c11 = t1.c1 AND t5.c12 = t1.c2
+    JOIN t1 AS t1_2 ON t5.c11 = t1_2.c1 AND t5.c12 = t1_2.c2
+    JOIN t1 AS t1_3 ON t5.c11 = t1_3.c1 AND t5.c12 = t1_3.c2
+) AS q1
+JOIN t6 FOR KEY (c13, c14) -> q1 (c9, c10);
+
+-- Mixed: some FOR KEY, some auto-detected ON-join
+SELECT
+    q1.c11,
+    q1.c12,
+    t6.c13,
+    t6.c14
+FROM
+(
+    SELECT
+        t5.c9,
+        t5.c10,
+        t5.c11,
+        t5.c12
+    FROM t5
+    JOIN t1 ON t5.c11 = t1.c1 AND t5.c12 = t1.c2
+    JOIN t1 AS t1_2 FOR KEY (c1, c2) <- t5 (c11, c12)
+) AS q1
+JOIN t6 FOR KEY (c13, c14) -> q1 (c9, c10);
+
+-- CTE with auto-detected ON-join
+WITH q1 AS
+(
+    SELECT
+        t5.c9,
+        t5.c10,
+        t5.c11,
+        t5.c12
+    FROM t5
+    JOIN t1 ON t5.c11 = t1.c1 AND t5.c12 = t1.c2
+)
+SELECT
+    q1.c11,
+    q1.c12,
+    t6.c13,
+    t6.c14
+FROM q1
+JOIN t6 FOR KEY (c13, c14) -> q1 (c9, c10);
+
+-- View with auto-detected ON-join
+CREATE VIEW v_autodetect AS
+SELECT
+    t5.c9,
+    t5.c10,
+    t5.c11,
+    t5.c12
+FROM t5
+JOIN t1 ON t5.c11 = t1.c1 AND t5.c12 = t1.c2;
+
+SELECT
+    v_autodetect.c11,
+    v_autodetect.c12,
+    t6.c13,
+    t6.c14
+FROM v_autodetect
+JOIN t6 FOR KEY (c13, c14) -> v_autodetect (c9, c10);
+
+DROP VIEW v_autodetect;
+
+-- LEFT JOIN with auto-detected ON-join in referenced subquery
+-- orders.shipment_id -> shipments.id is the FK being matched
+SELECT
+    packages.id AS package_id,
+    q.order_id,
+    q.shipment_id
+FROM
+(
+    SELECT
+        shipments.id AS shipment_id,
+        orders.id AS order_id
+    FROM shipments
+    LEFT JOIN orders ON orders.shipment_id = shipments.id
+) AS q JOIN packages FOR KEY (shipment_id) -> q (shipment_id);
+
+-- Same with explicit FOR KEY for comparison
+SELECT
+    packages.id AS package_id,
+    q.order_id,
+    q.shipment_id
+FROM
+(
+    SELECT
+        shipments.id AS shipment_id,
+        orders.id AS order_id
+    FROM shipments
+    LEFT JOIN orders FOR KEY (shipment_id) -> shipments (id)
+) AS q JOIN packages FOR KEY (shipment_id) -> q (shipment_id);
+
+-- Nested: auto-detected ON-join alongside FOR KEY join
+SELECT *
+FROM fk_auto_pk
+JOIN
+(
+    fk_auto_mid JOIN fk_auto_pk AS pk2 ON fk_auto_mid.pk_id = pk2.id
+    JOIN fk_auto_fk FOR KEY (mid_id) -> fk_auto_mid (id)
+)
+FOR KEY (pk_id) -> fk_auto_pk (id);
+
+-- Same with explicit FOR KEY for comparison
+SELECT *
+FROM fk_auto_pk
+JOIN
+(
+    fk_auto_mid JOIN fk_auto_pk AS pk2 FOR KEY (id) <- fk_auto_mid (pk_id)
+    JOIN fk_auto_fk FOR KEY (mid_id) -> fk_auto_mid (id)
+)
+FOR KEY (pk_id) -> fk_auto_pk (id);
+
+DROP TABLE fk_auto_fk, fk_auto_mid, fk_auto_pk;
+
+-- Negative: non-FK ON-join in referenced subquery should error
+-- t5(c9,c10) does NOT have an FK to t1(c1,c2)
+SELECT
+    q1.c11,
+    q1.c12,
+    t6.c13,
+    t6.c14
+FROM
+(
+    SELECT
+        t5.c9,
+        t5.c10,
+        t5.c11,
+        t5.c12
+    FROM t5
+    JOIN t1 ON t5.c9 = t1.c1 AND t5.c10 = t1.c2
+) AS q1
+JOIN t6 FOR KEY (c13, c14) -> q1 (c9, c10); -- error
+
+-- Negative: partial FK match (only one column of a composite FK)
+SELECT
+    q1.c11,
+    q1.c12,
+    t6.c13,
+    t6.c14
+FROM
+(
+    SELECT
+        t5.c9,
+        t5.c10,
+        t5.c11,
+        t5.c12
+    FROM t5
+    JOIN t1 ON t5.c11 = t1.c1
+) AS q1
+JOIN t6 FOR KEY (c13, c14) -> q1 (c9, c10); -- error
+
+-- Negative: ON-join with extra non-equality conditions should not be
+-- auto-detected (quals contain non-OpExpr)
+SELECT
+    q1.c11,
+    q1.c12,
+    t6.c13,
+    t6.c14
+FROM
+(
+    SELECT
+        t5.c9,
+        t5.c10,
+        t5.c11,
+        t5.c12
+    FROM t5
+    JOIN t1 ON t5.c11 = t1.c1 AND t5.c12 = t1.c2 AND t5.c9 > 0
+) AS q1
+JOIN t6 FOR KEY (c13, c14) -> q1 (c9, c10); -- error
+
+--
 -- TODO: RLS policy equivalence check
 -- Long-term ambition: If both the referencing and referenced sides of a
 -- foreign key join have equivalent RLS policies, any filtering due to RLS

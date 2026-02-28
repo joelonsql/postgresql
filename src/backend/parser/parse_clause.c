@@ -1425,6 +1425,14 @@ transformFromClauseItem(ParseState *pstate, Node *n,
 		}
 
 		/*
+		 * Try to detect if this join matches a foreign key constraint.
+		 * This allows FOR KEY joins on derived tables containing
+		 * FK-equivalent ON-joins to work automatically.
+		 */
+		if (j->fkJoin == NULL && j->quals != NULL)
+			try_detect_fk_join(pstate, j);
+
+		/*
 		 * If this is an outer join, now mark the appropriate child RTEs as
 		 * being nulled by this join.  We have finished processing the child
 		 * join expressions as well as the current join's quals, which deal in
