@@ -4426,8 +4426,8 @@ estimate_hash_bucket_stats(PlannerInfo *root, Node *hashkey, double nbuckets,
 			 * If there are no recorded MCVs, but we do have a histogram, then
 			 * assume that ANALYZE determined that the column is unique.
 			 */
-			if (vardata.rel && vardata.rel->rows > 0)
-				*mcv_freq = 1.0 / vardata.rel->rows;
+			if (vardata.rel && vardata.rel->tuples > 0)
+				*mcv_freq = 1.0 / vardata.rel->tuples;
 		}
 	}
 
@@ -4456,9 +4456,6 @@ estimate_hash_bucket_stats(PlannerInfo *root, Node *hashkey, double nbuckets,
 	else
 		stanullfrac = 0.0;
 
-	/* Compute avg freq of all distinct data values in raw relation */
-	avgfreq = (1.0 - stanullfrac) / ndistinct;
-
 	/*
 	 * Adjust ndistinct to account for restriction clauses.  Observe we are
 	 * assuming that the data distribution is affected uniformly by the
@@ -4472,6 +4469,16 @@ estimate_hash_bucket_stats(PlannerInfo *root, Node *hashkey, double nbuckets,
 		ndistinct *= vardata.rel->rows / vardata.rel->tuples;
 		ndistinct = clamp_row_est(ndistinct);
 	}
+
+	/*
+	 * Compute avg freq of all distinct data values in the restricted
+	 * relation.  It's important to do this after the ndistinct adjustment,
+	 * so that avgfreq is in the same frame of reference as the bucket-size
+	 * base estimate (1/ndistinct).  The skew adjustment below compares
+	 * mcv_freq to avgfreq, and that ratio is only meaningful when both
+	 * values reflect the restricted relation.
+	 */
+	avgfreq = (1.0 - stanullfrac) / ndistinct;
 
 	/*
 	 * Initial estimate of bucketsize fraction is 1/nbuckets as long as the
