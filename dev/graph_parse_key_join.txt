@@ -1,0 +1,145 @@
+We are using the local call graph for structural analysis of:
+
+  src/backend/parser/parse_key_join.c
+
+Use the existing local graph generator script:
+
+  ./dev/generate_parse_key_join_dot.py
+
+That script owns function discovery, cscope-based edge extraction,
+helper-leaf filtering, cycle detection, and DOT generation for this file.
+Do not derive graph facts from `Called by:` comments, and do not manually
+maintain the DOT when the script can regenerate it.
+
+After generating the DOT, render visual artifacts with Graphviz:
+
+  dot -Tpng dev/parse_key_join_graph.dot -o dev/parse_key_join_graph.png
+
+Primary artifacts:
+
+  dev/parse_key_join_graph.dot
+  dev/parse_key_join_graph.png
+
+Goal:
+Use graph algorithms to identify structural problems in
+`parse_key_join.c`, then use source review to decide whether a
+behavior-preserving readability improvement exists.  The graph is an
+analysis aid, not the source of truth for semantics.  A useful change is one
+that makes responsibilities and phase boundaries clearer for a human reader.
+
+Core Principles:
+- Read the source before making structural changes.
+- Use the PNG as a visual confirmation tool, not as the primary signal.
+- Prefer changes that remove phase-mixing edges or shrink meaningful strongly
+  connected components.
+- Do not refactor just to improve a metric.
+- Do not add a helper merely to make the picture look different.
+- Do not break out code into a helper with just a single call site.
+- AVOID meaningless helpers.  A one-call helper that merely hides a local
+  block usually increases cognitive load by adding indirection.
+- Preserve PostgreSQL coding style and existing behavior.
+- A graph improvement is useful only when it corresponds to clearer source
+  responsibilities.
+
+Graph Algorithm Workflow:
+1. Regenerate the graph:
+
+     ./dev/generate_parse_key_join_dot.py
+
+2. Render the graph:
+
+     dot -Tpng dev/parse_key_join_graph.dot -o dev/parse_key_join_graph.png
+
+3. Treat `dev/parse_key_join_graph.dot` as data.  Use a script or graph
+   library such as Python/NetworkX, or a small local parser if NetworkX is not
+   available.  Compute at least:
+   - visible function count, edge count, hidden helper count, and cycle count;
+   - strongly connected components (SCCs), especially non-trivial SCCs;
+   - self-recursive functions separately from multi-node SCCs;
+   - edges internal to each non-trivial SCC;
+   - SCC condensation graph edges into and out of each non-trivial SCC;
+   - in-degree, out-degree, and total degree;
+   - betweenness centrality or an equivalent bridge-node ranking.
+
+4. Pick candidates from algorithmic signals, not from visual clutter alone:
+   - Functions that are inside a non-trivial SCC only because they mix phases.
+   - Edges that pull catalog collection into query projection, query
+     revalidation into live parse analysis, or broad dispatch into leaf work.
+   - High-betweenness nodes whose source code truly coordinates unrelated
+     phases.
+   - Condensation edges that reveal a phase boundary hidden inside one
+     function.
+
+5. Reject weak graph-only candidates:
+   - A change that adds a visible helper node but leaves edge count, cycle
+     count, and SCC membership essentially unchanged.
+   - A change that merely routes the same cycle through a new bridge helper.
+   - A change that improves layout but makes the source harder to read.
+   - A change to inherent recursive tree-walking or demand-driven fact
+     recursion unless the source responsibility is also clearer.
+
+6. Read the relevant source code:
+   - For each candidate SCC or high-betweenness function, inspect the
+     functions on the relevant cycle or condensation edge.
+   - Determine whether the cycle is inherent to recursive query structure or
+     caused by avoidable phase mixing.
+   - Identify the state and invariants crossing the edges, especially
+     `KeyJoinFactContext`, `keyJoinFactsComputed`, and `keyJoinFacts`.
+   - State the semantic phase boundary in source terms before editing.
+
+7. Choose one iteration only if the improvement is high confidence:
+   - The change should be behavior-preserving.
+   - The code should read better after the change.
+   - The expected graph delta should be explicit before editing, for example:
+     removing a function from the main SCC, reducing SCC size, reducing
+     cycle-closing edges, or reducing edges without adding a bridge node.
+   - Prefer moving existing responsibility to the phase that already owns it
+     over introducing a new abstraction.
+
+8. Verify after any code change:
+
+     ./dev/rebuild.sh test
+     ./dev/generate_parse_key_join_dot.py
+     dot -Tpng dev/parse_key_join_graph.dot -o dev/parse_key_join_graph.png
+     git diff --check
+
+9. Compare before and after:
+   - behavior and expected outputs must not change unless explicitly intended;
+   - graph changes should match the stated structural goal;
+   - SCC membership and cycle-closing edges should improve or remain
+     explainably unchanged;
+   - readability should improve without introducing meaningless indirection.
+
+10. Commit the fixed case:
+   - After the case has been fixed and verified, create a git commit for just
+     that case.
+   - Use `git commit --no-gpg-sign` because the human may not be physically
+     present to approve a signing prompt.
+   - Use a PostgreSQL style commit message: concise subject, explanatory body,
+     no marketing language, and clear reasoning for why the change is correct.
+   - Limit every line of the commit message, including the subject, to at most
+     72 characters.
+   - Include the graph signal, source-level reasoning, and verification run.
+
+11. Start over.
+
+Stopping Condition:
+Stop when the graph algorithms and source review no longer reveal a
+high-confidence structural improvement that is both behavior-preserving and
+readability-positive.  Do not keep refactoring just to reduce edge counts.
+
+For each iteration, report:
+- the graph algorithm signals used;
+- the SCC, hub, or condensation edge being analyzed;
+- what the DOT shows precisely before and after;
+- what the PNG confirms visually;
+- whether the cycle is inherent or avoidable;
+- the proposed code-structure change;
+- why it improves human readability;
+- why it is not just a helper extraction or graph-layout trick;
+- what verification was run.
+
+Important:
+This workflow is about making `parse_key_join.c` easier for a human reader to
+understand.  A cleaner graph is useful only when it corresponds to clearer
+responsibilities and clearer phase boundaries in the source code.

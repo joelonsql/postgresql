@@ -48,6 +48,7 @@
 #include "catalog/pg_type.h"
 #include "commands/defrem.h"
 #include "commands/extension.h"
+#include "commands/keyjoin.h"
 #include "commands/proclang.h"
 #include "executor/executor.h"
 #include "executor/functions.h"
@@ -62,6 +63,7 @@
 #include "parser/parse_func.h"
 #include "parser/parse_type.h"
 #include "pgstat.h"
+#include "storage/lmgr.h"
 #include "tcop/pquery.h"
 #include "tcop/utility.h"
 #include "utils/acl.h"
@@ -1386,6 +1388,15 @@ AlterFunction(ParseState *pstate, AlterFunctionStmt *stmt)
 
 	ObjectAddressSet(address, ProcedureRelationId, funcOid);
 
+	/*
+	 * Key-join proof can depend on this function's volatility, strictness,
+	 * and body.  Serialize ALTER FUNCTION with CREATE VIEW analysis that may
+	 * be capturing such a proof, so the later command either sees and
+	 * revalidates the new dependent object or validates against the new
+	 * function definition.
+	 */
+	LockDatabaseObject(ProcedureRelationId, funcOid, 0, AccessExclusiveLock);
+
 	tup = SearchSysCacheCopy1(PROCOID, ObjectIdGetDatum(funcOid));
 	if (!HeapTupleIsValid(tup)) /* should not happen */
 		elog(ERROR, "cache lookup failed for function %u", funcOid);
@@ -1530,6 +1541,16 @@ AlterFunction(ParseState *pstate, AlterFunctionStmt *stmt)
 
 	table_close(rel, NoLock);
 	heap_freetuple(tup);
+
+	/*
+	 * Revalidate stored key-join proofs that captured this function in a
+	 * matched-filter conjunct.  The proof's contain_volatile_functions check
+	 * was decided at parse time; a later VOLATILE / STRICT / body change can
+	 * break the matched-filter contract, so re-run validation and abort this
+	 * DDL if the proof no longer holds.
+	 */
+	CommandCounterIncrement();
+	RevalidateDependentKeyJoinObjectsOnProcedure(funcOid);
 
 	return address;
 }

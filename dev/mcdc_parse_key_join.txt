@@ -1,0 +1,215 @@
+We are doing recursive, coverage-driven MC/DC cleanup for:
+
+  src/backend/parser/parse_key_join.c
+  src/backend/commands/keyjoincmds.c
+  changed lines in the other target sources since master
+
+Use the existing local MC/DC driver script:
+
+  ./dev/mcdc_parse_key_join.sh run
+
+That script owns the MC/DC build, focused tests, profile capture, and report
+generation for these target sources. Do not replace it or fold its behavior into
+rebuild.sh. If the script needs a small fix, keep it focused and preserve its
+role as the isolated MC/DC workflow.
+
+The generated reports are normally under:
+
+  /Users/joel/build-postgresql-mcdc/mcdc-report/
+
+In particular, inspect:
+
+  /Users/joel/build-postgresql-mcdc/mcdc-report/parse_key_join_mcdc_detail.txt
+  /Users/joel/build-postgresql-mcdc/mcdc-report/parse_key_join_mcdc_summary.txt
+  /Users/joel/build-postgresql-mcdc/mcdc-report/html/index.html
+  /Users/joel/build-postgresql-mcdc/mcdc-report/html/coverage/Users/joel/src/postgresql/src/backend/parser/parse_key_join.c.html
+  /Users/joel/build-postgresql-mcdc/mcdc-report/html/coverage/Users/joel/src/postgresql/src/backend/commands/keyjoincmds.c.html
+
+For full-file HTML issue queues, prefer the local helper:
+
+  ./dev/mcdc_next_issue.js
+
+It loads the generated source HTML reports for `parse_key_join.c` and
+`keyjoincmds.c`, then evaluates llvm-cov's generated `next_line()`,
+`next_region()`, and `next_branch()` JavaScript from `control.js` against a
+minimal DOM model.  Command-line coverage triage therefore matches the
+report's visible navigation links for both full-file targets.
+
+For the remaining generated source reports, prefer the changed-line helper:
+
+  ./dev/mcdc_next_changed_issue.js
+
+It scans the generated HTML reports outside the full-file targets, filters
+uncovered line, region, and branch targets to lines changed by
+`BASE_REF...HEAD`, and defaults `BASE_REF` to `master`.  Use the no-argument
+invocations during the recursive workflow.  If a non-default report path is
+used, regenerate it into the standard MC/DC report location instead of passing
+command-line arguments to either helper.
+
+Goal:
+Reach 100% MC/DC coverage and resolve all visible uncovered HTML issue targets
+for `parse_key_join.c` and `keyjoincmds.c`, plus visible uncovered HTML issue
+targets on changed lines in the other target sources.  Do it one decision or
+issue at a time. Do not try to reason about all uncovered expressions or
+issues at once.
+
+Core Principles:
+- Treat MC/DC as a tool for both better tests and simpler code.
+- Treat the HTML report's next visible uncovered line, region, or branch target
+  as a first-class coverage queue, not just the MC/DC text report. It catches
+  simple source issues that may not show up as interesting MC/DC obligations.
+- Prefer real tests for real behavioral branches.
+- Prefer code simplification and PostgreSQL-style `Assert(...)` for branches
+  that are unreachable due to prior guards, parser rules, catalog invariants,
+  stored-tree invariants, or call-path constraints.
+- Do not add synthetic fault injection, coverage-only hooks, or coverage-only
+  `#ifdef`s unless explicitly approved.
+- Use `#ifdef USE_ASSERT_CHECKING` only for assert-only locals or assert-only
+  expensive checks when appropriate.
+- Do not chase coverage by preserving impossible runtime branches.
+
+Recursive Workflow:
+1. Run the current focused report with:
+
+     ./dev/mcdc_parse_key_join.sh run
+
+   If the code has not changed and only report inspection is needed, it is OK
+   to use:
+
+     ./dev/mcdc_parse_key_join.sh report
+
+2. Inspect the detailed MC/DC report for the next relevant decision expression
+   whose report says:
+
+     MC/DC Coverage for Expression: < 100.00%
+
+   Relevant MC/DC expressions are all expressions in `parse_key_join.c` and
+   `keyjoincmds.c`, plus expressions whose source line is changed since
+   `master` in the other target sources.
+
+   Also ask the full-file HTML reports for their next visible uncovered issue:
+
+     ./dev/mcdc_next_issue.js
+
+   Ask the changed-line HTML reports for their next visible uncovered issue:
+
+     ./dev/mcdc_next_changed_issue.js
+
+   This invokes the same generated JavaScript used by the UI controls:
+
+     next uncovered line (L)
+     next uncovered region (R)
+     next uncovered branch (B)
+
+   HTML issue targets can be uncovered source lines, uncovered regions, or
+   uncovered branch directions. A branch expansion looks like:
+
+     Branch (1490:10): [True: 236, False: 0]
+
+   Treat a zero-count True or False direction as an uncovered branch direction
+   that needs the same real-test-versus-invariant analysis as an MC/DC miss.
+   Work on only one target in this iteration: either the next uncovered MC/DC
+   expression, the next full-file HTML issue, or the next changed-line HTML
+   issue. Prefer the target that is first in source order unless there is a
+   clear reason to finish a related nearby MC/DC expression and HTML issue
+   together.
+
+3. For that expression or issue, identify:
+   - the source lines and function,
+   - the full boolean expression or simple branch condition,
+   - for MC/DC targets: each condition, the executed test vectors, and which
+     condition pairs are not covered,
+   - for HTML issue targets: whether it is a line, region, or branch; for
+     branches, which direction is uncovered and what input, catalog state,
+     parser state, or call path would have to make it execute.
+
+4. Reason about this expression or issue in isolation:
+   - Is each missing condition or branch direction a real runtime behavior
+     that should be testable?
+   - Or is it impossible because of an earlier guard, parser rule, catalog
+     invariant, stored parse tree invariant, or call-path constraint?
+   - What is the exact proof either way?
+
+5. Make a small plan for only this expression or issue:
+   - If it is real behavior: add or adjust focused regression tests that
+     naturally exercise the missing independent condition pair or uncovered
+     branch direction.
+   - If it is unreachable defensive code: simplify the code by replacing the
+     impossible branch with `Assert(...)`, factoring the condition, splitting a
+     compound decision, or moving validation to the earlier guard where it
+     belongs.
+   - If the expression is too broad: refactor it into clearer smaller decisions
+     only when that improves the code.
+   - Avoid unrelated refactoring.
+
+6. Execute the plan:
+   - Edit the smallest necessary set of files.
+   - Preserve PostgreSQL coding style.
+   - Do not revert unrelated local changes.
+   - Keep MC/DC-specific tests separate from normal regression schedules unless
+     explicitly asked otherwise.
+
+7. Verify:
+   - Run:
+
+       ./dev/mcdc_parse_key_join.sh run
+
+   - Confirm that the targeted expression is now either:
+     - 100% MC/DC covered, or
+     - no longer an MC/DC obligation because the impossible branch was
+       removed/asserted.
+   - For an HTML issue target, confirm that the exact line, region, or branch
+     direction is now either covered in the per-source HTML report, or no
+     longer appears as an uncovered issue because the impossible code was
+     removed/asserted.
+   - Run any additional relevant regression tests if the change affects normal
+     behavior.
+   - Run basic sanity checks such as syntax checks and `git diff --check`.
+
+8. Commit the fixed case:
+   - After each expression has been fixed and verified, create a git commit
+     for just that case.
+   - Use `git commit --no-gpg-sign` because the human may not be physically
+     present to approve a signing prompt.
+   - Use a PostgreSQL style commit message: concise subject,
+     explanatory body, no marketing language, and clear reasoning for why the
+     change is correct.
+   - Limit every line of the commit message, including the subject, to at most
+     72 characters.
+   - Include the reasoning in the commit message: whether the expression was
+     real behavior needing tests, or unreachable defensive code turned into an
+     invariant, and what verification was run.
+
+9. Start over:
+   - Inspect the updated detailed report again.
+   - Find the next `MC/DC Coverage for Expression` below 100%.
+   - Inspect the full-file HTML queues again with
+     `./dev/mcdc_next_issue.js`.
+   - Inspect the changed-line HTML queues again with
+     `./dev/mcdc_next_changed_issue.js`.
+   - Repeat steps 3-9.
+
+Stopping Condition:
+Stop only when the reports for `src/backend/parser/parse_key_join.c` and
+`src/backend/commands/keyjoincmds.c` have no remaining `MC/DC Coverage for
+Expression` entries below 100%, the full-file HTML queue has no remaining
+visible uncovered line, region, or branch target for those files, and the
+changed-line HTML queue has no remaining visible uncovered target for the other
+target sources, or when blocked by a case that requires explicit human design
+input.
+
+For each iteration, report:
+- the expression or issue being handled,
+- why it is real behavior or an invariant,
+- what changed,
+- what verification was run,
+- what the next uncovered MC/DC expression is, if any,
+- what the next full-file HTML issue target is, if any,
+- what the next changed-line HTML issue target is, if any.
+
+Important:
+The success criterion is 100% MC/DC coverage and no remaining uncovered branch
+directions, source lines, or visible regions for `parse_key_join.c` and
+`keyjoincmds.c`, plus no changed-line HTML misses in the other target sources,
+achieved through a sequence of small, justified changes. The path to 100%
+should improve the code, not make it more artificial.

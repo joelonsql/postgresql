@@ -1,0 +1,144 @@
+We are doing recursive, coverage-driven cleanup for:
+
+  src/backend/parser/parse_key_join.c
+
+Use the normal PostgreSQL coverage workflow through the local rebuild script:
+
+  ./dev/rebuild.sh coverage-html
+
+That command owns the normal coverage build, focused setup/regress test run,
+and HTML report generation.  Do not fold this workflow into
+dev/mcdc_parse_key_join.sh.  The MC/DC script remains the isolated MC/DC
+workflow.
+
+The generated normal coverage report is under:
+
+  /Users/joel/build-postgresql-coverage/meson-logs/coveragereport/
+
+Find the current file with:
+
+  ls /Users/joel/build-postgresql-coverage/meson-logs/coveragereport/index.parse_key_join.c.*.html
+
+Goal:
+Eliminate uncovered real behavior in `parse_key_join.c`, one case at a time.
+Use the normal HTML coverage report as the guide, but do not chase coverage
+noise from PostgreSQL infrastructure macros.
+
+Core Principles:
+- Treat uncovered lines and branches as prompts for better tests or simpler
+  code.
+- Prefer real tests for real parser, catalog, dependency, and stored-tree
+  behavior.
+- Prefer code simplification and PostgreSQL-style `Assert(...)` for branches
+  that are unreachable due to prior guards, parser rules, catalog invariants,
+  stored-tree invariants, or call-path constraints.
+- Do not add synthetic fault injection, coverage-only hooks, or coverage-only
+  `#ifdef`s unless explicitly approved.
+- Do not chase coverage by preserving impossible runtime branches.
+- Do not treat every `partialCoveredLine` as a required fix.  Lines containing
+  `ereport(...)`, `Assert(...)`, `foreach_*`, `forboth`, `list_*`, or other
+  PostgreSQL macros often expand into hidden branches.  Fix partial coverage
+  only when the missing branch corresponds to a real source-level behavior.
+
+Recursive Workflow:
+1. Run the current normal coverage report with:
+
+     ./dev/rebuild.sh coverage-html
+
+2. Open the current `parse_key_join.c` HTML coverage report.
+
+3. Find the next uncovered case, working in this order:
+   - first `uncoveredLine` in `parse_key_join.c`,
+   - then real source-level branch coverage gaps shown in the line's branch
+     details,
+   - then partial lines only when the partial state maps to real behavior in
+     `parse_key_join.c`, not macro expansion noise.
+
+   Work on only one case in this iteration.
+
+4. For that case, identify:
+   - the source lines and function,
+   - the surrounding control flow,
+   - whether the uncovered code is an error path, success path, defensive
+     invariant, or stored-tree revalidation path,
+   - any HTML branch details such as `0/2`, `1/2`, or `2/4`,
+   - whether the missing coverage is real source behavior or macro noise.
+
+5. Reason about this case in isolation:
+   - Is it real runtime behavior that should be testable?
+   - Or is it impossible because of an earlier guard, parser rule, catalog
+     invariant, stored parse tree invariant, or call-path constraint?
+   - If it is a partial macro line, does the missing branch correspond to a
+     source-level branch we own, or only to macro expansion?
+   - What is the exact proof either way?
+
+6. Make a small plan for only this case:
+   - If it is real behavior: add or adjust focused regression tests that
+     naturally exercise it.
+   - If it is unreachable defensive code: simplify the code by replacing the
+     impossible branch with `Assert(...)`, factoring the condition, splitting a
+     compound decision, or moving validation to the earlier guard where it
+     belongs.
+   - If the uncovered region is too broad: refactor it into clearer smaller
+     decisions only when that improves the code.
+   - Avoid unrelated refactoring.
+
+7. Execute the plan:
+   - Edit the smallest necessary set of files.
+   - Preserve PostgreSQL coding style.
+   - Do not revert unrelated local changes.
+   - Keep coverage-specific tests separate from normal regression schedules
+     unless explicitly asked otherwise.
+
+8. Verify:
+   - Run:
+
+       ./dev/rebuild.sh coverage-html
+
+   - Confirm that the targeted uncovered case is now either:
+     - covered,
+     - no longer present because impossible code was removed/asserted, or
+     - explicitly classified as macro-generated partial coverage noise.
+   - Run any additional relevant regression tests if the change affects normal
+     behavior.
+   - Run basic sanity checks such as syntax checks and `git diff --check`.
+
+9. Commit the fixed case:
+   - After each real uncovered case has been fixed and verified, create a git
+     commit for just that case.
+   - Use `git commit --no-gpg-sign` because the human may not be physically
+     present to approve a signing prompt.
+   - Use a PostgreSQL style commit message: concise subject, explanatory body,
+     no marketing language, and clear reasoning for why the change is correct.
+   - Limit every line of the commit message, including the subject, to at most
+     72 characters.
+   - Include the reasoning in the commit message: whether the case was real
+     behavior needing tests, or unreachable defensive code turned into an
+     invariant, and what verification was run.
+
+10. Start over:
+   - Inspect the updated HTML report again.
+   - Find the next uncovered case.
+   - Repeat steps 3-10.
+
+Stopping Condition:
+Stop only when `parse_key_join.c` has no remaining uncovered source-level
+cases in the normal coverage report, or when blocked by a case that requires
+explicit human design input.
+
+Partial coverage from macro expansion does not by itself block the stopping
+condition.  If only macro-generated partial lines remain, report that clearly
+with examples and stop.
+
+For each iteration, report:
+- the uncovered case being handled,
+- why it is real behavior, an invariant, or macro-generated noise,
+- what changed,
+- what verification was run,
+- what the next uncovered case is, if any.
+
+Important:
+The success criterion is eliminating meaningful uncovered behavior in
+`parse_key_join.c` through a sequence of small, justified changes.  Normal
+coverage is noisy around macros, so the path should improve tests and code
+quality rather than make the code artificial.

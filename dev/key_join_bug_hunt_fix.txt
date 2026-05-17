@@ -1,0 +1,116 @@
+Key join bug-hunt/fix workflow.
+
+Target diff:
+
+  git diff master
+
+Primary source focus:
+
+  src/backend/parser/parse_key_join.c
+
+During bug hunt and fix work, prioritize verified bugs whose root cause is in
+this file. Source edits should normally be limited to this file; regression SQL
+and expected-output updates still follow the inner-loop instructions below.
+
+Exploratory database:
+
+  psql -h localhost -p 5432 -d "test1"
+
+You may execute any SQL queries against that database while hunting.
+
+Only count bugs in these two classes:
+
+  (a) soundness: an invalid key join is accepted when it should be rejected.
+  (b) crash: key join handling crashes/asserts/panics/terminates PostgreSQL.
+
+Formal key join definition:
+
+A key join is an equijoin between two tables, the referencing table and the
+referenced table, where the join predicate compares referencing columns in the
+referencing table with referenced columns in the referenced table. The two
+column lists have the same arity and pairwise comparable types.
+
+The referenced multiset is the projection of the referenced table onto the
+referenced columns, restricted to rows where every referenced column is
+non-null.
+
+The referencing multiset is the projection of the referencing table onto the
+referencing columns.
+
+An equijoin is a key join iff all of these hold:
+
+1. Every element of the referenced multiset has multiplicity exactly one.
+2. Every distinct referencing value whose columns are all non-null is present
+   in the referenced multiset. Duplicate referencing values are allowed; the
+   FK proof is value containment, not strict multiset subcontainment.
+3. Either:
+   - no element of the referencing multiset contains a null value, or
+   - the referencing table is preserved via an outer join type.
+
+Outer LLM loop, bug hunt:
+
+1. Look for (a) and (b) bugs in the target diff.
+2. Verify each candidate with SQL or a crash/assert trace. Record the exact
+   SQL or trace and the observed bad behavior. A plausible issue without a
+   concrete reproducer is not a verified bug and must not be fixed yet.
+3. When a bug is verified, enter the inner loop.
+4. If several distinct bugs are found together, queue them and let the inner
+   loop fix them one at a time.
+5. After the inner loop empties the queue, resume the outer loop.
+6. Stop only when no more verified (a) or (b) bugs can be found.
+
+Inner LLM loop, bug fix:
+
+For each verified bug, separately:
+
+0. Keep the bug boundary fixed. Fix only the behavior demonstrated by the
+   verified reproducer. Do not broaden the patch to adjacent cases, helper
+   cleanup, "just in case" defensive programming, or untested invariant
+   changes. If another possible bug is noticed while fixing, return to the
+   outer loop and verify it separately before changing code for it.
+
+   In particular, do not turn an assertion into a runtime check unless the
+   asserted condition itself is part of the verified bug or the change is
+   strictly necessary to fix the verified reproducer. Untested caller
+   invariants should remain assertions.
+
+1. Add only the regression `.sql` reproducer, normally in:
+
+     src/test/regress/sql/key_join.sql
+
+   At this step, do not edit code and do not add or update any `.out` file.
+
+2. Run:
+
+     ./dev/rebuild.sh test
+
+   Verify the new SQL hits the bug:
+   - soundness bug: the invalid key join is accepted;
+   - crash bug: the intended crash/assert/backend termination occurs.
+
+3. Fix only that verified bug, with the smallest code change that explains the
+   observed failure. Do not add speculative defensive programming or unrelated
+   cleanup.
+
+4. Run:
+
+     ./dev/rebuild.sh test
+
+   Inspect the generated result `.out` file and verify the bug is fixed. The
+   expected result must follow from the verified reproducer and the minimal
+   fix, not from a speculative behavior change.
+
+5. If the generated output is correct, copy it to expected.
+
+6. Run:
+
+     ./dev/rebuild.sh test
+
+   The test run must pass.
+
+7. Commit only this bug fix:
+
+     git commit --no-gpg-sign
+
+Repeat the inner loop until all queued bugs are fixed, then resume the outer
+loop.

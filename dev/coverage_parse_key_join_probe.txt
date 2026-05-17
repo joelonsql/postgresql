@@ -1,0 +1,224 @@
+We are doing recursive, coverage-driven cleanup for:
+
+  src/backend/parser/parse_key_join.c
+
+Use the incremental probe script as the normal inner loop:
+
+  ./dev/parse_key_join_probe.sh
+
+The script runs SQL against a coverage-enabled PostgreSQL instance, deletes
+only the `parse_key_join.c` gcda file for each probe, snapshots raw gcov line
+counts, and prints per-line count diffs against the saved baseline and the
+previous probe.  This is the trusted coverage check for the targeted case
+before committing.
+
+The normal test workflow still applies before committing behavior changes:
+
+  ./dev/rebuild.sh test
+
+Do not run `./dev/rebuild.sh coverage-html` solely as a pre-commit gate for a
+case that has already been proven with `dev/parse_key_join_probe.sh`.
+Use a full HTML report refresh only when the ledger/report itself needs to be
+refreshed, when the probe result and report disagree in a way that matters, or
+when a broader final coverage audit is explicitly requested.
+
+Do not fold this workflow into `dev/mcdc_parse_key_join.sh`.  The MC/DC
+script remains the isolated MC/DC workflow.
+
+The generated normal coverage report is under:
+
+  /Users/joel/build-postgresql-coverage/meson-logs/coveragereport/
+
+Find the current file with:
+
+  ls /Users/joel/build-postgresql-coverage/meson-logs/coveragereport/index.parse_key_join.c.*.html
+
+The root repo may also contain a stripped-down HTML case ledger named like:
+
+  index.parse_key_join.c.*.html
+
+Use that ledger as working memory while probing.  Keep notes there about
+attempted SQL, source/test edits, unresolved reasoning, and any would-be
+commit message.
+
+Goal:
+Eliminate uncovered real behavior in `parse_key_join.c`, one case at a time.
+Use the HTML coverage report or stripped ledger as the case guide, but use
+`dev/parse_key_join_probe.sh` for fast experiments.  Do not chase
+coverage noise from PostgreSQL infrastructure macros.
+
+Core Principles:
+- Treat uncovered lines and branches as prompts for better tests or simpler
+  code.
+- Prefer real tests for real parser, catalog, dependency, and stored-tree
+  behavior.
+- Prefer code simplification and PostgreSQL-style `Assert(...)` for branches
+  that are unreachable due to prior guards, parser rules, catalog invariants,
+  stored-tree invariants, or call-path constraints.
+- Do not add synthetic fault injection, coverage-only hooks, or coverage-only
+  `#ifdef`s unless explicitly approved.
+- Do not chase coverage by preserving impossible runtime branches.
+- Do not make guesses.  It is better to leave a case unresolved with a note
+  than to commit a speculative test or code change.
+- Do not treat every `partialCoveredLine` as a required fix.  Lines containing
+  `ereport(...)`, `Assert(...)`, `foreach_*`, `forboth`, `list_*`, or other
+  PostgreSQL macros often expand into hidden branches.  Fix partial coverage
+  only when the missing branch corresponds to a real source-level behavior.
+
+Probe Setup:
+1. Start or restart the coverage instance:
+
+     ./dev/parse_key_join_probe.sh start
+
+   If the socket is missing, the server has stale state, or source changes
+   were made since the server started, use:
+
+     ./dev/parse_key_join_probe.sh restart
+
+2. Save a baseline for the current investigation:
+
+     ./dev/parse_key_join_probe.sh baseline --from-report
+
+   A stale HTML report may warn that source differs from current source.  Treat
+   the report line numbers as case labels in that situation, not as exact
+   current source line numbers.  Inspect current source with `nl -ba` and
+   inspect probe snapshots before drawing conclusions.
+
+3. Run one SQL attempt with:
+
+     ./dev/parse_key_join_probe.sh run -c 'SQL'
+
+   Or:
+
+     ./dev/parse_key_join_probe.sh run file.sql
+
+   Each run prints changed lines versus the previous probe and the baseline.
+   Let those raw line diffs guide the next attempt; do not add intelligence to
+   the script just to interpret cases automatically.
+
+4. When needed, inspect the current snapshot directly:
+
+     awk 'BEGIN{FS="\t"} NR>=START && NR<=END {print $1 ":" ($2==""?"-":$2) " " $3}' \
+       /Users/joel/build-postgresql-coverage/parse-key-join-probe/current.tsv
+
+Recursive Workflow:
+1. Open the current stripped ledger or current normal HTML report.
+
+2. Find the next pending uncovered case, working in this order:
+   - first `uncoveredLine` in `parse_key_join.c`,
+   - then real source-level branch coverage gaps shown in the line's branch
+     details,
+   - then partial lines only when the partial state maps to real behavior in
+     `parse_key_join.c`, not macro expansion noise.
+
+   When doing round-robin hunting, try one attempt for a case, record what was
+   learned, then move to the next pending case.  If an attempt shows a real
+   source/test change or a commit-worthy classification is needed, make the
+   change, verify it, commit it, and then continue to the next pending case.
+
+3. For that case, identify:
+   - the source lines and function, using current source line numbers as well
+     as any stale report line numbers,
+   - the surrounding control flow,
+   - whether the uncovered code is an error path, success path, defensive
+     invariant, or stored-tree revalidation path,
+   - any HTML branch details such as `0/2`, `1/2`, or `2/4`,
+   - whether the missing coverage is real source behavior or macro noise.
+
+4. Make a mini plan before probing:
+   - What SQL shape should reach the relevant control flow?
+   - What exact line or branch should change in `current.tsv`?
+   - What would prove that the case is unreachable or macro noise?
+
+5. Probe that plan:
+   - Run a single focused SQL attempt with
+     `dev/parse_key_join_probe.sh`.
+   - Compare the line diffs and inspect nearby current snapshot counts.
+   - Record the attempt and result in the ledger.
+   - If the attempt does not prove the case, either try the next pending case
+     in round-robin mode or leave a precise unresolved note.
+
+6. Reason about the case in isolation:
+   - Is it real runtime behavior that should be testable?
+   - Or is it impossible because of an earlier guard, parser rule, catalog
+     invariant, stored parse tree invariant, or call-path constraint?
+   - If it is a partial macro line, does the missing branch correspond to a
+     source-level branch we own, or only to macro expansion?
+   - What is the exact proof either way?
+
+7. If a real change is needed, make the smallest plan:
+   - If it is real behavior: add or adjust focused regression tests that
+     naturally exercise it.
+   - If it is unreachable defensive code: simplify the code by replacing the
+     impossible branch with `Assert(...)`, factoring the condition, splitting a
+     compound decision, or moving validation to the earlier guard where it
+     belongs.
+   - If a comment is the right outcome, make it concise and PostgreSQL-style.
+   - Avoid unrelated refactoring.
+
+8. Execute the plan:
+   - Edit the smallest necessary set of files.
+   - Preserve PostgreSQL coding style.
+   - Do not revert unrelated local changes.
+   - Keep coverage-specific tests separate from normal regression schedules
+     unless explicitly asked otherwise.
+   - Update the ledger with changed files/lines and the would-be commit
+     message.
+
+9. Verify before committing:
+   - Use `dev/parse_key_join_probe.sh` output and `current.tsv` to
+     confirm that the targeted uncovered case is now either:
+     - covered,
+     - no longer present because impossible code was removed/asserted, or
+     - explicitly classified as macro-generated partial coverage noise.
+   - Run:
+
+       ./dev/rebuild.sh test
+
+     when the change affects normal behavior or before grouping final changes.
+   - Run any additional relevant focused tests if appropriate.
+   - Run basic sanity checks such as syntax checks and `git diff --check`.
+
+10. Commit the fixed case automatically:
+   - Create a git commit for just that case.
+   - Use `git commit --no-gpg-sign` because the human may not be physically
+     present to approve a signing prompt.
+   - Use a PostgreSQL style commit message: concise subject, explanatory body,
+     no marketing language, and clear reasoning for why the change is correct.
+   - Limit every line of the commit message, including the subject, to at most
+     72 characters.
+   - Include the reasoning in the commit message: whether the case was real
+     behavior needing tests, or unreachable defensive code turned into an
+     invariant, and what verification was run.
+
+Stopping Condition:
+Stop the current probing round when:
+- a case requires explicit human design input, or
+- all pending cases have one fresh attempt recorded without a conclusive next
+  edit.
+
+Do not stop merely because a case is ready to commit.  Verify and commit it
+with `git commit --no-gpg-sign`, then continue with the next pending case.
+
+Stop the overall cleanup only when `parse_key_join.c` has no remaining
+uncovered source-level cases in the normal coverage report, or when blocked by
+a case that requires explicit human design input.
+
+Partial coverage from macro expansion does not by itself block the stopping
+condition.  If only macro-generated partial lines remain, report that clearly
+with examples and stop.
+
+For each iteration, report:
+- the uncovered case being handled,
+- the mini plan,
+- what the probe changed in line counts,
+- why it is real behavior, an invariant, unresolved, or macro-generated noise,
+- what changed in source/test/ledger, if anything,
+- what verification was run,
+- what the next pending case is, if any.
+
+Important:
+The success criterion is eliminating meaningful uncovered behavior in
+`parse_key_join.c` through a sequence of small, justified changes.  The probe
+is the targeted coverage proof before committing.  Normal tests remain the
+behavioral validation step before committing changes that affect behavior.

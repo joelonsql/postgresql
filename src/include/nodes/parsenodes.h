@@ -1134,6 +1134,73 @@ typedef enum RTEKind
 	RTE_GROUP,					/* the grouping step */
 } RTEKind;
 
+typedef struct KeyJoinProofDependency
+{
+	NodeTag		type;
+	Oid			classId;
+	Oid			objectId;
+	int32		objectSubId;
+} KeyJoinProofDependency;
+
+typedef struct KeyJoinKeyPosition
+{
+	NodeTag		type;
+	List	   *attnums;
+	/* strict exposed proof identity */
+	Oid			typeOid;
+	int32		typmod;
+	Oid			collationOid;
+	/* transient equality operator input identity */
+	Oid			eqTypeOid;
+	int32		eqTypmod;
+	Oid			eqOperator;
+} KeyJoinKeyPosition;
+
+/*
+ * Tagged union of the four kinds of transient key-join proof fact.  These
+ * facts are parser scratch data attached to RangeTblEntry.keyJoinFacts while
+ * proving FOR KEY joins; stored KeyJoinNodes retain only the dependencies
+ * they actually consumed.
+ *
+ * Fields not used by a given kind are NIL or InvalidOid.  See the
+ * kind-specific consumers in parse_key_join.c for the meaning of each fact.
+ */
+typedef enum KeyJoinFactKind
+{
+	KJF_NOT_NULL,				/* attnum proven non-null */
+	KJF_UNIQUE,					/* keyPositions proven unique on relid */
+	KJF_FOREIGN_KEY,			/* keyPositions contained in referenced */
+	KJF_ROW_COVERAGE,			/* relid base rows still observable */
+} KeyJoinFactKind;
+
+typedef struct KeyJoinFact
+{
+	NodeTag		type;
+	KeyJoinFactKind kind;
+	/* KJF_NOT_NULL: surface column attnum */
+	AttrNumber	attnum;
+	/* KJF_UNIQUE / KJF_FOREIGN_KEY / KJF_ROW_COVERAGE: */
+	List	   *keyPositions;	/* of KeyJoinKeyPosition */
+	Oid			relid;			/* base relation OID, or InvalidOid */
+	List	   *baseAttnums;	/* per-position base attnum */
+	/* KJF_FOREIGN_KEY only: */
+	Oid			referencedRelid;
+	List	   *referencedAttnums;
+	Oid			constraint;		/* pg_constraint OID */
+	/* KJF_FOREIGN_KEY and KJF_ROW_COVERAGE: */
+	/* transient canonical filters; may contain parser-private Params */
+	List	   *filterConjuncts;
+	/* All kinds: */
+	List	   *dependencies;	/* of KeyJoinProofDependency */
+} KeyJoinFact;
+
+typedef struct KeyJoinSurfaceFacts
+{
+	NodeTag		type;
+	/* transient parser proof facts, never read from stored query trees */
+	List	   *facts;			/* of KeyJoinFact */
+} KeyJoinSurfaceFacts;
+
 typedef struct RangeTblEntry
 {
 	pg_node_attr(custom_read_write)
@@ -1364,6 +1431,9 @@ typedef struct RangeTblEntry
 	bool		inFromCl pg_node_attr(query_jumble_ignore);
 	/* security barrier quals to apply, if any */
 	List	   *securityQuals pg_node_attr(query_jumble_ignore);
+	/* transient cached proof facts for FOR KEY joins */
+	bool		keyJoinFactsComputed pg_node_attr(equal_ignore, query_jumble_ignore, read_write_ignore, read_as(false));
+	KeyJoinSurfaceFacts *keyJoinFacts pg_node_attr(equal_ignore, query_jumble_ignore, read_write_ignore, read_as(NULL));
 } RangeTblEntry;
 
 /*
@@ -4600,5 +4670,30 @@ typedef struct WaitStmt
 	List	   *options;		/* List of DefElem nodes */
 } WaitStmt;
 
+typedef struct KeyJoinClause
+{
+	NodeTag		type;
+	List	   *localCols;
+	KeyJoinDirection direction;
+	char	   *refAlias;
+	List	   *refCols;
+	Node	   *filter;			/* raw FILTER (WHERE ...) expr, or NULL */
+	ParseLoc	location;		/* token location, or -1 if unknown */
+} KeyJoinClause;
+
+typedef struct KeyJoinNode
+{
+	NodeTag		type;
+	KeyJoinDirection direction;
+	Index		referencingVarno;
+	Index		referencedVarno;
+	List	   *referencingAttnums;
+	List	   *referencedAttnums;
+	Index		refAliasVarno;
+	List	   *refAliasAttnums;
+	Oid			constraint;
+	List	   *notNullConstraints;
+	List	   *proofDependencies;
+} KeyJoinNode;
 
 #endif							/* PARSENODES_H */

@@ -2384,6 +2384,31 @@ find_expr_references_walker(Node *node,
 		find_expr_references_walker((Node *) setop->groupClauses, context);
 		/* fall through to examine child nodes */
 	}
+	else if (IsA(node, JoinExpr))
+	{
+		JoinExpr   *join = (JoinExpr *) node;
+
+		find_expr_references_walker(join->keyJoin, context);
+		/* fall through to examine the ordinary join substructure */
+	}
+	else if (IsA(node, KeyJoinNode))
+	{
+		KeyJoinNode *key_join = castNode(KeyJoinNode, node);
+
+		find_expr_references_walker((Node *) key_join->notNullConstraints,
+									context);
+		find_expr_references_walker((Node *) key_join->proofDependencies,
+									context);
+		return false;
+	}
+	else if (IsA(node, KeyJoinProofDependency))
+	{
+		KeyJoinProofDependency *dep = (KeyJoinProofDependency *) node;
+
+		add_object_address(dep->classId, dep->objectId, dep->objectSubId,
+						   context->addrs);
+		return false;
+	}
 	else if (IsA(node, RangeTblFunction))
 	{
 		RangeTblFunction *rtfunc = (RangeTblFunction *) node;

@@ -27,6 +27,7 @@
 #include "catalog/pg_proc.h"
 #include "catalog/pg_transform.h"
 #include "catalog/pg_type.h"
+#include "commands/keyjoin.h"
 #include "executor/functions.h"
 #include "funcapi.h"
 #include "mb/pg_wchar.h"
@@ -35,6 +36,7 @@
 #include "parser/parse_coerce.h"
 #include "pgstat.h"
 #include "rewrite/rewriteHandler.h"
+#include "storage/lmgr.h"
 #include "tcop/pquery.h"
 #include "tcop/tcopprot.h"
 #include "utils/acl.h"
@@ -394,6 +396,7 @@ ProcedureCreate(const char *procedureName,
 	{
 		/* There is one; okay to replace it? */
 		Form_pg_proc oldproc = (Form_pg_proc) GETSTRUCT(oldtup);
+		Oid			oldprocid = oldproc->oid;
 		Datum		proargnames;
 		bool		isnull;
 		const char *dropcmd;
@@ -403,6 +406,25 @@ ProcedureCreate(const char *procedureName,
 					(errcode(ERRCODE_DUPLICATE_FUNCTION),
 					 errmsg("function \"%s\" already exists with same argument types",
 							procedureName)));
+
+		/*
+		 * Key-join proof can depend on this function's volatility,
+		 * strictness, and body.  Serialize replacement with CREATE VIEW
+		 * analysis that may be capturing such a proof, so the later command
+		 * either sees and revalidates the new dependent object or validates
+		 * against the new function definition.
+		 */
+		LockDatabaseObject(ProcedureRelationId, oldprocid, 0,
+						   AccessExclusiveLock);
+		ReleaseSysCache(oldtup);
+		oldtup = SearchSysCache1(PROCOID, ObjectIdGetDatum(oldprocid));
+		if (!HeapTupleIsValid(oldtup))
+			ereport(ERROR,
+					(errcode(ERRCODE_UNDEFINED_FUNCTION),
+					 errmsg("function \"%s\" was concurrently dropped",
+							procedureName)));
+		oldproc = (Form_pg_proc) GETSTRUCT(oldtup);
+
 		if (!object_ownercheck(ProcedureRelationId, oldproc->oid, proowner))
 			aclcheck_error(ACLCHECK_NOT_OWNER, OBJECT_FUNCTION,
 						   procedureName);
@@ -756,10 +778,22 @@ ProcedureCreate(const char *procedureName,
 	if (!is_update)
 		pgstat_create_function(retval);
 
+	/*
+	 * For CREATE OR REPLACE FUNCTION, revalidate stored key-join proofs that
+	 * captured this function in a matched-filter conjunct.  The function's
+	 * body, volatility, or strictness may all have changed; if a stored proof
+	 * no longer holds, revalidation raises an error and aborts the DDL.
+	 * Plain CREATE FUNCTION can't have any dependents yet, so revalidation is
+	 * needed only for the replace path.
+	 */
+	if (is_update)
+	{
+		CommandCounterIncrement();
+		RevalidateDependentKeyJoinObjectsOnProcedure(retval);
+	}
+
 	return myself;
 }
-
-
 
 /*
  * Validator for internal functions

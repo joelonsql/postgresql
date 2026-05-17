@@ -1,0 +1,12 @@
+diff --git a/src/interfaces/libpq/libpq_check.pl b/src/interfaces/libpq/libpq_check.pl
+index 833f5315c3c..a26bbeb3ef2 100755
+--- a/src/interfaces/libpq/libpq_check.pl
++++ b/src/interfaces/libpq/libpq_check.pl
+@@ -22,0 +23 @@ my @problematic_lines;
++my $allow_mcdc_profile_atexit = $ENV{POSTGRES_MCDC_ALLOW_ATEEXIT};
+@@ -57,0 +59,5 @@ while (<$fh>)
++	# LLVM source-based coverage profiling can insert a plain atexit()
++	# registration into an instrumented libpq.  Keep that exception local to
++	# the MC/DC helper script instead of weakening normal builds.
++	next if $allow_mcdc_profile_atexit && /\b_?atexit\b/;
++

@@ -248,7 +248,8 @@ FROM <replaceable>table_reference</replaceable> <optional>, <replaceable>table_r
       <listitem>
 <synopsis>
 <replaceable>T1</replaceable> { <optional>INNER</optional> | { LEFT | RIGHT | FULL } <optional>OUTER</optional> } JOIN <replaceable>T2</replaceable> ON <replaceable>boolean_expression</replaceable>
-<replaceable>T1</replaceable> { <optional>INNER</optional> | { LEFT | RIGHT | FULL } <optional>OUTER</optional> } JOIN <replaceable>T2</replaceable> USING ( <replaceable>join column list</replaceable> )
+<replaceable>T1</replaceable> { <optional>INNER</optional> | { LEFT | RIGHT | FULL } <optional>OUTER</optional> } JOIN <replaceable>T2</replaceable> USING ( <replaceable>join column list</replaceable> ) <optional> FILTER (WHERE <replaceable>boolean_expression</replaceable>) </optional>
+<replaceable>T1</replaceable> { <optional>INNER</optional> | { LEFT | RIGHT | FULL } <optional>OUTER</optional> } JOIN <replaceable>T2</replaceable> FOR KEY ( <replaceable>right column list</replaceable> ) { -&gt; | &lt;- } <replaceable>T1 relation</replaceable> ( <replaceable>left column list</replaceable> ) <optional> FILTER (WHERE <replaceable>boolean_expression</replaceable>) </optional>
 <replaceable>T1</replaceable> NATURAL { <optional>INNER</optional> | { LEFT | RIGHT | FULL } <optional>OUTER</optional> } JOIN <replaceable>T2</replaceable>
 </synopsis>
 
@@ -262,10 +263,11 @@ FROM <replaceable>table_reference</replaceable> <optional>, <replaceable>table_r
 
        <para>
         The <firstterm>join condition</firstterm> is specified in the
-        <literal>ON</literal> or <literal>USING</literal> clause, or implicitly by
-        the word <literal>NATURAL</literal>.  The join condition determines
-        which rows from the two source tables are considered to
-        <quote>match</quote>, as explained in detail below.
+        <literal>ON</literal>, <literal>USING</literal>, or
+        <literal>FOR KEY</literal> clause, or implicitly by the word
+        <literal>NATURAL</literal>.  The join condition determines which rows
+        from the two source tables are considered to <quote>match</quote>, as
+        explained in detail below.
        </para>
 
        <para>
@@ -376,6 +378,51 @@ FROM <replaceable>table_reference</replaceable> <optional>, <replaceable>table_r
         output column for each of the listed column pairs (in the listed
         order), followed by any remaining columns from <replaceable>T1</replaceable>,
         followed by any remaining columns from <replaceable>T2</replaceable>.
+       </para>
+
+       <para>
+        A <literal>USING</literal> join can be followed by
+        <literal>FILTER (WHERE <replaceable>boolean_expression</replaceable>)</literal>
+        to add another condition to the join without changing the output
+        columns selected by <literal>USING</literal>.  The filter can refer to
+        either input table and is considered part of the join's own matching
+        condition.
+       </para>
+
+       <para>
+        A <literal>FOR KEY</literal> clause is used when the join is intended
+        to follow a foreign-key relationship.  It generates equality
+        comparisons between a referencing column list and a referenced column
+        list, and the query is rejected if the relationship cannot be proven
+        from usable constraints and query facts.  Unlike
+        <literal>USING</literal>, <literal>FOR KEY</literal> does not remove
+        duplicate columns from the join output; its output columns are the
+        same as for <literal>JOIN ON</literal>.
+       </para>
+
+       <para>
+        In a <literal>FOR KEY</literal> clause, the list immediately after
+        <literal>FOR KEY</literal> names columns of <replaceable>T2</replaceable>.
+        The relation name after the arrow must be a relation visible from
+        <replaceable>T1</replaceable>.  With <literal>-&gt;</literal>,
+        the <replaceable>T2</replaceable> columns are the referencing
+        foreign-key columns and the named <replaceable>T1</replaceable>
+        columns are the referenced key columns.  With <literal>&lt;-</literal>,
+        the roles are reversed.
+       </para>
+
+       <para>
+        For example, if <structfield>orders.customer_id</structfield> is a
+        non-null foreign key referencing <structfield>customers.id</structfield>,
+        the following join asks for that key equality to be proven and
+        generated, while the <literal>FILTER</literal> clause adds another join
+        condition:
+<programlisting>
+SELECT c.name, o.order_date
+FROM customers AS c
+JOIN orders AS o FOR KEY (customer_id) -&gt; c (id)
+     FILTER (WHERE o.status = 'open');
+</programlisting>
        </para>
 
        <para>
