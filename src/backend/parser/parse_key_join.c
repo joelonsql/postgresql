@@ -2352,14 +2352,8 @@ compute_key_join_relation_facts(KeyJoinFactContext *context,
 				 "locked constraint %u is not the expected not-null constraint",
 				 con->oid);
 
-		/*
-		 * NO INHERIT NOT NULL constraints on a partitioned parent do not
-		 * cover child partition rows, so they are not proof facts for an
-		 * inherited partitioned-table scan.
-		 */
 		if (con->conenforced &&
-			con->convalidated &&
-			(!con->connoinherit || rte->relkind != RELKIND_PARTITIONED_TABLE))
+			con->convalidated)
 		{
 			KeyJoinFact *fact = add_fact(set, KJF_NOT_NULL);
 
