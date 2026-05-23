@@ -13306,8 +13306,6 @@ get_from_clause_item(Node *jtnode, Query *query, deparse_context *context)
 			if (j->join_using_alias)
 				appendStringInfo(buf, " AS %s",
 								 quote_identifier(j->join_using_alias->aliasname));
-
-			get_join_filter_clause(j->joinFilter, context);
 		}
 		else if (j->quals)
 		{

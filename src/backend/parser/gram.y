@@ -14586,7 +14586,7 @@ joined_table:
 						List *usingInfo = castNode(List, $5);
 						n->usingClause = linitial_node(List, usingInfo);
 						n->join_using_alias = lsecond_node(Alias, usingInfo);
-						n->joinFilter = (Node *) lthird(usingInfo);
+						n->joinFilter = NULL;
 						n->keyJoin = NULL;
 						n->quals = NULL;
 					}
@@ -14625,7 +14625,7 @@ joined_table:
 						List *usingInfo = castNode(List, $4);
 						n->usingClause = linitial_node(List, usingInfo);
 						n->join_using_alias = lsecond_node(Alias, usingInfo);
-						n->joinFilter = (Node *) lthird(usingInfo);
+						n->joinFilter = NULL;
 						n->keyJoin = NULL;
 						n->quals = NULL;
 					}
@@ -14783,9 +14783,9 @@ opt_outer: OUTER_P
  * An ON-expr will not be a List, so it can be told apart that way.
  */
 
-join_qual: USING '(' name_list ')' opt_alias_clause_for_join_using filter_clause
+join_qual: USING '(' name_list ')' opt_alias_clause_for_join_using
 				{
-					$$ = (Node *) list_make3($3, $5, $6);
+					$$ = (Node *) list_make2($3, $5);
 				}
 			| ON a_expr
 				{

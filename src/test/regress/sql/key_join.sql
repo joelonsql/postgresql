@@ -3266,28 +3266,17 @@ SELECT * FROM t1
   LEFT JOIN t2 FOR KEY (c3) -> t1 (c1)
   FILTER (WHERE t2.c4 = 10);
 
--- FILTER3 + FILTER4: USING join with FILTER clause
+-- FILTER3: USING join with FILTER clause is not supported
 CREATE TABLE tf1 (id int PRIMARY KEY, val int);
 CREATE TABLE tf2 (id int PRIMARY KEY, val int);
 INSERT INTO tf1 VALUES (1, 10), (2, 20), (3, 30);
 INSERT INTO tf2 VALUES (1, 100), (2, 200);
 
--- FILTER3: USING join with FILTER clause
+-- rejected, reason: join-local FILTER is supported only for FOR KEY joins
 SELECT * FROM tf1 JOIN tf2 USING (id) FILTER (WHERE tf1.val > 10);
 
--- FILTER3b: FILTER in deparsed USING join view
-CREATE VIEW v_using_filter AS
-  SELECT tf1.id, tf1.val AS tf1_val, tf2.val AS tf2_val
-  FROM tf1 JOIN tf2 USING (id) FILTER (WHERE tf1.val > 10);
-SELECT pg_get_viewdef('v_using_filter');
-DROP VIEW v_using_filter;
-
--- FILTER3c: FILTER in deparsed USING join view with join column alias
-CREATE VIEW v_using_filter_alias AS
-  SELECT tfj.id, tf1.val AS tf1_val, tf2.val AS tf2_val
-  FROM tf1 JOIN tf2 USING (id) AS tfj FILTER (WHERE tf2.val > 100);
-SELECT pg_get_viewdef('v_using_filter_alias');
-DROP VIEW v_using_filter_alias;
+-- rejected, reason: same restriction after a USING join alias
+SELECT * FROM tf1 JOIN tf2 USING (id) AS tfj FILTER (WHERE tf2.val > 100);
 
 -- Ordinary USING joins do not expose key-join facts.
 CREATE TABLE tf_child (id int NOT NULL REFERENCES tf1 (id));

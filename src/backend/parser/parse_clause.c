@@ -1562,8 +1562,8 @@ transformFromClauseItem(ParseState *pstate, Node *n,
 		}
 
 		/*
-		 * Transform and merge FILTER clause for USING, FK, or NATURAL joins.
-		 * For key joins this intentionally happens after validation:
+		 * Transform and merge FILTER clause for FOR KEY joins.  This
+		 * intentionally happens after validation:
 		 * transformAndValidateKeyJoin proves only the operand surfaces plus
 		 * the generated FK equality.  Join-local FILTER is ordinary join-qual
 		 * semantics applied to the already-proven key-join result, so an inner
@@ -1574,6 +1574,8 @@ transformFromClauseItem(ParseState *pstate, Node *n,
 		 */
 		if (j->joinFilter != NULL)
 		{
+			Assert(j->keyJoin != NULL);
+
 			j->joinFilter = transformJoinQualClause(pstate, j->joinFilter,
 													my_namespace, "FILTER");
 

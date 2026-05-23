@@ -61,7 +61,7 @@ SELECT [ ALL | DISTINCT [ ON ( <replaceable class="parameter">expression</replac
                 [ WITH ORDINALITY ] [ [ AS ] <replaceable class="parameter">alias</replaceable> [ ( <replaceable class="parameter">column_alias</replaceable> [, ...] ) ] ]
     GRAPH_TABLE ( <replaceable class="parameter">graph_name</replaceable> MATCH <replaceable class="parameter">graph_pattern</replaceable> COLUMNS ( { <replaceable class="parameter">expression</replaceable> [ AS <replaceable class="parameter">name</replaceable> ] } [, ...] ) ) [ [ AS ] <replaceable class="parameter">alias</replaceable> [ ( <replaceable class="parameter">column_alias</replaceable> [, ...] ) ] ]
     <replaceable class="parameter">from_item</replaceable> <replaceable class="parameter">join_type</replaceable> <replaceable class="parameter">from_item</replaceable> ON <replaceable class="parameter">join_condition</replaceable>
-    <replaceable class="parameter">from_item</replaceable> <replaceable class="parameter">join_type</replaceable> <replaceable class="parameter">from_item</replaceable> USING ( <replaceable class="parameter">join_column</replaceable> [, ...] ) [ AS <replaceable class="parameter">join_using_alias</replaceable> ] [ FILTER (WHERE <replaceable class="parameter">join_filter</replaceable>) ]
+    <replaceable class="parameter">from_item</replaceable> <replaceable class="parameter">join_type</replaceable> <replaceable class="parameter">from_item</replaceable> USING ( <replaceable class="parameter">join_column</replaceable> [, ...] ) [ AS <replaceable class="parameter">join_using_alias</replaceable> ]
     <replaceable class="parameter">from_item</replaceable> <replaceable class="parameter">join_type</replaceable> <replaceable class="parameter">from_item</replaceable> FOR KEY ( <replaceable class="parameter">right_join_column</replaceable> [, ...] ) { -&gt; | &lt;- } <replaceable class="parameter">left_from_reference</replaceable> ( <replaceable class="parameter">left_join_column</replaceable> [, ...] ) [ FILTER (WHERE <replaceable class="parameter">join_filter</replaceable>) ]
     <replaceable class="parameter">from_item</replaceable> NATURAL <replaceable class="parameter">join_type</replaceable> <replaceable class="parameter">from_item</replaceable>
     <replaceable class="parameter">from_item</replaceable> CROSS JOIN <replaceable class="parameter">from_item</replaceable>
@@ -717,7 +717,7 @@ TABLE [ ONLY ] <replaceable class="parameter">table_name</replaceable> [ * ]
      </varlistentry>
 
      <varlistentry>
-      <term><literal>USING ( <replaceable class="parameter">join_column</replaceable> [, ...] ) [ AS <replaceable class="parameter">join_using_alias</replaceable> ] [ FILTER (WHERE <replaceable class="parameter">join_filter</replaceable>) ]</literal></term>
+      <term><literal>USING ( <replaceable class="parameter">join_column</replaceable> [, ...] ) [ AS <replaceable class="parameter">join_using_alias</replaceable> ]</literal></term>
       <listitem>
        <para>
         A clause of the form <literal>USING ( a, b, ... )</literal> is
@@ -789,18 +789,17 @@ TABLE [ ONLY ] <replaceable class="parameter">table_name</replaceable> [ * ]
       <listitem>
        <para>
         A <literal>FILTER</literal> clause can be written after a
-        <literal>USING</literal> or <literal>FOR KEY</literal> join
-        condition to add a Boolean condition to the join.  The filter can
-        reference columns from both join inputs and has the same
-        match-determining semantics as a condition written in an
-        <literal>ON</literal> clause.  For outer joins, rows preserved by
-        the join type are still emitted with nulls for the nonmatching or
+        <literal>FOR KEY</literal> join condition to add a Boolean condition
+        to the join.  The filter can reference columns from both join inputs
+        and has the same match-determining semantics as a condition written
+        in an <literal>ON</literal> clause.  For outer joins, rows preserved
+        by the join type are still emitted with nulls for the nonmatching or
         filtered side.
        </para>
 
        <para>
-        For <literal>FOR KEY</literal>, this join-local filter is applied
-        after the key-join relationship has been proven.
+        This join-local filter is applied after the key-join relationship has
+        been proven.
        </para>
       </listitem>
      </varlistentry>

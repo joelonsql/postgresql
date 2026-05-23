@@ -248,7 +248,7 @@ FROM <replaceable>table_reference</replaceable> <optional>, <replaceable>table_r
       <listitem>
 <synopsis>
 <replaceable>T1</replaceable> { <optional>INNER</optional> | { LEFT | RIGHT | FULL } <optional>OUTER</optional> } JOIN <replaceable>T2</replaceable> ON <replaceable>boolean_expression</replaceable>
-<replaceable>T1</replaceable> { <optional>INNER</optional> | { LEFT | RIGHT | FULL } <optional>OUTER</optional> } JOIN <replaceable>T2</replaceable> USING ( <replaceable>join column list</replaceable> ) <optional> FILTER (WHERE <replaceable>boolean_expression</replaceable>) </optional>
+<replaceable>T1</replaceable> { <optional>INNER</optional> | { LEFT | RIGHT | FULL } <optional>OUTER</optional> } JOIN <replaceable>T2</replaceable> USING ( <replaceable>join column list</replaceable> )
 <replaceable>T1</replaceable> { <optional>INNER</optional> | { LEFT | RIGHT | FULL } <optional>OUTER</optional> } JOIN <replaceable>T2</replaceable> FOR KEY ( <replaceable>right column list</replaceable> ) { -&gt; | &lt;- } <replaceable>T1 relation</replaceable> ( <replaceable>left column list</replaceable> ) <optional> FILTER (WHERE <replaceable>boolean_expression</replaceable>) </optional>
 <replaceable>T1</replaceable> NATURAL { <optional>INNER</optional> | { LEFT | RIGHT | FULL } <optional>OUTER</optional> } JOIN <replaceable>T2</replaceable>
 </synopsis>
@@ -378,15 +378,6 @@ FROM <replaceable>table_reference</replaceable> <optional>, <replaceable>table_r
         output column for each of the listed column pairs (in the listed
         order), followed by any remaining columns from <replaceable>T1</replaceable>,
         followed by any remaining columns from <replaceable>T2</replaceable>.
-       </para>
-
-       <para>
-        A <literal>USING</literal> join can be followed by
-        <literal>FILTER (WHERE <replaceable>boolean_expression</replaceable>)</literal>
-        to add another condition to the join without changing the output
-        columns selected by <literal>USING</literal>.  The filter can refer to
-        either input table and is considered part of the join's own matching
-        condition.
        </para>
 
        <para>
