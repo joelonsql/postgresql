@@ -213,11 +213,8 @@ static bool select_key_position_parts(List *selected_attnums,
 									  List *keyPositions, List *baseAttnums,
 									  List **selected_base_attnums,
 									  List **selected_key_positions);
-static bool rowcollapse_preserves_rowcoverage(KeyJoinSurfaceFacts *facts,
-											  List *rowcoverage_key_positions,
-											  List *rowcollapse_key_positions,
-											  List **attrmap, int natts,
-											  List **dependencies);
+static bool rowcollapse_preserves_rowcoverage(List *rowcoverage_key_positions,
+											  List *rowcollapse_key_positions);
 static int	key_position_index_for_attnum(List *keyPositions, int attno);
 static bool key_position_identity_lists_equal(List *left, List *right);
 static bool key_position_identity_equal(KeyJoinKeyPosition *left,
@@ -1056,26 +1053,24 @@ select_key_position_parts(List *selected_attnums, List *keyPositions,
  *		row-coverage fact.
  *
  *		Every projected row-coverage key position must appear in the
- *		grouped/distinct key, and each matched grouped/distinct column must
- *		have not-null evidence from a directly projected input column.  Extra
- *		row-collapse columns do not merge distinct covered key values.
+ *		grouped/distinct key under the same identity.  Nullable referenced
+ *		rows are excluded from the referenced multiset, so collapsing
+ *		null-containing referenced rows cannot remove a value required by an
+ *		all-non-null referencing key.  Extra row-collapse columns do not merge
+ *		distinct covered key values.
  *
  * Called by:
  *		project_key_join_facts_from_rte
  */
 static bool
-rowcollapse_preserves_rowcoverage(KeyJoinSurfaceFacts *facts,
-								  List *rowcoverage_key_positions,
-								  List *rowcollapse_key_positions,
-								  List **attrmap, int natts,
-								  List **dependencies)
+rowcollapse_preserves_rowcoverage(List *rowcoverage_key_positions,
+								  List *rowcollapse_key_positions)
 {
 	List	   *used_row_positions = NIL;
 
 	foreach_node(KeyJoinKeyPosition, keypos, rowcoverage_key_positions)
 	{
 		bool		position_match = false;
-		bool		notnull_match = false;
 		int			pos = 0;
 
 		foreach_node(KeyJoinKeyPosition, rowpos, rowcollapse_key_positions)
@@ -1095,27 +1090,6 @@ rowcollapse_preserves_rowcoverage(KeyJoinSurfaceFacts *facts,
 				if (list_member_int(keypos->attnums, attno))
 				{
 					position_match = true;
-					for (int inattno = 1; inattno <= natts; inattno++)
-					{
-						if (!list_member_int(attrmap[inattno], attno))
-							continue;
-
-						foreach_node(KeyJoinFact, fact, facts->facts)
-						{
-							if (fact->kind != KJF_NOT_NULL)
-								continue;
-							if (fact->attnum == inattno)
-							{
-								*dependencies =
-									append_dependencies_unique(*dependencies,
-															   fact->dependencies);
-								notnull_match = true;
-								break;
-							}
-						}
-						if (notnull_match)
-							break;
-					}
 					break;
 				}
 			}
@@ -1127,8 +1101,6 @@ rowcollapse_preserves_rowcoverage(KeyJoinSurfaceFacts *facts,
 			pos++;
 		}
 		if (!position_match)
-			return false;
-		if (!notnull_match)
 			return false;
 	}
 
@@ -3091,7 +3063,6 @@ project_key_join_facts_from_rte(KeyJoinSurfaceFacts *dst, RangeTblEntry *src,
 			case KJF_ROW_COVERAGE:
 				{
 					bool		rowcollapse_sets_cover = true;
-					List	   *rowcollapse_deps = NIL;
 
 					if (!preserve_rowcoverage || tablesample)
 						continue;
@@ -3104,18 +3075,15 @@ project_key_join_facts_from_rte(KeyJoinSurfaceFacts *dst, RangeTblEntry *src,
 
 					/*
 					 * Every row-collapsing stage must group/distinct on this
-					 * row-coverage key with not-null evidence for the matched
-					 * columns.  SQL row collapse folds nulls together, while
-					 * UNIQUE indexes normally do not.
+					 * row-coverage key under the same equality identity.
+					 * Null-containing referenced rows are outside the
+					 * referenced multiset.
 					 */
 					foreach_ptr(List, rowcollapse_key_positions,
 								rowcoverage_key_position_sets)
 					{
-						if (!rowcollapse_preserves_rowcoverage(src->keyJoinFacts,
-															   newpositions,
-															   rowcollapse_key_positions,
-															   attrmap, natts,
-															   &rowcollapse_deps))
+						if (!rowcollapse_preserves_rowcoverage(newpositions,
+															   rowcollapse_key_positions))
 						{
 							rowcollapse_sets_cover = false;
 							break;
@@ -3126,9 +3094,6 @@ project_key_join_facts_from_rte(KeyJoinSurfaceFacts *dst, RangeTblEntry *src,
 
 					new = copyObject(old);
 					new->keyPositions = newpositions;
-					new->dependencies =
-						append_dependencies_unique(new->dependencies,
-												   rowcollapse_deps);
 					/*
 					 * Row coverage must account for every filter.  Dropping
 					 * one would claim coverage for rows no longer visible.

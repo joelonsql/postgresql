@@ -343,11 +343,11 @@ invalidate the FK fact for rows that remain.
 their key columns are direct projected columns.  They never create row
 coverage.  They can only preserve an existing row-coverage fact when the
 row-collapsing columns cover that same fact under the exact key identity
-and each matched covered key column is known non-null; nullable covered
-key columns are unsafe because row collapse treats nulls as equal even
-where ordinary unique indexes treat them as distinct.  Extra grouped
-columns are harmless when the covered subset is already unique and
-non-null.
+used by the key proof.  The referenced multiset excludes rows where any
+referenced key column is null, so collapsing null-containing referenced
+rows cannot remove a value required by an all-non-null referencing key.
+Extra grouped columns are harmless when the covered subset is already
+unique.
 
 `HAVING`, `LIMIT`, `OFFSET`, `FOR UPDATE SKIP LOCKED`, grouping sets,
 `ROLLUP`, `CUBE`, set operations, data-modifying CTEs, recursive CTEs,

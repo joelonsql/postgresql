@@ -3187,9 +3187,10 @@ ORDER BY p.id, c.id;
 (2 rows)
 
 DROP TABLE rowcov_exact_child, rowcov_exact_parent;
--- GROUP BY/DISTINCT do not preserve row coverage for nullable covered keys,
--- because row collapse treats nulls as equal even when UNIQUE treats them as
--- distinct.
+-- GROUP BY/DISTINCT preserve row coverage for nullable referenced keys when
+-- the collapsed key covers the same all-non-null values under the same key
+-- identity.  Null-containing referenced rows are outside the referenced
+-- multiset that key joins must cover.
 CREATE TABLE rowcov_nullable_parent (
     id int PRIMARY KEY,
     code text UNIQUE
@@ -3203,14 +3204,29 @@ INSERT INTO rowcov_nullable_parent VALUES
 INSERT INTO rowcov_nullable_child VALUES (10, 'a'), (20, 'b');
 SELECT p.code, c.id AS child_id
 FROM (SELECT code FROM rowcov_nullable_parent GROUP BY code) p
--- rejected, reason: GROUP BY on nullable key columns cannot preserve row coverage
-JOIN rowcov_nullable_child c FOR KEY (parent_code) -> p (code);
-ERROR:  key join cannot be proven from available constraints
-LINE 4: JOIN rowcov_nullable_child c FOR KEY (parent_code) -> p (cod...
-                                     ^
+-- accepted
+JOIN rowcov_nullable_child c FOR KEY (parent_code) -> p (code)
+ORDER BY p.code, c.id;
+ code | child_id 
+------+----------
+ a    |       10
+ b    |       20
+(2 rows)
+
 SELECT p.code, c.id AS child_id
 FROM (SELECT DISTINCT code FROM rowcov_nullable_parent) p
--- rejected, reason: DISTINCT on nullable key columns cannot preserve row coverage
+-- accepted
+JOIN rowcov_nullable_child c FOR KEY (parent_code) -> p (code)
+ORDER BY p.code, c.id;
+ code | child_id 
+------+----------
+ a    |       10
+ b    |       20
+(2 rows)
+
+SELECT p.code, c.id AS child_id
+FROM (SELECT code FROM rowcov_nullable_parent GROUP BY code HAVING count(*) > 0) p
+-- rejected, reason: HAVING remains a row-removal barrier
 JOIN rowcov_nullable_child c FOR KEY (parent_code) -> p (code);
 ERROR:  key join cannot be proven from available constraints
 LINE 4: JOIN rowcov_nullable_child c FOR KEY (parent_code) -> p (cod...
@@ -3218,7 +3234,7 @@ LINE 4: JOIN rowcov_nullable_child c FOR KEY (parent_code) -> p (cod...
 DROP TABLE rowcov_nullable_child, rowcov_nullable_parent;
 -- Extra row-collapse columns may have different identity from the key.
 -- Row coverage is preserved as long as the grouped key column itself has
--- the exact key identity and not-null evidence.
+-- the exact key identity.
 CREATE TABLE rowcov_identity_type_parent (
     label text NOT NULL,
     id int PRIMARY KEY
