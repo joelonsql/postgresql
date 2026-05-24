@@ -1220,6 +1220,53 @@ DROP TABLE ne3_b, ne3_c, ne3_e, ne3_a;
 
 DROP TABLE t2_nn, t1_nn;
 
+--
+-- Test information_schema.view_constraint_usage
+--
+CREATE TABLE vcusage_parent
+(
+    id INTEGER,
+    CONSTRAINT vcusage_parent_pkey PRIMARY KEY (id)
+);
+
+CREATE TABLE vcusage_child
+(
+    id INTEGER,
+    parent_id INTEGER CONSTRAINT vcusage_child_parent_id_not_null NOT NULL,
+    CONSTRAINT vcusage_child_pkey PRIMARY KEY (id),
+    CONSTRAINT vcusage_child_parent_id_fkey
+        FOREIGN KEY (parent_id) REFERENCES vcusage_parent (id)
+);
+
+CREATE VIEW vcusage_plain_view AS
+SELECT c.parent_id
+FROM vcusage_child c;
+
+CREATE VIEW vcusage_key_view AS
+SELECT c.id AS child_id, p.id AS parent_id
+FROM vcusage_child c
+-- accepted
+JOIN vcusage_parent p FOR KEY (id) <- c (parent_id);
+
+SELECT *
+FROM information_schema.view_constraint_usage
+WHERE view_name LIKE 'vcusage_%'
+ORDER BY view_name, constraint_name;
+
+CREATE OR REPLACE VIEW vcusage_key_view AS
+SELECT c.id AS child_id, p.id AS parent_id
+FROM vcusage_child c
+-- accepted
+LEFT JOIN vcusage_parent p FOR KEY (id) <- c (parent_id);
+
+SELECT *
+FROM information_schema.view_constraint_usage
+WHERE view_name LIKE 'vcusage_%'
+ORDER BY view_name, constraint_name;
+
+DROP VIEW vcusage_key_view, vcusage_plain_view;
+DROP TABLE vcusage_child, vcusage_parent;
+
 CREATE TABLE customer_addresses
 (
     customer_id INTEGER NOT NULL,
