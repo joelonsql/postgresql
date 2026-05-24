@@ -5533,6 +5533,39 @@ $$) = :'qid'::bigint AS same_query_id_after_fk_recreate;
 RESET compute_query_id;
 DROP TABLE key_join_queryid_child, key_join_queryid_parent;
 
+-- ============================================================================
+-- Precise diagnostics for unprovable key joins: the error states which proof
+-- requirement is missing, and when the evidence existed but was discarded
+-- mid-query, why (and where, when locatable).
+-- ============================================================================
+CREATE SCHEMA key_join_diag;
+SET search_path = key_join_diag;
+CREATE TABLE kd_parent (id int PRIMARY KEY);
+CREATE TABLE kd_child (id int, parent_id int REFERENCES kd_parent (id));
+
+-- Missing: no foreign key matches the referencing columns (id is not an FK).
+SELECT * FROM kd_parent p JOIN kd_child c FOR KEY (id) -> p (id);
+
+-- Inactivated: a derived referenced surface drops its row coverage at LIMIT.
+SELECT *
+FROM (SELECT id FROM kd_parent LIMIT 1) p
+JOIN kd_child c FOR KEY (parent_id) -> p (id);
+
+-- Inactivated by HAVING: the row-removing clause is named.
+SELECT *
+FROM (SELECT id FROM kd_parent GROUP BY id HAVING count(*) > 0) p
+JOIN kd_child c FOR KEY (parent_id) -> p (id);
+
+-- Inactivated inside a view: the message names the view to inspect.
+CREATE VIEW kd_parent_limited AS SELECT id FROM kd_parent LIMIT 1;
+SELECT *
+FROM kd_parent_limited p
+JOIN kd_child c FOR KEY (parent_id) -> p (id);
+
+DROP VIEW kd_parent_limited;
+RESET search_path;
+DROP SCHEMA key_join_diag CASCADE;
+
 -- Final cleanup: drop all remaining objects
 DROP VIEW v1, v2;
 DROP TABLE shipments, orders, order_items, packages CASCADE;

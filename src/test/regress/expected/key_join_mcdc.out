@@ -175,7 +175,7 @@ FROM (
 ) j
 JOIN mcdc_reader r FOR KEY (parent_id) -> j (id)
 ORDER BY r.id;
-ERROR:  key join cannot be proven from available constraints at character 132
+ERROR:  key join from referencing relation r to referenced relation j cannot be proven at character 132
 -- Function ordinality path: no projected key facts.
 SELECT r.id, j.id
 FROM (
@@ -185,7 +185,7 @@ FROM (
 ) j
 JOIN mcdc_reader r FOR KEY (parent_id) -> j (id)
 ORDER BY r.id;
-ERROR:  key join cannot be proven from available constraints at character 160
+ERROR:  key join from referencing relation r to referenced relation j cannot be proven at character 160
 -- Stored revalidation path: no FILTER, join-local FILTERs, and multi-column.
 CREATE VIEW mcdc_plain_v AS
 SELECT p.id
@@ -306,12 +306,12 @@ SELECT r.id, v.id
 FROM mcdc_expr_filter_v v
 JOIN mcdc_reader r FOR KEY (parent_id) -> v (id)
 ORDER BY r.id;
-ERROR:  key join cannot be proven from available constraints at character 64
+ERROR:  key join from referencing relation r to referenced relation v cannot be proven at character 64
 SELECT r.id, v.id
 FROM mcdc_relabel_expr_filter_v v
 JOIN mcdc_reader r FOR KEY (parent_id) -> v (id)
 ORDER BY r.id;
-ERROR:  key join cannot be proven from available constraints at character 72
+ERROR:  key join from referencing relation r to referenced relation v cannot be proven at character 72
 SELECT r.id, v.tenant_id, v.code
 FROM mcdc_multi_v v
 JOIN mcdc_reader r FOR KEY (tenant_id, code) -> v (tenant_id, code)
@@ -336,7 +336,7 @@ SELECT r.id, v.id
 FROM mcdc_jointree_search_v v
 JOIN mcdc_reader r FOR KEY (parent_id) -> v (id)
 ORDER BY r.id;
-ERROR:  key join cannot be proven from available constraints at character 68
+ERROR:  key join from referencing relation r to referenced relation v cannot be proven at character 68
 -- CTE projection path: skip an outer Var while projecting current key facts.
 SELECT p.id, probe.ok
 FROM mcdc_parent p,
@@ -380,7 +380,7 @@ FROM (
 ) g
 JOIN mcdc_reader r FOR KEY (parent_id) -> g (id)
 ORDER BY r.id;
-ERROR:  key join cannot be proven from available constraints at character 120
+ERROR:  key join from referencing relation r to referenced relation g cannot be proven at character 120
 -- GROUP BY nondeterministic collation path: no projected key facts.
 SELECT tr.id, g.id
 FROM (
@@ -390,25 +390,25 @@ FROM (
 ) g
 JOIN mcdc_text_reader tr FOR KEY (parent_id) -> g (id)
 ORDER BY tr.id;
-ERROR:  key join cannot be proven from available constraints at character 118
+ERROR:  key join from referencing relation tr to referenced relation g cannot be proven at character 118
 -- Non-domain relabel filters are not canonical key filters.
 SELECT vr.id, v.id
 FROM mcdc_text_cast_filter_v v
 JOIN mcdc_text_cast_reader vr FOR KEY (parent_id) -> v (id)
 ORDER BY vr.id;
-ERROR:  key join cannot be proven from available constraints at character 81
+ERROR:  key join from referencing relation vr to referenced relation v cannot be proven at character 81
 -- Domain relabel filters must keep the normalized base typmod.
 SELECT nr.id, v.id
 FROM mcdc_numdom_typmod_filter_v v
 JOIN mcdc_numdom_reader nr FOR KEY (parent_id) -> v (id)
 ORDER BY nr.id;
-ERROR:  key join cannot be proven from available constraints at character 82
+ERROR:  key join from referencing relation nr to referenced relation v cannot be proven at character 82
 -- Same-domain FK operators must use the normalized base equality type.
 SELECT c.id, p.id
 FROM mcdc_sig_parent p
 JOIN mcdc_sig_child c FOR KEY (parent_id) -> p (id)
 ORDER BY c.id;
-ERROR:  key join cannot be proven from available constraints at character 64
+ERROR:  key join from referencing relation c to referenced relation p cannot be proven at character 64
 -- Procedure dependents without stored SQL bodies have nothing to revalidate.
 CREATE FUNCTION mcdc_support_func(internal)
 RETURNS internal

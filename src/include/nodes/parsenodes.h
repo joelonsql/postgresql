@@ -1173,6 +1173,24 @@ typedef enum KeyJoinFactKind
 	KJF_ROW_COVERAGE,			/* relid base rows still observable */
 } KeyJoinFactKind;
 
+/*
+ * Why a transient proof fact failed to survive propagation to a surface.
+ * Diagnostic-only: when a propagation step would have discarded a fact, the
+ * fact is instead kept with active=false and stamped with the reason here, so
+ * a later rejection can explain itself.  KJI_NONE on every active fact.
+ */
+typedef enum KeyJoinInactiveReason
+{
+	KJI_NONE = 0,
+	KJI_NULL_EXTENDING_JOIN,		/* outer join null-extends a side */
+	KJI_JOIN_NOT_PRESERVED,		/* join does not retain all referenced rows */
+	KJI_JOIN_FANOUT,				/* a row may match more than once */
+	KJI_ROW_REMOVING_CLAUSE,		/* HAVING / LIMIT / OFFSET / FOR UPDATE */
+	KJI_GROUP_BY,
+	KJI_DISTINCT,
+	KJI_UNACCOUNTED_FILTER,
+} KeyJoinInactiveReason;
+
 typedef struct KeyJoinFact
 {
 	NodeTag		type;
@@ -1192,6 +1210,15 @@ typedef struct KeyJoinFact
 	List	   *filterConjuncts;
 	/* All kinds: */
 	List	   *dependencies;	/* of KeyJoinProofDependency */
+	/*
+	 * Diagnostics only; never consulted while proving or deriving facts.  A
+	 * fact starts active; a propagation step that would have discarded it
+	 * instead clears active, records why, and (when it died inside a view)
+	 * names the view that was referenced.
+	 */
+	bool		active;
+	KeyJoinInactiveReason inactiveReason;
+	Oid			inactiveOriginView; /* InvalidOid if none */
 } KeyJoinFact;
 
 typedef struct KeyJoinSurfaceFacts

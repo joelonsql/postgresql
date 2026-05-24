@@ -41,6 +41,7 @@
 #include "catalog/pg_operator.h"
 #include "catalog/pg_proc.h"
 #include "catalog/pg_type.h"
+#include "lib/stringinfo.h"
 #include "nodes/makefuncs.h"
 #include "nodes/nodeFuncs.h"
 #include "nodes/parsenodes.h"
@@ -78,6 +79,25 @@ typedef struct KeyJoinColumn
 } KeyJoinColumn;
 
 /*
+ * KeyJoinReq
+ *
+ *		Proof requirements in the order find_key_join_match checks them; on
+ *		failure it reports the first unmet one via the KeyJoinMatch fail*
+ *		fields.
+ */
+typedef enum KeyJoinReq
+{
+	REQ_NONE = 0,
+	REQ_FK,						/* referencing FK fact covering the columns */
+	REQ_UNIQUE,					/* referenced unique fact for the FK target */
+	REQ_COVERAGE,				/* referenced row-coverage fact */
+	REQ_FKPAIR,					/* FK pairs the named columns (cond. 2a) */
+	REQ_IDENTITY,				/* key equality identities agree (cond. 2b) */
+	REQ_FILTER,					/* referenced filters remap (cond. 2c) */
+	REQ_NOTNULL,				/* referencing not-null evidence (cond. 3) */
+} KeyJoinReq;
+
+/*
  * KeyJoinMatch
  *
  *		Complete proof selected for one validated key join.
@@ -92,7 +112,28 @@ typedef struct KeyJoinMatch
 	List	   *eqtypmods;
 	List	   *notnulldeps;
 	List	   *proofdeps;
+	/* Filled only on failure, for the rejection message. */
+	KeyJoinReq	failReq;
+	bool		failInactivated;	/* a matching fact went inactive */
+	KeyJoinInactiveReason failReason;
+	Oid			failOriginView;
 } KeyJoinMatch;
+
+/*
+ * KeyJoinFailureSide
+ *
+ *		Display fields for one side of an unproven key join.  Live parse
+ *		analysis has raw KeyJoinColumn names; stored-query revalidation has
+ *		only RTE aliases and attnums.
+ */
+typedef struct KeyJoinFailureSide
+{
+	const char *alias;
+	KeyJoinColumn *columns;
+	int			ncolumns;
+	RangeTblEntry *rte;
+	List	   *attnums;
+} KeyJoinFailureSide;
 
 /*
  * KeyJoinQueryStack
@@ -135,6 +176,18 @@ typedef struct FKFilterRemapContext
 	List	   *position_map;
 } FKFilterRemapContext;
 
+/*
+ * KeyJoinRowCollapse
+ *
+ *		One GROUP BY or DISTINCT stage a row-coverage key must survive, with the
+ *		reason to record on the fact if it does not.
+ */
+typedef struct KeyJoinRowCollapse
+{
+	KeyJoinInactiveReason reason;	/* KJI_GROUP_BY or KJI_DISTINCT */
+	List	   *positions;			/* of KeyJoinKeyPosition */
+} KeyJoinRowCollapse;
+
 /* local function prototypes */
 static bool find_key_join_match(RangeTblEntry *referencing_rte,
 								RangeTblEntry *referenced_rte,
@@ -163,7 +216,8 @@ static void project_key_join_facts_from_rte(KeyJoinSurfaceFacts *dst,
 											Node *filter_qual, Query *filter_query,
 											Node *filter_jtnode, Index filter_rtindex,
 											List *rowcoverage_key_position_sets,
-											List *extra_unique_deps);
+											List *extra_unique_deps,
+											KeyJoinInactiveReason inact_reason);
 static List *make_rowcollapse_key_positions(Query *query, List *clauses);
 static bool add_filter_conjuncts(List **dst, List *keyPositions,
 								 Node *qual, Query *filter_query,
@@ -192,6 +246,9 @@ static void revalidate_stored_key_join_proofs_in_query(Query *query,
 													   KeyJoinQueryStack *parent_stack);
 static void revalidate_query_jointree_proofs(Query *query, Node *jtnode,
 											 KeyJoinQueryStack *query_stack);
+static void add_inactive_projected(KeyJoinSurfaceFacts *dst, KeyJoinFact *old,
+								   List **attrmap,
+								   KeyJoinInactiveReason reason);
 
 /* local leaf functions */
 static KeyJoinColumn *resolve_columns_on_nsitem(ParseState *pstate,
@@ -296,6 +353,20 @@ static KeyJoinKeyPosition *make_key_position(List *attnums, Oid typeOid,
 											 Oid eqTypeOid, int32 eqTypmod,
 											 Oid eqOperator);
 static List *list_make_attrnums(const AttrNumber *attnums, int nattnums);
+static char *key_join_failure_detail(KeyJoinReq req, bool inactivated,
+									 KeyJoinInactiveReason reason,
+									 Oid origin_view,
+									 const char *referencing_relcols,
+									 const char *referenced_relcols,
+									 const char *referencing_relation,
+									 const char *referenced_relation,
+									 const char *join_name);
+static char *key_join_failure_hint(KeyJoinReq req, KeyJoinInactiveReason reason);
+static void key_join_report_failure(ParseState *pstate, ParseLoc location,
+									JoinType jointype,
+									const KeyJoinMatch *match,
+									const KeyJoinFailureSide *referencing,
+									const KeyJoinFailureSide *referenced);
 
 /*
  * transformAndValidateKeyJoin
@@ -334,8 +405,9 @@ transformAndValidateKeyJoin(ParseState *pstate, JoinExpr *j,
 	KeyJoinFactContext pk_context;
 	KeyJoinMatch match;
 	KeyJoinNode *key_join;
+	int			ncols = list_length(key_clause->localCols);
 
-	if (list_length(key_clause->localCols) != list_length(key_clause->refCols))
+	if (ncols != list_length(key_clause->refCols))
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_FOREIGN_KEY),
 				 errmsg("key join column lists must have the same length"),
@@ -415,10 +487,21 @@ transformAndValidateKeyJoin(ParseState *pstate, JoinExpr *j,
 							 referencing_attnums, referenced_attnums,
 							 !join_preserves_side(j->jointype, referencing_left),
 							 &match))
-		ereport(ERROR,
-				(errcode(ERRCODE_INVALID_FOREIGN_KEY),
-				 errmsg("key join cannot be proven from available constraints"),
-				 parser_errposition(pstate, key_clause->location)));
+	{
+		KeyJoinFailureSide referencing = {0};
+		KeyJoinFailureSide referenced = {0};
+
+		referencing.alias = local_is_referencing ?
+			r_nsitem->p_names->aliasname : ref_nsitem->p_names->aliasname;
+		referencing.columns = local_is_referencing ? local_cols : ref_cols;
+		referencing.ncolumns = ncols;
+		referenced.alias = local_is_referencing ?
+			ref_nsitem->p_names->aliasname : r_nsitem->p_names->aliasname;
+		referenced.columns = local_is_referencing ? ref_cols : local_cols;
+		referenced.ncolumns = ncols;
+		key_join_report_failure(pstate, key_clause->location, j->jointype,
+								&match, &referencing, &referenced);
+	}
 
 	INJECTION_POINT("key-join-after-proof-match", NULL);
 
@@ -678,8 +761,8 @@ build_key_join_quals(List *referenced_args,
  *
  * On success, *match receives the selected constraint, equality operators
  * and equality-input identities in key-join column order, and the
- * accumulated dependency lists.  On failure, *match is left zeroed.  The
- * caller is expected to use *match only if this function returns true.
+ * accumulated dependency lists.  On failure, *match receives diagnostic
+ * fields describing the first unmet proof requirement.
  *
  * Called by:
  *		transformAndValidateKeyJoin
@@ -695,10 +778,21 @@ find_key_join_match(RangeTblEntry *referencing_rte,
 {
 	KeyJoinSurfaceFacts *rfacts;
 	KeyJoinSurfaceFacts *pfacts;
+	KeyJoinReq	reached = REQ_NONE;
+	KeyJoinFact *inactive_fk = NULL;
+	KeyJoinFact *inactive_unique = NULL;
+	KeyJoinFact *inactive_coverage = NULL;
+	KeyJoinFact *inactive_notnull = NULL;
 
 	Assert(match != NULL);
 	Assert(referencing_rte != NULL);
 	Assert(referenced_rte != NULL);
+
+	/* Diagnostics default to "missing FK"; the failure tail refines this. */
+	match->failReq = REQ_FK;
+	match->failInactivated = false;
+	match->failReason = KJI_NONE;
+	match->failOriginView = InvalidOid;
 
 	if (referenced_rte->tablesample != NULL)
 		return false;
@@ -731,6 +825,14 @@ find_key_join_match(RangeTblEntry *referencing_rte,
 									   fkfact->baseAttnums,
 									   &referencing_base, NULL))
 			continue;
+		if (!fkfact->active)
+		{
+			if (inactive_fk == NULL)
+				inactive_fk = fkfact;
+			continue;
+		}
+		if (reached < REQ_FK)
+			reached = REQ_FK;
 
 		/* ---- Candidate 2: pick a unique fact on the referenced side ---- */
 		foreach_node(KeyJoinFact, uniqfact, pfacts->facts)
@@ -751,6 +853,12 @@ find_key_join_match(RangeTblEntry *referencing_rte,
 										   &unique_base,
 										   &unique_key_positions))
 				continue;
+			if (!uniqfact->active)
+			{
+				if (inactive_unique == NULL)
+					inactive_unique = uniqfact;
+				continue;
+			}
 			catalog_unique = OidIsValid(uniqfact->relid);
 			Assert(int_lists_same_members(uniqfact->baseAttnums, unique_base));
 
@@ -762,6 +870,8 @@ find_key_join_match(RangeTblEntry *referencing_rte,
 			if (catalog_unique &&
 				uniqfact->relid != fkfact->referencedRelid)
 				continue;
+			if (reached < REQ_UNIQUE)
+				reached = REQ_UNIQUE;
 
 			/* ---- Candidate 3: pick a row-coverage fact ---- */
 			foreach_node(KeyJoinFact, coverage, pfacts->facts)
@@ -791,6 +901,12 @@ find_key_join_match(RangeTblEntry *referencing_rte,
 											   &coverage_base,
 											   &coverage_key_positions))
 					continue;
+				if (!coverage->active)
+				{
+					if (inactive_coverage == NULL)
+						inactive_coverage = coverage;
+					continue;
+				}
 
 				/*
 				 * Matching row-coverage key positions for the selected
@@ -804,6 +920,8 @@ find_key_join_match(RangeTblEntry *referencing_rte,
 					   int_lists_same_members(coverage_base, unique_base));
 				Assert(int_lists_same_members(coverage->baseAttnums,
 											  coverage_base));
+				if (reached < REQ_COVERAGE)
+					reached = REQ_COVERAGE;
 
 				/* ---- Condition 2a: FK pairs match the selected columns ---- */
 				{
@@ -877,6 +995,8 @@ find_key_join_match(RangeTblEntry *referencing_rte,
 					if (!fk_pairs_match)
 						continue;
 				}
+				if (reached < REQ_FKPAIR)
+					reached = REQ_FKPAIR;
 
 				/*
 				 * ---- Condition 2b: unique + coverage agree on identity ----
@@ -892,6 +1012,8 @@ find_key_join_match(RangeTblEntry *referencing_rte,
 				if (!key_position_identity_lists_equal(coverage_key_positions,
 													   fk_key_positions))
 					continue;
+				if (reached < REQ_IDENTITY)
+					reached = REQ_IDENTITY;
 
 				/* ---- Condition 2c: referenced filters remap into FK ---- */
 				if (coverage->filterConjuncts != NIL)
@@ -929,6 +1051,8 @@ find_key_join_match(RangeTblEntry *referencing_rte,
 					if (!filters_match)
 						continue;
 				}
+				if (reached < REQ_FILTER)
+					reached = REQ_FILTER;
 
 				/* ---- Condition 3: not-null evidence on referencing side ---- */
 				if (need_notnull)
@@ -945,6 +1069,12 @@ find_key_join_match(RangeTblEntry *referencing_rte,
 								continue;
 							if (fact->attnum != attno)
 								continue;
+							if (!fact->active)
+							{
+								if (inactive_notnull == NULL)
+									inactive_notnull = fact;
+								continue;
+							}
 							local_notnulldeps =
 								append_dependencies_unique(local_notnulldeps,
 														   fact->dependencies);
@@ -964,10 +1094,9 @@ find_key_join_match(RangeTblEntry *referencing_rte,
 				/*
 				 * ---- Success: construct the result, exactly once ----
 				 *
-				 * *match is touched only here, so failed candidate checks
-				 * above leave it untouched.  proofdeps is built locally
-				 * before commit, so a partial accumulation cannot leak into
-				 * the result.
+				 * Proof fields are filled only here.  proofdeps is built
+				 * locally before commit, so a partial accumulation cannot
+				 * leak into the result.
 				 */
 				{
 					List	   *proofdeps = NIL;
@@ -990,6 +1119,46 @@ find_key_join_match(RangeTblEntry *referencing_rte,
 				}
 				return true;
 			}
+		}
+	}
+
+	/*
+	 * No proof.  Report the first unmet requirement: the deepest an active
+	 * candidate reached, plus one.  When that requirement is a fact we never
+	 * found active, blame the inactive one stashed for it, if any.
+	 */
+	if (reached < REQ_FK)
+		match->failReq = REQ_FK;
+	else if (reached < REQ_UNIQUE)
+		match->failReq = REQ_UNIQUE;
+	else if (reached < REQ_COVERAGE)
+		match->failReq = REQ_COVERAGE;
+	else if (reached < REQ_FKPAIR)
+		match->failReq = REQ_FKPAIR;
+	else if (reached < REQ_IDENTITY)
+		match->failReq = REQ_IDENTITY;
+	else if (reached < REQ_FILTER)
+		match->failReq = REQ_FILTER;
+	else
+		match->failReq = REQ_NOTNULL;
+
+	{
+		KeyJoinFact *blame = NULL;
+
+		if (match->failReq == REQ_FK)
+			blame = inactive_fk;
+		else if (match->failReq == REQ_UNIQUE)
+			blame = inactive_unique;
+		else if (match->failReq == REQ_COVERAGE)
+			blame = inactive_coverage;
+		else if (match->failReq == REQ_NOTNULL)
+			blame = inactive_notnull;
+
+		if (blame != NULL)
+		{
+			match->failInactivated = true;
+			match->failReason = blame->inactiveReason;
+			match->failOriginView = blame->inactiveOriginView;
 		}
 	}
 
@@ -2008,6 +2177,28 @@ ensure_key_join_surface_facts(KeyJoinFactContext *context, RangeTblEntry *rte)
 					rte->keyJoinFacts =
 						project_key_join_query_facts(&view_context,
 													 viewquery);
+
+					/*
+					 * Facts the view discarded inside its own body carry no
+					 * usable caret, since its text is not the current
+					 * statement.  When the view is referenced from locatable
+					 * top-level text, name it so a rejection can point the
+					 * user at the view to inspect.  Only this outermost
+					 * boundary (enclosing context live) claims origin; inner
+					 * views ran with revalidating_stored_query set.
+					 */
+					if (rte->keyJoinFacts != NULL &&
+						context->pstate != NULL &&
+						!context->revalidating_stored_query)
+					{
+						foreach_node(KeyJoinFact, fact,
+									 rte->keyJoinFacts->facts)
+						{
+							if (!fact->active &&
+								!OidIsValid(fact->inactiveOriginView))
+								fact->inactiveOriginView = rte->relid;
+						}
+					}
 				}
 				else
 					compute_key_join_relation_facts(context, rte, rel);
@@ -2852,13 +3043,25 @@ project_key_join_query_facts(KeyJoinFactContext *context, Query *query)
 	 * stages are present, either one could otherwise discard a needed key.
 	 */
 	if (query->groupClause != NIL)
+	{
+		KeyJoinRowCollapse *rc = palloc(sizeof(KeyJoinRowCollapse));
+
+		rc->reason = KJI_GROUP_BY;
+		rc->positions =
+			make_rowcollapse_key_positions(query, query->groupClause);
 		rowcoverage_key_position_sets =
-			lappend(rowcoverage_key_position_sets,
-					make_rowcollapse_key_positions(query, query->groupClause));
+			lappend(rowcoverage_key_position_sets, rc);
+	}
 	if (query->distinctClause != NIL)
+	{
+		KeyJoinRowCollapse *rc = palloc(sizeof(KeyJoinRowCollapse));
+
+		rc->reason = KJI_DISTINCT;
+		rc->positions =
+			make_rowcollapse_key_positions(query, query->distinctClause);
 		rowcoverage_key_position_sets =
-			lappend(rowcoverage_key_position_sets,
-					make_rowcollapse_key_positions(query, query->distinctClause));
+			lappend(rowcoverage_key_position_sets, rc);
+	}
 
 	Assert(query->jointree != NULL);
 	if (list_length(query->jointree->fromlist) == 1)
@@ -2895,7 +3098,8 @@ project_key_join_query_facts(KeyJoinFactContext *context, Query *query)
 										true, true, !block_rowcoverage,
 										query->jointree->quals,
 										query, topjtnode, top_rtindex,
-										rowcoverage_key_position_sets, NIL);
+										rowcoverage_key_position_sets, NIL,
+										KJI_ROW_REMOVING_CLAUSE);
 		pfree(attrmap);
 	}
 
@@ -3008,7 +3212,8 @@ project_key_join_facts_from_rte(KeyJoinSurfaceFacts *dst, RangeTblEntry *src,
 								Node *filter_qual, Query *filter_query,
 								Node *filter_jtnode, Index filter_rtindex,
 								List *rowcoverage_key_position_sets,
-								List *extra_unique_deps)
+								List *extra_unique_deps,
+								KeyJoinInactiveReason inact_reason)
 {
 	bool		tablesample;
 	int			natts;
@@ -3026,11 +3231,22 @@ project_key_join_facts_from_rte(KeyJoinSurfaceFacts *dst, RangeTblEntry *src,
 		KeyJoinFact *new;
 		List	   *newpositions;
 
+		/* Carry an already-inactive fact forward inert (keeps its stamp). */
+		if (!old->active)
+		{
+			add_inactive_projected(dst, old, attrmap, KJI_NONE);
+			continue;
+		}
+
 		switch (old->kind)
 		{
 			case KJF_NOT_NULL:
 				if (!preserve_notnull)
+				{
+					add_inactive_projected(dst, old, attrmap,
+										   KJI_NULL_EXTENDING_JOIN);
 					continue;
+				}
 				Assert(old->attnum > 0 && old->attnum <= natts);
 				if (attrmap[old->attnum] == NIL)
 					continue;
@@ -3044,7 +3260,10 @@ project_key_join_facts_from_rte(KeyJoinSurfaceFacts *dst, RangeTblEntry *src,
 
 			case KJF_UNIQUE:
 				if (!preserve_unique)
+				{
+					add_inactive_projected(dst, old, attrmap, KJI_JOIN_FANOUT);
 					continue;
+				}
 				Assert(list_length(old->baseAttnums) ==
 					   list_length(old->keyPositions));
 				newpositions = project_key_positions(old->keyPositions, attrmap);
@@ -3061,9 +3280,19 @@ project_key_join_facts_from_rte(KeyJoinSurfaceFacts *dst, RangeTblEntry *src,
 			case KJF_ROW_COVERAGE:
 				{
 					bool		rowcollapse_sets_cover = true;
+					KeyJoinInactiveReason rowcollapse_reason = KJI_NONE;
 
-					if (!preserve_rowcoverage || tablesample)
+					if (!preserve_rowcoverage)
+					{
+						add_inactive_projected(dst, old, attrmap, inact_reason);
 						continue;
+					}
+					if (tablesample)
+					{
+						add_inactive_projected(dst, old, attrmap,
+											   KJI_ROW_REMOVING_CLAUSE);
+						continue;
+					}
 					Assert(list_length(old->baseAttnums) ==
 						   list_length(old->keyPositions));
 					newpositions = project_key_positions(old->keyPositions,
@@ -3077,18 +3306,23 @@ project_key_join_facts_from_rte(KeyJoinSurfaceFacts *dst, RangeTblEntry *src,
 					 * Null-containing referenced rows are outside the
 					 * referenced multiset.
 					 */
-					foreach_ptr(List, rowcollapse_key_positions,
+					foreach_ptr(KeyJoinRowCollapse, rc,
 								rowcoverage_key_position_sets)
 					{
 						if (!rowcollapse_preserves_rowcoverage(newpositions,
-															   rowcollapse_key_positions))
+															   rc->positions))
 						{
 							rowcollapse_sets_cover = false;
+							rowcollapse_reason = rc->reason;
 							break;
 						}
 					}
 					if (!rowcollapse_sets_cover)
+					{
+						add_inactive_projected(dst, old, attrmap,
+											   rowcollapse_reason);
 						continue;
+					}
 
 					new = copyObject(old);
 					new->keyPositions = newpositions;
@@ -3101,7 +3335,11 @@ project_key_join_facts_from_rte(KeyJoinSurfaceFacts *dst, RangeTblEntry *src,
 											  filter_query, filter_jtnode,
 											  filter_rtindex, attrmap, natts,
 											  &new->dependencies, true))
+					{
+						add_inactive_projected(dst, old, attrmap,
+											   KJI_UNACCOUNTED_FILTER);
 						continue;
+					}
 					dst->facts = lappend(dst->facts, new);
 					continue;
 				}
@@ -3833,6 +4071,8 @@ compute_join_output_facts(JoinExpr *j,
 
 			if (fkfact->kind != KJF_FOREIGN_KEY)
 				continue;
+			if (!fkfact->active)
+				continue;
 			if (fkfact->constraint != key_join_node->constraint)
 				continue;
 			if (!select_key_position_parts(key_join_node->referencingAttnums,
@@ -3844,6 +4084,8 @@ compute_join_output_facts(JoinExpr *j,
 				bool		unique_matches = true;
 
 				if (fact->kind != KJF_UNIQUE)
+					continue;
+				if (!fact->active)
 					continue;
 
 				Assert(list_length(key_join_node->referencingAttnums) ==
@@ -3908,7 +4150,8 @@ compute_join_output_facts(JoinExpr *j,
 									join_filter_for_side(j->jointype,
 														 referencing_left,
 														 j->joinFilter),
-									NULL, NULL, referencing_rtindex, NIL, NIL);
+									NULL, NULL, referencing_rtindex, NIL, NIL,
+									KJI_NONE);
 	project_key_join_facts_from_rte(result, referenced_rte, referenced_map,
 									preserve_referenced_notnull,
 									referencing_unique,
@@ -3917,7 +4160,8 @@ compute_join_output_facts(JoinExpr *j,
 														 referenced_left,
 														 j->joinFilter),
 									NULL, NULL, referenced_rtindex, NIL,
-									referencing_unique_deps);
+									referencing_unique_deps,
+									KJI_JOIN_NOT_PRESERVED);
 
 	/*
 	 * Filter propagation: only safe when referenced side is fully
@@ -3936,6 +4180,8 @@ compute_join_output_facts(JoinExpr *j,
 			List	   *target_selected_base = NIL;
 
 			if (source->kind != KJF_FOREIGN_KEY)
+				continue;
+			if (!source->active)
 				continue;
 			if (source->constraint != key_join_node->constraint ||
 				source->filterConjuncts == NIL)
@@ -3980,6 +4226,8 @@ compute_join_output_facts(JoinExpr *j,
 				if (target->kind != KJF_FOREIGN_KEY &&
 					target->kind != KJF_ROW_COVERAGE)
 					continue;
+				if (!target->active)
+					continue;
 				if (target->relid != source->referencedRelid)
 					continue;
 				projected_positions =
@@ -3995,6 +4243,8 @@ compute_join_output_facts(JoinExpr *j,
 				foreach_node(KeyJoinFact, out, result->facts)
 				{
 					if (out->kind != target->kind)
+						continue;
+					if (!out->active)
 						continue;
 					if (out->kind == KJF_FOREIGN_KEY)
 					{
@@ -4506,15 +4756,27 @@ revalidate_query_jointree_proofs(Query *query, Node *jtnode,
 									 !join_preserves_side(j->jointype,
 														  referencing_left),
 									 &match))
+			{
+				bool		local_is_referencing =
+					(key_join->direction == KEY_JOIN_TO);
+				RangeTblEntry *ref_alias_rte =
+					rt_fetch(key_join->refAliasVarno, query->rtable);
+				KeyJoinFailureSide referencing = {0};
+				KeyJoinFailureSide referenced = {0};
 
-				/*
-				 * No parser_errposition() here.  This fires during
-				 * stored-query revalidation, when the original SQL text is
-				 * long gone and the source location is no longer meaningful.
-				 */
-				ereport(ERROR,
-						(errcode(ERRCODE_INVALID_FOREIGN_KEY),
-						 errmsg("key join cannot be proven from available constraints")));
+				referencing.rte =
+					local_is_referencing ? right_rte : ref_alias_rte;
+				referencing.attnums =
+					local_is_referencing ? key_join->referencingAttnums :
+					key_join->refAliasAttnums;
+				referenced.rte =
+					local_is_referencing ? ref_alias_rte : right_rte;
+				referenced.attnums =
+					local_is_referencing ? key_join->refAliasAttnums :
+					key_join->referencedAttnums;
+				key_join_report_failure(NULL, -1, j->jointype, &match,
+										&referencing, &referenced);
+			}
 
 			/*
 			 * Join-local FILTER quals are kept separately on joinFilter and
@@ -4633,6 +4895,9 @@ add_fact(KeyJoinSurfaceFacts *set, KeyJoinFactKind kind)
 	KeyJoinFact *fact = makeNode(KeyJoinFact);
 
 	fact->kind = kind;
+	fact->active = true;
+	fact->inactiveReason = KJI_NONE;
+	fact->inactiveOriginView = InvalidOid;
 	set->facts = lappend(set->facts, fact);
 	return fact;
 }
@@ -4891,4 +5156,284 @@ list_make_attrnums(const AttrNumber *attnums, int nattnums)
 	for (int i = 0; i < nattnums; i++)
 		result = lappend_int(result, attnums[i]);
 	return result;
+}
+
+/*
+ * add_inactive_projected
+ *
+ *		Carry a fact forward as inactive (diagnostics only), remapping its
+ *		columns through attrmap so a later rejection can still locate it.  An
+ *		active fact is stamped now (first death wins); an already-inactive fact
+ *		keeps its earlier stamp.  A fact whose columns the projection does not
+ *		carry is dropped.
+ *
+ * Called by:
+ *		project_key_join_facts_from_rte
+ */
+static void
+add_inactive_projected(KeyJoinSurfaceFacts *dst, KeyJoinFact *old,
+					   List **attrmap, KeyJoinInactiveReason reason)
+{
+	if (old->kind == KJF_NOT_NULL)
+	{
+		Assert(old->attnum > 0);
+		foreach_int(attno, attrmap[old->attnum])
+		{
+			KeyJoinFact *new = copyObject(old);
+
+			new->attnum = attno;
+			if (old->active)
+			{
+				new->active = false;
+				new->inactiveReason = reason;
+			}
+			dst->facts = lappend(dst->facts, new);
+		}
+	}
+	else
+	{
+		List	   *newpositions;
+		KeyJoinFact *new;
+
+		newpositions = project_key_positions(old->keyPositions, attrmap);
+		if (newpositions == NIL)
+			return;
+		new = copyObject(old);
+		new->keyPositions = newpositions;
+		if (old->active)
+		{
+			new->active = false;
+			new->inactiveReason = reason;
+		}
+		dst->facts = lappend(dst->facts, new);
+	}
+}
+
+/*
+ * key_join_failure_detail
+ *
+ *		Build the DETAIL for a rejected key join using relation aliases and
+ *		columns from the rejected FOR KEY clause.
+ */
+static char *
+key_join_failure_detail(KeyJoinReq req, bool inactivated,
+						KeyJoinInactiveReason reason, Oid origin_view,
+						const char *referencing_relcols,
+						const char *referenced_relcols,
+						const char *referencing_relation,
+						const char *referenced_relation,
+						const char *join_name)
+{
+	char	   *origin_suffix = pstrdup("");
+	const char *cause;
+
+	if (OidIsValid(origin_view))
+	{
+		char	   *relname = get_rel_name(origin_view);
+		char	   *nspname = get_namespace_name(get_rel_namespace(origin_view));
+
+		origin_suffix = psprintf(" inside view \"%s.%s\"",
+								 nspname ? nspname : "?",
+								 relname ? relname : "?");
+	}
+
+	switch (reason)
+	{
+		case KJI_NULL_EXTENDING_JOIN:
+			cause = "a preceding outer join that can null-extend it";
+			break;
+		case KJI_JOIN_NOT_PRESERVED:
+			cause = "a preceding join";
+			break;
+		case KJI_JOIN_FANOUT:
+			cause = "a preceding join that can match a referenced row more than once";
+			break;
+		case KJI_ROW_REMOVING_CLAUSE:
+			cause = "HAVING, LIMIT, OFFSET, or FOR UPDATE";
+			break;
+		case KJI_GROUP_BY:
+			cause = "GROUP BY";
+			break;
+		case KJI_DISTINCT:
+			cause = "DISTINCT";
+			break;
+		case KJI_UNACCOUNTED_FILTER:
+			cause = "a filter that cannot be accounted for";
+			break;
+		default:
+			cause = "an intervening operation";
+			break;
+	}
+
+	switch (req)
+	{
+		case REQ_FKPAIR:
+			return psprintf("The matching foreign key for %s references different columns than %s.",
+							referencing_relcols, referenced_relcols);
+
+		case REQ_IDENTITY:
+			return psprintf("Equality semantics for %s and %s do not match.",
+							referencing_relcols, referenced_relcols);
+
+		case REQ_FILTER:
+			return psprintf("Referenced relation %s has a filter that is not matched by referencing relation %s, so not every %s value can be proven to have a matching %s row.",
+							referenced_relation, referencing_relation,
+							referencing_relcols, referenced_relation);
+
+		case REQ_UNIQUE:
+			if (inactivated && reason == KJI_JOIN_FANOUT)
+				return psprintf("A preceding join%s may duplicate rows from referenced relation %s, so referenced columns %s are not proven unique at this point in the query.",
+								origin_suffix, referenced_relation,
+								referenced_relcols);
+			if (inactivated)
+				return psprintf("Referenced columns %s are not proven unique at this point in the query.",
+								referenced_relcols);
+			return psprintf("Referenced columns %s are not proven unique.",
+							referenced_relcols);
+
+		case REQ_COVERAGE:
+			if (inactivated && reason == KJI_UNACCOUNTED_FILTER)
+				return psprintf("Referenced relation %s is filtered before this key join%s, so not every %s value can be proven to have a matching %s row.",
+								referenced_relation, origin_suffix,
+								referencing_relcols, referenced_relation);
+			if (inactivated)
+				return psprintf("Referenced relation %s may lose rows before this key join because of %s%s, so not every %s value can be proven to have a matching %s row.",
+								referenced_relation, cause, origin_suffix,
+								referencing_relcols, referenced_relation);
+			return psprintf("Referenced relation %s is not proven to contain every referenced key row, so not every %s value can be proven to have a matching %s row.",
+							referenced_relation, referencing_relcols,
+							referenced_relation);
+
+		case REQ_NOTNULL:
+			if (inactivated)
+				return psprintf("Referencing columns %s might contain nulls because of %s%s, so this %s could filter rows from %s.",
+								referencing_relcols, cause, origin_suffix,
+								join_name, referencing_relation);
+			return psprintf("Referencing columns %s might contain nulls, so this %s could filter rows from %s.",
+							referencing_relcols, join_name,
+							referencing_relation);
+
+		default:
+			return psprintf("There is no matching foreign key constraint for %s referencing %s.",
+							referencing_relcols, referenced_relcols);
+	}
+}
+
+/*
+ * key_join_failure_hint
+ *
+ *		Build an actionable HINT for a rejected key join.
+ */
+static char *
+key_join_failure_hint(KeyJoinReq req, KeyJoinInactiveReason reason)
+{
+	switch (req)
+	{
+		case REQ_FK:
+			return NULL;
+
+		case REQ_UNIQUE:
+			if (reason == KJI_NONE)
+				return pstrdup("If possible duplication of rows is intended, use JOIN ... ON (...).");
+			return NULL;
+
+		case REQ_COVERAGE:
+			if (reason == KJI_UNACCOUNTED_FILTER)
+				return pstrdup("If filtering referenced rows before this key join is not intended, move or remove the filter; otherwise use JOIN ... ON (...).");
+			return pstrdup("If row removal on the referenced side is not intended, preserve referenced rows before this key join; otherwise use JOIN ... ON (...).");
+
+		case REQ_FKPAIR:
+			return NULL;
+
+		case REQ_IDENTITY:
+			return pstrdup("If this comparison is intended, use JOIN ... ON (...).");
+
+		case REQ_FILTER:
+			return NULL;
+
+		case REQ_NOTNULL:
+			return pstrdup("If rows with null referencing columns should be preserved, use an outer join type; otherwise use JOIN ... ON (...).");
+
+		default:
+			return NULL;
+	}
+}
+
+/*
+ * key_join_report_failure
+ *
+ *		Format and report an unproven key join.  The two callers only decide
+ *		which query side is referencing/referenced; this function owns the
+ *		user-facing message shape.
+ */
+static void
+key_join_report_failure(ParseState *pstate, ParseLoc location,
+						JoinType jointype, const KeyJoinMatch *match,
+						const KeyJoinFailureSide *referencing,
+						const KeyJoinFailureSide *referenced)
+{
+	const KeyJoinFailureSide *sides[2] = {referencing, referenced};
+	const char *relations[2];
+	char	   *relcols[2];
+	char	   *detail;
+	char	   *hint;
+
+	for (int i = 0; i < 2; i++)
+	{
+		const KeyJoinFailureSide *side = sides[i];
+		StringInfoData colbuf;
+		bool		first = true;
+
+		Assert(side != NULL);
+		Assert((side->columns != NULL) != (side->rte != NULL));
+		Assert(side->columns == NULL || side->ncolumns > 0);
+		Assert(side->rte == NULL || side->attnums != NIL);
+
+		relations[i] = quote_identifier(side->alias != NULL ?
+										 side->alias :
+										 side->rte->eref->aliasname);
+
+		initStringInfo(&colbuf);
+		if (side->columns != NULL)
+		{
+			for (int j = 0; j < side->ncolumns; j++)
+			{
+				if (!first)
+					appendStringInfoString(&colbuf, ", ");
+				appendStringInfoString(&colbuf,
+									   quote_identifier(side->columns[j].name));
+				first = false;
+			}
+		}
+		else
+		{
+			foreach_int(attno, side->attnums)
+			{
+				char	   *colname = get_rte_attribute_name(side->rte, attno);
+
+				if (!first)
+					appendStringInfoString(&colbuf, ", ");
+				appendStringInfoString(&colbuf, quote_identifier(colname));
+				first = false;
+			}
+		}
+		relcols[i] = psprintf("%s (%s)", relations[i], colbuf.data);
+	}
+
+	detail =
+		key_join_failure_detail(match->failReq, match->failInactivated,
+								match->failReason, match->failOriginView,
+								relcols[0], relcols[1],
+								relations[0], relations[1],
+								jointype == JOIN_INNER ?
+								"inner join" : "join");
+	hint = key_join_failure_hint(match->failReq, match->failReason);
+
+	ereport(ERROR,
+			(errcode(ERRCODE_INVALID_FOREIGN_KEY),
+			 errmsg("key join from referencing relation %s to referenced relation %s cannot be proven",
+					relations[0], relations[1]),
+			 errdetail("%s", detail),
+			 hint != NULL ? errhint("%s", hint) : 0,
+			 pstate != NULL ? parser_errposition(pstate, location) : 0));
 }

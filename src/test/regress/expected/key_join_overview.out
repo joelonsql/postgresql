@@ -181,15 +181,18 @@ LINE 2: JOIN fk_orders FOR KEY (nonexistent) -> ref_products (prod_i...
 -- rejected, reason: no matching FK constraint (prod_name is not the referenced column)
 SELECT * FROM ref_products
 JOIN fk_orders FOR KEY (ord_prod_id) -> ref_products (prod_name);
-ERROR:  key join cannot be proven from available constraints
+ERROR:  key join from referencing relation fk_orders to referenced relation ref_products cannot be proven
 LINE 2: JOIN fk_orders FOR KEY (ord_prod_id) -> ref_products (prod_n...
                        ^
+DETAIL:  Referenced columns ref_products (prod_name) are not proven unique.
+HINT:  If possible duplication of rows is intended, use JOIN ... ON (...).
 -- rejected, reason: wrong direction (fk_orders has no FK referencing ref_products that way)
 SELECT * FROM fk_orders
 JOIN ref_products FOR KEY (prod_id) -> fk_orders (ord_prod_id);
-ERROR:  key join cannot be proven from available constraints
+ERROR:  key join from referencing relation ref_products to referenced relation fk_orders cannot be proven
 LINE 2: JOIN ref_products FOR KEY (prod_id) -> fk_orders (ord_prod_i...
                           ^
+DETAIL:  There is no matching foreign key constraint for ref_products (prod_id) referencing fk_orders (ord_prod_id).
 -- ============================================================
 -- 2. Join types (INNER, LEFT, RIGHT, FULL)
 -- ============================================================
@@ -272,9 +275,10 @@ ORDER BY wh_id;
 -- rejected, reason: mismatched column order
 SELECT * FROM ref_locations
 JOIN fk_warehouses FOR KEY (wh_zip, wh_country) -> ref_locations (loc_country, loc_zip);
-ERROR:  key join cannot be proven from available constraints
+ERROR:  key join from referencing relation fk_warehouses to referenced relation ref_locations cannot be proven
 LINE 2: JOIN fk_warehouses FOR KEY (wh_zip, wh_country) -> ref_locat...
                            ^
+DETAIL:  The matching foreign key for fk_warehouses (wh_zip, wh_country) references different columns than ref_locations (loc_country, loc_zip).
 -- ============================================================
 -- 4. Derived tables (views, subqueries, CTEs)
 -- ============================================================
@@ -371,9 +375,10 @@ FROM (
     LEFT JOIN fk_inventory ON fk_inventory.inv_prod_id = ref_products.prod_id
 ) q
 JOIN fk_orders FOR KEY (ord_prod_id) -> q (prod_id);
-ERROR:  key join cannot be proven from available constraints
+ERROR:  key join from referencing relation fk_orders to referenced relation q cannot be proven
 LINE 7: JOIN fk_orders FOR KEY (ord_prod_id) -> q (prod_id);
                        ^
+DETAIL:  There is no matching foreign key constraint for fk_orders (ord_prod_id) referencing q (prod_id).
 -- rejected, reason: ordinary USING join in subquery does not expose key facts
 SELECT q.prod_id, fk_orders.ord_id
 FROM (
@@ -382,9 +387,10 @@ FROM (
     LEFT JOIN (SELECT inv_prod_id AS prod_id FROM fk_inventory) i USING (prod_id)
 ) q
 JOIN fk_orders FOR KEY (ord_prod_id) -> q (prod_id);
-ERROR:  key join cannot be proven from available constraints
+ERROR:  key join from referencing relation fk_orders to referenced relation q cannot be proven
 LINE 7: JOIN fk_orders FOR KEY (ord_prod_id) -> q (prod_id);
                        ^
+DETAIL:  There is no matching foreign key constraint for fk_orders (ord_prod_id) referencing q (prod_id).
 -- rejected, reason: ordinary CROSS JOIN with WHERE does not expose key facts
 SELECT q.prod_id, fk_orders.ord_id
 FROM (
@@ -394,9 +400,10 @@ FROM (
     WHERE fk_inventory.inv_prod_id = ref_products.prod_id
 ) q
 JOIN fk_orders FOR KEY (ord_prod_id) -> q (prod_id);
-ERROR:  key join cannot be proven from available constraints
+ERROR:  key join from referencing relation fk_orders to referenced relation q cannot be proven
 LINE 8: JOIN fk_orders FOR KEY (ord_prod_id) -> q (prod_id);
                        ^
+DETAIL:  There is no matching foreign key constraint for fk_orders (ord_prod_id) referencing q (prod_id).
 -- rejected, reason: comma join with WHERE does not expose key facts
 SELECT q.prod_id, fk_orders.ord_id
 FROM (
@@ -405,42 +412,52 @@ FROM (
     WHERE fk_inventory.inv_prod_id = ref_products.prod_id
 ) q
 JOIN fk_orders FOR KEY (ord_prod_id) -> q (prod_id);
-ERROR:  key join cannot be proven from available constraints
+ERROR:  key join from referencing relation fk_orders to referenced relation q cannot be proven
 LINE 7: JOIN fk_orders FOR KEY (ord_prod_id) -> q (prod_id);
                        ^
+DETAIL:  There is no matching foreign key constraint for fk_orders (ord_prod_id) referencing q (prod_id).
 -- rejected, reason: view with WHERE on referenced side (R violated)
 CREATE VIEW v_products_filtered AS
     SELECT prod_id, prod_name FROM ref_products WHERE prod_id > 0;
 SELECT * FROM v_products_filtered v
 -- accepted
 JOIN fk_orders FOR KEY (ord_prod_id) -> v (prod_id);
-ERROR:  key join cannot be proven from available constraints
+ERROR:  key join from referencing relation fk_orders to referenced relation v cannot be proven
 LINE 3: JOIN fk_orders FOR KEY (ord_prod_id) -> v (prod_id);
                        ^
+DETAIL:  Referenced relation v is filtered before this key join inside view "public.v_products_filtered", so not every fk_orders (ord_prod_id) value can be proven to have a matching v row.
+HINT:  If filtering referenced rows before this key join is not intended, move or remove the filter; otherwise use JOIN ... ON (...).
 -- rejected, reason: subquery with LIMIT on referenced side (R violated)
 SELECT * FROM (SELECT prod_id FROM ref_products LIMIT 1) AS q
 JOIN fk_orders FOR KEY (ord_prod_id) -> q (prod_id);
-ERROR:  key join cannot be proven from available constraints
+ERROR:  key join from referencing relation fk_orders to referenced relation q cannot be proven
 LINE 2: JOIN fk_orders FOR KEY (ord_prod_id) -> q (prod_id);
                        ^
+DETAIL:  Referenced relation q may lose rows before this key join because of HAVING, LIMIT, OFFSET, or FOR UPDATE, so not every fk_orders (ord_prod_id) value can be proven to have a matching q row.
+HINT:  If row removal on the referenced side is not intended, preserve referenced rows before this key join; otherwise use JOIN ... ON (...).
 -- rejected, reason: TABLESAMPLE on referenced side (R violated)
 SELECT * FROM ref_products rp TABLESAMPLE SYSTEM (0)
 JOIN fk_orders FOR KEY (ord_prod_id) -> rp (prod_id);
-ERROR:  key join cannot be proven from available constraints
+ERROR:  key join from referencing relation fk_orders to referenced relation rp cannot be proven
 LINE 2: JOIN fk_orders FOR KEY (ord_prod_id) -> rp (prod_id);
                        ^
+DETAIL:  There is no matching foreign key constraint for fk_orders (ord_prod_id) referencing rp (prod_id).
 -- rejected, reason: wrapped TABLESAMPLE still does not preserve row coverage
 SELECT * FROM (SELECT prod_id FROM ref_products TABLESAMPLE SYSTEM (0)) AS q
 JOIN fk_orders FOR KEY (ord_prod_id) -> q (prod_id);
-ERROR:  key join cannot be proven from available constraints
+ERROR:  key join from referencing relation fk_orders to referenced relation q cannot be proven
 LINE 2: JOIN fk_orders FOR KEY (ord_prod_id) -> q (prod_id);
                        ^
+DETAIL:  Referenced relation q may lose rows before this key join because of HAVING, LIMIT, OFFSET, or FOR UPDATE, so not every fk_orders (ord_prod_id) value can be proven to have a matching q row.
+HINT:  If row removal on the referenced side is not intended, preserve referenced rows before this key join; otherwise use JOIN ... ON (...).
 -- rejected, reason: SKIP LOCKED on referenced side may remove rows at execution (R violated)
 SELECT * FROM (SELECT prod_id FROM ref_products FOR UPDATE SKIP LOCKED) AS q
 JOIN fk_orders FOR KEY (ord_prod_id) -> q (prod_id);
-ERROR:  key join cannot be proven from available constraints
+ERROR:  key join from referencing relation fk_orders to referenced relation q cannot be proven
 LINE 2: JOIN fk_orders FOR KEY (ord_prod_id) -> q (prod_id);
                        ^
+DETAIL:  Referenced relation q may lose rows before this key join because of HAVING, LIMIT, OFFSET, or FOR UPDATE, so not every fk_orders (ord_prod_id) value can be proven to have a matching q row.
+HINT:  If row removal on the referenced side is not intended, preserve referenced rows before this key join; otherwise use JOIN ... ON (...).
 -- rejected, reason: recursive CTE
 WITH RECURSIVE rcte AS (
     SELECT prod_id FROM ref_products
@@ -448,9 +465,10 @@ WITH RECURSIVE rcte AS (
     SELECT prod_id FROM rcte
 )
 SELECT * FROM rcte JOIN fk_orders FOR KEY (ord_prod_id) -> rcte (prod_id);
-ERROR:  key join cannot be proven from available constraints
+ERROR:  key join from referencing relation fk_orders to referenced relation rcte cannot be proven
 LINE 6: SELECT * FROM rcte JOIN fk_orders FOR KEY (ord_prod_id) -> r...
                                           ^
+DETAIL:  There is no matching foreign key constraint for fk_orders (ord_prod_id) referencing rcte (prod_id).
 -- accepted, reason: two-level chain employees -> teams -> departments
 SELECT ref_departments.dept_name, ref_teams.team_id, fk_employees.emp_id
 FROM ref_departments
@@ -523,9 +541,11 @@ SELECT * FROM
     GROUP BY ref_products.prod_id + 1
 ) q
 JOIN fk_reviews FOR KEY (rev_prod_id) -> q (expr_result);
-ERROR:  key join cannot be proven from available constraints
+ERROR:  key join from referencing relation fk_reviews to referenced relation q cannot be proven
 LINE 8: JOIN fk_reviews FOR KEY (rev_prod_id) -> q (expr_result);
                         ^
+DETAIL:  Referenced relation q is not proven to contain every referenced key row, so not every fk_reviews (rev_prod_id) value can be proven to have a matching q row.
+HINT:  If row removal on the referenced side is not intended, preserve referenced rows before this key join; otherwise use JOIN ... ON (...).
 -- rejected, reason: GROUP BY columns from different base tables
 SELECT * FROM
 (
@@ -535,9 +555,10 @@ SELECT * FROM
     GROUP BY ref_products.prod_id, fk_orders.ord_id
 ) q
 JOIN fk_reviews FOR KEY (rev_prod_id) -> q (prod_id);
-ERROR:  key join cannot be proven from available constraints
+ERROR:  key join from referencing relation fk_reviews to referenced relation q cannot be proven
 LINE 8: JOIN fk_reviews FOR KEY (rev_prod_id) -> q (prod_id);
                         ^
+DETAIL:  A preceding join may duplicate rows from referenced relation q, so referenced columns q (prod_id) are not proven unique at this point in the query.
 -- rejected, reason: DISTINCT on partial composite PK
 SELECT * FROM
 (
@@ -557,9 +578,10 @@ SELECT * FROM
     LEFT JOIN fk_orders FOR KEY (ord_prod_id) -> ref_products (prod_id)
 ) q
 JOIN fk_reviews FOR KEY (rev_prod_id) -> q (prod_id);
-ERROR:  key join cannot be proven from available constraints
+ERROR:  key join from referencing relation fk_reviews to referenced relation q cannot be proven
 LINE 8: JOIN fk_reviews FOR KEY (rev_prod_id) -> q (prod_id);
                         ^
+DETAIL:  A preceding join may duplicate rows from referenced relation q, so referenced columns q (prod_id) are not proven unique at this point in the query.
 -- ============================================================
 -- 6. Outer join null semantics
 -- ============================================================
@@ -601,17 +623,21 @@ SELECT *
 FROM fko_clear_a
 FULL JOIN fko_clear_b FOR KEY (a_id) -> fko_clear_a (id)
 JOIN fko_clear_c FOR KEY (id) <- fko_clear_b (c_id);
-ERROR:  key join cannot be proven from available constraints
+ERROR:  key join from referencing relation fko_clear_b to referenced relation fko_clear_c cannot be proven
 LINE 4: JOIN fko_clear_c FOR KEY (id) <- fko_clear_b (c_id);
                          ^
+DETAIL:  Referencing columns fko_clear_b (c_id) might contain nulls because of a preceding outer join that can null-extend it, so this inner join could filter rows from fko_clear_b.
+HINT:  If rows with null referencing columns should be preserved, use an outer join type; otherwise use JOIN ... ON (...).
 -- rejected, symmetric form: referencing on LEFT
 SELECT *
 FROM fko_clear_b
 FULL JOIN fko_clear_a FOR KEY (id) <- fko_clear_b (a_id)
 JOIN fko_clear_c FOR KEY (id) <- fko_clear_b (c_id);
-ERROR:  key join cannot be proven from available constraints
+ERROR:  key join from referencing relation fko_clear_b to referenced relation fko_clear_c cannot be proven
 LINE 4: JOIN fko_clear_c FOR KEY (id) <- fko_clear_b (c_id);
                          ^
+DETAIL:  Referencing columns fko_clear_b (c_id) might contain nulls because of a preceding outer join that can null-extend it, so this inner join could filter rows from fko_clear_b.
+HINT:  If rows with null referencing columns should be preserved, use an outer join type; otherwise use JOIN ... ON (...).
 -- accepted, sanity: INNER preserved-side JOIN does not null-extend, so the
 -- chained INNER key join on c_id is still provable.
 SELECT *
@@ -634,9 +660,10 @@ SELECT * FROM
     JOIN fk_orders FOR KEY (ord_prod_id) -> ref_products (prod_id)
 ) q
 JOIN fk_reviews FOR KEY (rev_prod_id) -> q (prod_id);
-ERROR:  key join cannot be proven from available constraints
+ERROR:  key join from referencing relation fk_reviews to referenced relation q cannot be proven
 LINE 7: JOIN fk_reviews FOR KEY (rev_prod_id) -> q (prod_id);
                         ^
+DETAIL:  A preceding join may duplicate rows from referenced relation q, so referenced columns q (prod_id) are not proven unique at this point in the query.
 -- rejected, reason: INNER JOIN inside subquery removes rows (R violated)
 SELECT * FROM
 (
@@ -646,9 +673,11 @@ SELECT * FROM
     GROUP BY ref_products.prod_id
 ) q
 JOIN fk_reviews FOR KEY (rev_prod_id) -> q (prod_id);
-ERROR:  key join cannot be proven from available constraints
+ERROR:  key join from referencing relation fk_reviews to referenced relation q cannot be proven
 LINE 8: JOIN fk_reviews FOR KEY (rev_prod_id) -> q (prod_id);
                         ^
+DETAIL:  Referenced relation q may lose rows before this key join because of a preceding join, so not every fk_reviews (rev_prod_id) value can be proven to have a matching q row.
+HINT:  If row removal on the referenced side is not intended, preserve referenced rows before this key join; otherwise use JOIN ... ON (...).
 -- ============================================================
 -- 8. Constraint enforcement and timing
 -- ============================================================
@@ -657,21 +686,25 @@ SELECT ref_products.prod_id, fk_notenforced_child.ne_id
 FROM ref_products
 JOIN fk_notenforced_child FOR KEY (ne_p_id) -> ref_products (prod_id)
 ORDER BY ne_id;
-ERROR:  key join cannot be proven from available constraints
+ERROR:  key join from referencing relation fk_notenforced_child to referenced relation ref_products cannot be proven
 LINE 3: JOIN fk_notenforced_child FOR KEY (ne_p_id) -> ref_products ...
                                   ^
+DETAIL:  There is no matching foreign key constraint for fk_notenforced_child (ne_p_id) referencing ref_products (prod_id).
 -- rejected, reason: NOT VALID FK rejected
 SELECT * FROM ref_products
 JOIN fk_notvalid_child FOR KEY (nv_p_id) -> ref_products (prod_id);
-ERROR:  key join cannot be proven from available constraints
+ERROR:  key join from referencing relation fk_notvalid_child to referenced relation ref_products cannot be proven
 LINE 2: JOIN fk_notvalid_child FOR KEY (nv_p_id) -> ref_products (pr...
                                ^
+DETAIL:  There is no matching foreign key constraint for fk_notvalid_child (nv_p_id) referencing ref_products (prod_id).
 -- rejected, reason: NOT VALID NOT NULL rejected
 SELECT * FROM ref_products
 JOIN fk_notvalid_notnull_child FOR KEY (nvn_p_id) -> ref_products (prod_id);
-ERROR:  key join cannot be proven from available constraints
+ERROR:  key join from referencing relation fk_notvalid_notnull_child to referenced relation ref_products cannot be proven
 LINE 2: JOIN fk_notvalid_notnull_child FOR KEY (nvn_p_id) -> ref_pro...
                                        ^
+DETAIL:  Referencing columns fk_notvalid_notnull_child (nvn_p_id) might contain nulls, so this inner join could filter rows from fk_notvalid_notnull_child.
+HINT:  If rows with null referencing columns should be preserved, use an outer join type; otherwise use JOIN ... ON (...).
 -- accepted, reason: NOT DEFERRABLE key join works even after SET CONSTRAINTS ALL DEFERRED
 BEGIN;
 SET CONSTRAINTS ALL DEFERRED;
@@ -693,26 +726,29 @@ SELECT ref_products.prod_id, fk_deferrable_child.df_id
 FROM ref_products
 JOIN fk_deferrable_child FOR KEY (df_p_id) -> ref_products (prod_id)
 ORDER BY df_id;
-ERROR:  key join cannot be proven from available constraints
+ERROR:  key join from referencing relation fk_deferrable_child to referenced relation ref_products cannot be proven
 LINE 3: JOIN fk_deferrable_child FOR KEY (df_p_id) -> ref_products (...
                                  ^
+DETAIL:  There is no matching foreign key constraint for fk_deferrable_child (df_p_id) referencing ref_products (prod_id).
 -- rejected, reason: stored key join rejected when it depends on a DEFERRABLE constraint
 CREATE VIEW v_deferrable_key_join AS
 SELECT ref_products.prod_id, fk_deferrable_child.df_id
 FROM ref_products
 JOIN fk_deferrable_child FOR KEY (df_p_id) -> ref_products (prod_id);
-ERROR:  key join cannot be proven from available constraints
+ERROR:  key join from referencing relation fk_deferrable_child to referenced relation ref_products cannot be proven
 LINE 4: JOIN fk_deferrable_child FOR KEY (df_p_id) -> ref_products (...
                                  ^
+DETAIL:  There is no matching foreign key constraint for fk_deferrable_child (df_p_id) referencing ref_products (prod_id).
 -- rejected, reason: prepared key join rejected when it depends on a DEFERRABLE constraint
 PREPARE p_deferrable_key_join AS
 SELECT ref_products.prod_id, fk_deferrable_child.df_id
 FROM ref_products
 JOIN fk_deferrable_child FOR KEY (df_p_id) -> ref_products (prod_id)
 ORDER BY df_id;
-ERROR:  key join cannot be proven from available constraints
+ERROR:  key join from referencing relation fk_deferrable_child to referenced relation ref_products cannot be proven
 LINE 4: JOIN fk_deferrable_child FOR KEY (df_p_id) -> ref_products (...
                                  ^
+DETAIL:  There is no matching foreign key constraint for fk_deferrable_child (df_p_id) referencing ref_products (prod_id).
 -- rejected, reason: cursor key join rejected when it depends on a DEFERRABLE constraint
 BEGIN;
 DECLARE c_deferrable_key_join CURSOR FOR
@@ -721,9 +757,10 @@ FROM ref_products
 -- rejected, reason: cursor query depends on a DEFERRABLE FK
 JOIN fk_deferrable_child FOR KEY (df_p_id) -> ref_products (prod_id)
 ORDER BY df_id;
-ERROR:  key join cannot be proven from available constraints
+ERROR:  key join from referencing relation fk_deferrable_child to referenced relation ref_products cannot be proven
 LINE 5: JOIN fk_deferrable_child FOR KEY (df_p_id) -> ref_products (...
                                  ^
+DETAIL:  There is no matching foreign key constraint for fk_deferrable_child (df_p_id) referencing ref_products (prod_id).
 ROLLBACK;
 -- rejected, reason: pulled-up subquery key join rejected at PREPARE
 PREPARE p_pulled_up_deferrable_key_join AS
@@ -734,17 +771,19 @@ FROM (
     JOIN fk_deferrable_child FOR KEY (df_p_id) -> ref_products (prod_id)
 ) q
 ORDER BY df_id;
-ERROR:  key join cannot be proven from available constraints
+ERROR:  key join from referencing relation fk_deferrable_child to referenced relation ref_products cannot be proven
 LINE 6:     JOIN fk_deferrable_child FOR KEY (df_p_id) -> ref_produc...
                                      ^
+DETAIL:  There is no matching foreign key constraint for fk_deferrable_child (df_p_id) referencing ref_products (prod_id).
 -- rejected, reason: inlined SQL function key join rejected when the body is planned
 PREPARE p_inlined_deferrable_key_join AS
 SELECT * FROM fn_deferrable_key_join()
 ORDER BY df_id;
 EXECUTE p_inlined_deferrable_key_join;
-ERROR:  key join cannot be proven from available constraints
+ERROR:  key join from referencing relation fk_deferrable_child to referenced relation ref_products cannot be proven
 LINE 4:     JOIN fk_deferrable_child FOR KEY (df_p_id) -> ref_produc...
                                      ^
+DETAIL:  There is no matching foreign key constraint for fk_deferrable_child (df_p_id) referencing ref_products (prod_id).
 QUERY:  
     SELECT ref_products.prod_id, fk_deferrable_child.df_id
     FROM ref_products
@@ -758,18 +797,20 @@ SET CONSTRAINTS fk_deferrable_child_fk DEFERRED;
 SELECT * FROM ref_products
 -- rejected, reason: DEFERRABLE FK is currently deferred
 JOIN fk_deferrable_child FOR KEY (df_p_id) -> ref_products (prod_id);
-ERROR:  key join cannot be proven from available constraints
+ERROR:  key join from referencing relation fk_deferrable_child to referenced relation ref_products cannot be proven
 LINE 3: JOIN fk_deferrable_child FOR KEY (df_p_id) -> ref_products (...
                                  ^
+DETAIL:  There is no matching foreign key constraint for fk_deferrable_child (df_p_id) referencing ref_products (prod_id).
 ROLLBACK;
 -- rejected, reason: INITIALLY DEFERRED constraint rejected by default
 BEGIN;
 SELECT * FROM ref_products
 -- rejected, reason: FK is INITIALLY DEFERRED
 JOIN fk_initially_deferred_child FOR KEY (did_p_id) -> ref_products (prod_id);
-ERROR:  key join cannot be proven from available constraints
+ERROR:  key join from referencing relation fk_initially_deferred_child to referenced relation ref_products cannot be proven
 LINE 3: JOIN fk_initially_deferred_child FOR KEY (did_p_id) -> ref_p...
                                          ^
+DETAIL:  There is no matching foreign key constraint for fk_initially_deferred_child (did_p_id) referencing ref_products (prod_id).
 ROLLBACK;
 -- rejected, reason: INITIALLY DEFERRED constraint rejected even after SET CONSTRAINTS IMMEDIATE
 BEGIN;
@@ -779,9 +820,10 @@ FROM ref_products
 -- rejected, reason: INITIALLY DEFERRED FK remains unusable for key joins
 JOIN fk_initially_deferred_child FOR KEY (did_p_id) -> ref_products (prod_id)
 ORDER BY did_id;
-ERROR:  key join cannot be proven from available constraints
+ERROR:  key join from referencing relation fk_initially_deferred_child to referenced relation ref_products cannot be proven
 LINE 4: JOIN fk_initially_deferred_child FOR KEY (did_p_id) -> ref_p...
                                          ^
+DETAIL:  There is no matching foreign key constraint for fk_initially_deferred_child (did_p_id) referencing ref_products (prod_id).
 ROLLBACK;
 -- rejected, reason: DEFERRABLE UNIQUE does not preserve referenced-side uniqueness
 SELECT q.prod_id, fk_reviews.rev_id
@@ -792,24 +834,27 @@ FROM (
         FOR KEY (dui_prod_id) -> ref_products (prod_id)
 ) q
 JOIN fk_reviews FOR KEY (rev_prod_id) -> q (prod_id);
-ERROR:  key join cannot be proven from available constraints
+ERROR:  key join from referencing relation fk_reviews to referenced relation q cannot be proven
 LINE 8: JOIN fk_reviews FOR KEY (rev_prod_id) -> q (prod_id);
                         ^
+DETAIL:  A preceding join may duplicate rows from referenced relation q, so referenced columns q (prod_id) are not proven unique at this point in the query.
 -- ============================================================
 -- 9. Unsupported relation kinds
 -- ============================================================
 -- rejected, reason: function as FK source
 SELECT * FROM ref_products
 JOIN fn_products() AS f FOR KEY (prod_id) -> ref_products (prod_id);
-ERROR:  key join cannot be proven from available constraints
+ERROR:  key join from referencing relation f to referenced relation ref_products cannot be proven
 LINE 2: JOIN fn_products() AS f FOR KEY (prod_id) -> ref_products (p...
                                 ^
+DETAIL:  There is no matching foreign key constraint for f (prod_id) referencing ref_products (prod_id).
 -- rejected, reason: materialized view
 SELECT * FROM mv_products
 JOIN fk_orders FOR KEY (ord_prod_id) -> mv_products (prod_id);
-ERROR:  key join cannot be proven from available constraints
+ERROR:  key join from referencing relation fk_orders to referenced relation mv_products cannot be proven
 LINE 2: JOIN fk_orders FOR KEY (ord_prod_id) -> mv_products (prod_id...
                        ^
+DETAIL:  There is no matching foreign key constraint for fk_orders (ord_prod_id) referencing mv_products (prod_id).
 -- rejected, reason: UNION ALL in derived table
 SELECT * FROM ref_products
 JOIN (
@@ -817,9 +862,10 @@ JOIN (
     UNION ALL
     SELECT ord_id, ord_prod_id FROM fk_orders
 ) AS u FOR KEY (ord_prod_id) -> ref_products (prod_id);
-ERROR:  key join cannot be proven from available constraints
+ERROR:  key join from referencing relation u to referenced relation ref_products cannot be proven
 LINE 6: ) AS u FOR KEY (ord_prod_id) -> ref_products (prod_id);
                ^
+DETAIL:  There is no matching foreign key constraint for u (ord_prod_id) referencing ref_products (prod_id).
 -- ============================================================
 -- 10. Deep multi-feature stress test
 -- ============================================================
@@ -907,9 +953,11 @@ FROM (
 ) deep
 JOIN fk_reviews rev FOR KEY (rev_prod_id) -> deep (p_id)
 ORDER BY rev.rev_id;
-ERROR:  key join cannot be proven from available constraints
+ERROR:  key join from referencing relation rev to referenced relation deep cannot be proven
 LINE 13: JOIN fk_reviews rev FOR KEY (rev_prod_id) -> deep (p_id)
                              ^
+DETAIL:  Referenced relation deep is filtered before this key join, so not every rev (rev_prod_id) value can be proven to have a matching deep row.
+HINT:  If filtering referenced rows before this key join is not intended, move or remove the filter; otherwise use JOIN ... ON (...).
 -- ============================================================
 -- Cleanup
 -- ============================================================

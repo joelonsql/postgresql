@@ -16,7 +16,7 @@ step wakeup:
 
 step create_view: <... completed>
 step enable_rls: <... completed>
-ERROR:  key join cannot be proven from available constraints
+ERROR:  key join from referencing relation c to referenced relation p cannot be proven
 step detach: 
 	SELECT FROM injection_points_detach('key-join-after-proof-match');
 
@@ -37,7 +37,7 @@ step wakeup:
 
 step create_view: <... completed>
 step add_inherits: <... completed>
-ERROR:  key join cannot be proven from available constraints
+ERROR:  key join from referencing relation c to referenced relation p cannot be proven
 step detach: 
 	SELECT FROM injection_points_detach('key-join-after-proof-match');
 

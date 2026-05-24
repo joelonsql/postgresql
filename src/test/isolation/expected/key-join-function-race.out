@@ -15,7 +15,7 @@ step s2_create_view:
  <waiting ...>
 step s1_commit: COMMIT;
 step s2_create_view: <... completed>
-ERROR:  key join cannot be proven from available constraints
+ERROR:  key join from referencing relation v_c to referenced relation v_p cannot be proven
 
 starting permutation: s1_begin s1_lock_g s2_replace_g s1_drop_g s1_commit
 step s1_begin: BEGIN;
