@@ -114,9 +114,6 @@ SELECT prod_id, prod_name FROM ref_products;
 CREATE FUNCTION fn_products() RETURNS TABLE (prod_id INTEGER, prod_name TEXT)
 LANGUAGE sql AS $$ SELECT prod_id, prod_name FROM ref_products $$;
 
-CREATE FUNCTION fn_product_count() RETURNS BIGINT
-LANGUAGE sql STABLE AS $$ SELECT count(*) FROM ref_products $$;
-
 SET check_function_bodies = off;
 -- accepted, reason: function body is not checked while check_function_bodies is off
 CREATE FUNCTION fn_deferrable_key_join()
@@ -303,6 +300,43 @@ FROM cte2
 JOIN fk_orders FOR KEY (ord_prod_id) -> cte2 (c2_pid)
 ORDER BY ord_id;
 
+-- rejected, reason: ordinary ON join in subquery does not expose key facts
+SELECT q.prod_id, fk_orders.ord_id
+FROM (
+    SELECT ref_products.prod_id
+    FROM ref_products
+    LEFT JOIN fk_inventory ON fk_inventory.inv_prod_id = ref_products.prod_id
+) q
+JOIN fk_orders FOR KEY (ord_prod_id) -> q (prod_id);
+
+-- rejected, reason: ordinary USING join in subquery does not expose key facts
+SELECT q.prod_id, fk_orders.ord_id
+FROM (
+    SELECT p.prod_id
+    FROM ref_products p
+    LEFT JOIN (SELECT inv_prod_id AS prod_id FROM fk_inventory) i USING (prod_id)
+) q
+JOIN fk_orders FOR KEY (ord_prod_id) -> q (prod_id);
+
+-- rejected, reason: ordinary CROSS JOIN with WHERE does not expose key facts
+SELECT q.prod_id, fk_orders.ord_id
+FROM (
+    SELECT ref_products.prod_id
+    FROM ref_products
+    CROSS JOIN fk_inventory
+    WHERE fk_inventory.inv_prod_id = ref_products.prod_id
+) q
+JOIN fk_orders FOR KEY (ord_prod_id) -> q (prod_id);
+
+-- rejected, reason: comma join with WHERE does not expose key facts
+SELECT q.prod_id, fk_orders.ord_id
+FROM (
+    SELECT ref_products.prod_id
+    FROM ref_products, fk_inventory
+    WHERE fk_inventory.inv_prod_id = ref_products.prod_id
+) q
+JOIN fk_orders FOR KEY (ord_prod_id) -> q (prod_id);
+
 -- rejected, reason: view with WHERE on referenced side (R violated)
 CREATE VIEW v_products_filtered AS
     SELECT prod_id, prod_name FROM ref_products WHERE prod_id > 0;
@@ -465,24 +499,6 @@ FROM fko_clear_a
 JOIN fko_clear_b FOR KEY (a_id) -> fko_clear_a (id)
 JOIN fko_clear_c FOR KEY (id) <- fko_clear_b (c_id)
 ORDER BY fko_clear_b.id;
-
--- ============================================================
--- 7. Single-row companions and row preservation
--- ============================================================
-
--- accepted, reason: aggregate without GROUP BY, CROSS JOINed with key join
-SELECT sub.cnt, fk_orders.ord_id
-FROM (SELECT count(*) AS cnt FROM fk_orders) sub
-CROSS JOIN ref_products
-JOIN fk_orders FOR KEY (ord_prod_id) -> ref_products (prod_id)
-ORDER BY fk_orders.ord_id;
-
--- accepted, reason: scalar function in FROM as single-row companion
-SELECT sub.cnt, fk_orders.ord_id
-FROM fn_product_count() AS sub(cnt)
-CROSS JOIN ref_products
-JOIN fk_orders FOR KEY (ord_prod_id) -> ref_products (prod_id)
-ORDER BY fk_orders.ord_id;
 
 -- rejected, reason: non-unique key join inside subquery (U violated)
 SELECT * FROM
@@ -722,7 +738,6 @@ DROP VIEW v_products_renamed;
 DROP VIEW v_products_filtered;
 
 DROP FUNCTION fn_products();
-DROP FUNCTION fn_product_count();
 DROP FUNCTION fn_deferrable_key_join();
 DROP MATERIALIZED VIEW mv_products;
 

@@ -2808,157 +2808,10 @@ DROP FUNCTION rowcov_numeric_scale_cmp(numeric, numeric);
 DROP FUNCTION rowcov_numeric_scale_eq(numeric, numeric);
 DROP FUNCTION rowcov_numeric_scale_lt(numeric, numeric);
 
--- Nonvolatile single-row CROSS JOIN companions can preserve facts.
-SELECT count(*) AS safe_single_row_rows
-FROM (SELECT p.id FROM products_gbu p CROSS JOIN (SELECT count(*) AS n FROM products_gbu) z) q
--- accepted, reason: aggregate companion is exactly one nonvolatile row
-JOIN resupplies_gbu r FOR KEY (product_id) -> q (id);
-
-SELECT count(*) AS safe_multi_function_rows
-FROM (
-    SELECT p.id
-    FROM products_gbu p
-    CROSS JOIN ROWS FROM (abs(1), length('x')) AS f(a, b)
-) q
--- accepted, reason: multiple scalar ROWS FROM companion is still one row
-JOIN resupplies_gbu r FOR KEY (product_id) -> q (id);
-
-CREATE TABLE single_row_no_fact (id int);
-SELECT *
-FROM (
-    SELECT n.id
-    FROM single_row_no_fact n
-    CROSS JOIN (SELECT count(*) AS total FROM products_gbu) z
-) q
--- rejected, reason: single-row companion cannot create missing key facts
-JOIN resupplies_gbu r FOR KEY (product_id) -> q (id);
-DROP TABLE single_row_no_fact;
-
--- Zero-row CROSS JOIN companions must not be treated as single-row.
-SELECT * FROM (SELECT p.id FROM products_gbu p CROSS JOIN (SELECT 1 WHERE false) z) q
--- rejected, reason: CROSS JOIN companion can be zero rows
-JOIN resupplies_gbu r FOR KEY (product_id) -> q (id);
-
-SELECT * FROM (SELECT p.id FROM products_gbu p CROSS JOIN (SELECT 1 LIMIT 0) z) q
--- rejected, reason: CROSS JOIN companion can be zero rows
-JOIN resupplies_gbu r FOR KEY (product_id) -> q (id);
-
-SELECT * FROM (SELECT p.id FROM products_gbu p CROSS JOIN generate_series(1, 2) z) q
--- rejected, reason: CROSS JOIN companion duplicates referenced keys
-JOIN resupplies_gbu r FOR KEY (product_id) -> q (id);
-
-SELECT * FROM (
-    SELECT p.id
-    FROM products_gbu p
-    CROSS JOIN ROWS FROM (abs(1), generate_series(1, 2)) AS f(a, b)
-) q
--- rejected, reason: one set-returning function makes ROWS FROM multi-row
-JOIN resupplies_gbu r FOR KEY (product_id) -> q (id);
-
-SELECT * FROM (
-    SELECT p.id
-    FROM products_gbu p
-    CROSS JOIN unnest(ARRAY[1, 2], ARRAY[3, 4]) AS u(a, b)
-) q
--- rejected, reason: multi-argument unnest is represented as multiple SRFs
-JOIN resupplies_gbu r FOR KEY (product_id) -> q (id);
-
-SELECT * FROM (SELECT p.id FROM products_gbu p CROSS JOIN (SELECT count(*), generate_series(1, 2) FROM products_gbu) z) q
--- rejected, reason: target-list SRF expands aggregate companion rows
-JOIN resupplies_gbu r FOR KEY (product_id) -> q (id);
-
-SELECT * FROM (SELECT p.id FROM products_gbu p CROSS JOIN (SELECT count(*) FROM products_gbu GROUP BY id) z) q
--- rejected, reason: grouped aggregate companion can produce many rows
-JOIN resupplies_gbu r FOR KEY (product_id) -> q (id);
-
-SELECT * FROM (SELECT p.id FROM products_gbu p CROSS JOIN (SELECT count(*) FROM products_gbu GROUP BY GROUPING SETS (())) z) q
--- rejected, reason: grouping sets are not treated as scalar aggregate companions
-JOIN resupplies_gbu r FOR KEY (product_id) -> q (id);
-
-SELECT * FROM (SELECT p.id FROM products_gbu p CROSS JOIN (SELECT count(*) FROM products_gbu WHERE random() < 2) z) q
--- rejected, reason: volatile aggregate companion cannot preserve facts
-JOIN resupplies_gbu r FOR KEY (product_id) -> q (id);
-
-SELECT * FROM (products_gbu p CROSS JOIN (SELECT count(*) AS n FROM products_gbu WHERE random() < 2) z) q(id, n)
--- rejected, reason: volatile aggregate companion cannot preserve direct join facts
-JOIN resupplies_gbu r FOR KEY (product_id) -> q (id);
-
-SELECT count(*) AS pruned_volatile_rows
-FROM (
-    SELECT p.id
-    FROM products_gbu p
-    CROSS JOIN (
-        SELECT count(*) AS n
-        FROM products_gbu
-        WHERE false AND random() < 2
-    ) z
-) q
--- accepted, reason: volatile branch is pruned before the after-planning check
-JOIN resupplies_gbu r FOR KEY (product_id) -> q (id);
-
-SELECT * FROM (SELECT p.id FROM products_gbu p CROSS JOIN (SELECT count(*) FROM products_gbu HAVING false) z) q
--- rejected, reason: HAVING can suppress the aggregate companion row
-JOIN resupplies_gbu r FOR KEY (product_id) -> q (id);
-
-SELECT * FROM (products_gbu p CROSS JOIN (SELECT count(*) AS n FROM products_gbu HAVING false) z) q(id, n)
--- rejected, reason: HAVING can suppress the aggregate companion row
-JOIN resupplies_gbu r FOR KEY (product_id) -> q (id);
-
-SELECT * FROM (products_gbu p CROSS JOIN (SELECT count(*) AS n FROM products_gbu UNION SELECT count(*) FROM products_gbu) z) q(id, n)
--- rejected, reason: set-operation aggregate companions are not scalar-row proofs
-JOIN resupplies_gbu r FOR KEY (product_id) -> q (id);
-
-SELECT * FROM (SELECT p.id FROM products_gbu p CROSS JOIN (SELECT count(*) FROM products_gbu LIMIT 0) z) q
--- rejected, reason: LIMIT can suppress the aggregate companion row
-JOIN resupplies_gbu r FOR KEY (product_id) -> q (id);
-
-SELECT * FROM (SELECT p.id FROM products_gbu p CROSS JOIN (SELECT count(*) FROM products_gbu OFFSET 1) z) q
--- rejected, reason: OFFSET can suppress the aggregate companion row
-JOIN resupplies_gbu r FOR KEY (product_id) -> q (id);
-
-SELECT * FROM (
-    SELECT p.id
-    FROM products_gbu p
-    CROSS JOIN LATERAL set_config('key_join.volatile', p.id::text, false) s(x)
-) q
--- rejected, reason: volatile single-row companion cannot preserve facts
-JOIN resupplies_gbu r FOR KEY (product_id) -> q (id);
-
-SELECT * FROM (
-    SELECT p.id
-    FROM products_gbu p
-    CROSS JOIN ROWS FROM (set_config('key_join.volatile', 'x', false)) AS f(x)
-) q
--- rejected, reason: volatile ROWS FROM companion cannot preserve facts
-JOIN resupplies_gbu r FOR KEY (product_id) -> q (id);
-
-SELECT * FROM (products_gbu p CROSS JOIN ROWS FROM (set_config('key_join.volatile', 'x', false)) AS f(x)) q(id, x)
--- rejected, reason: volatile ROWS FROM companion cannot preserve direct join facts
-JOIN resupplies_gbu r FOR KEY (product_id) -> q (id);
-
 CREATE SEQUENCE volatile_default_seq;
 CREATE FUNCTION volatile_default_int(v int DEFAULT nextval('volatile_default_seq')::int)
 RETURNS int
 LANGUAGE sql STABLE AS $$ SELECT v $$;
-
-SELECT * FROM (
-    SELECT p.id
-    FROM products_gbu p
-    CROSS JOIN (
-        SELECT count(*) AS n, volatile_default_int() AS side_effect
-        FROM products_gbu
-    ) z
-) q
--- rejected, reason: volatile default aggregate companion cannot preserve facts
-JOIN resupplies_gbu r FOR KEY (product_id) -> q (id);
-
-SELECT * FROM (
-    SELECT p.id
-    FROM products_gbu p
-    CROSS JOIN ROWS FROM (volatile_default_int()) AS f(x)
-) q
--- rejected, reason: volatile default ROWS FROM companion cannot preserve facts
-JOIN resupplies_gbu r FOR KEY (product_id) -> q (id);
 
 CREATE VIEW volatile_target_parent_v AS
 SELECT id, set_config('key_join.volatile', id::text, false) AS side_effect
@@ -2981,17 +2834,6 @@ FROM volatile_default_target_parent_v p
 JOIN resupplies_gbu r FOR KEY (product_id) -> p (id);
 
 DROP VIEW volatile_default_target_parent_v;
-
-SELECT * FROM (
-    SELECT p.id
-    FROM products_gbu p
-    CROSS JOIN (
-        SELECT count(*), set_config('key_join.volatile', 'x', false)
-        FROM products_gbu
-    ) z
-) q
--- rejected, reason: volatile aggregate companion cannot preserve facts
-JOIN resupplies_gbu r FOR KEY (product_id) -> q (id);
 
 DROP FUNCTION volatile_default_int(int);
 DROP SEQUENCE volatile_default_seq;
@@ -3371,34 +3213,6 @@ CREATE VIEW v_filter AS
   SELECT * FROM t1 JOIN t2 FOR KEY (c3) -> t1 (c1) FILTER (WHERE t2.c4 = 10);
 SELECT pg_get_viewdef('v_filter');
 DROP VIEW v_filter;
-
--- FILTER4b: deparse -> key join when the arrow alias is inside an unnamed join
-CREATE TABLE filter_deparse_parent (id int PRIMARY KEY);
-CREATE TABLE filter_deparse_child
-(
-    id int PRIMARY KEY,
-    parent_id int NOT NULL REFERENCES filter_deparse_parent (id)
-);
-
-CREATE VIEW v_filter_deparse_to AS
-SELECT p.id, c.id AS child_id
-FROM (filter_deparse_parent p
-      CROSS JOIN (SELECT count(*) AS n FROM filter_deparse_parent) s)
-JOIN filter_deparse_child c FOR KEY (parent_id) -> p (id);
-
-SELECT pg_get_viewdef('v_filter_deparse_to');
-DROP VIEW v_filter_deparse_to;
-
--- FILTER4c: deparse <- key join when the arrow alias is inside an unnamed join
-CREATE VIEW v_filter_deparse_from AS
-SELECT p.id, c.id AS child_id
-FROM (filter_deparse_child c
-      CROSS JOIN (SELECT count(*) AS n FROM filter_deparse_parent) s)
-JOIN filter_deparse_parent p FOR KEY (id) <- c (parent_id);
-
-SELECT pg_get_viewdef('v_filter_deparse_from');
-DROP VIEW v_filter_deparse_from;
-DROP TABLE filter_deparse_child, filter_deparse_parent;
 
 -- FILTER5: a filtered key-join result must not export unfiltered rowCoverage
 CREATE TABLE filter_parent (id int PRIMARY KEY);
@@ -5359,18 +5173,6 @@ SELECT * FROM sqlbody_kj_old_dep();
 DROP FUNCTION sqlbody_kj_old_dep();
 DROP VIEW sqlbody_kj_old_parent_v;
 DROP TABLE sqlbody_kj_old_child, sqlbody_kj_old_parent;
-
--- Stored view projection can search past a non-join jointree leaf before it
--- finds a nested join expression.
-CREATE VIEW stored_jointree_search_kj_v AS
-SELECT p.c1, c.c3
-FROM (SELECT count(*) FROM t1) AS one
-CROSS JOIN (t1 p JOIN t2 c FOR KEY (c3) -> p (c1));
-SELECT p.c1, v.c3
-FROM t1 p
-JOIN stored_jointree_search_kj_v v FOR KEY (c3) -> p (c1)
-ORDER BY p.c1;
-DROP VIEW stored_jointree_search_kj_v;
 
 -- Query-level uniqueness on the referenced side must not be paired with row
 -- coverage from an unrelated relation that happens to expose the same column

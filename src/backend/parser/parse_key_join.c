@@ -2197,11 +2197,9 @@ ensure_key_join_surface_facts(KeyJoinFactContext *context, RangeTblEntry *rte)
 
 				/*
 				 * Ordinary joins expose no key-join facts.  Only accepted key
-				 * joins and plain inner cross joins can need the input
-				 * surfaces below.
+				 * joins need the input surfaces below.
 				 */
-				if (j->keyJoin == NULL &&
-					(j->quals != NULL || j->jointype != JOIN_INNER))
+				if (j->keyJoin == NULL)
 					break;
 
 				left_rtindex = jtnode_surface_rtindex(j->larg);
@@ -3767,12 +3765,25 @@ compute_join_output_facts(JoinExpr *j,
 	KeyJoinSurfaceFacts *result;
 	List	  **lmap;
 	List	  **rmap;
+	KeyJoinNode *key_join_node;
+	bool		referencing_left;
+	bool		referenced_left;
+	RangeTblEntry *referencing_rte;
+	RangeTblEntry *referenced_rte;
+	List	  **referencing_map;
+	List	  **referenced_map;
+	Index		referencing_rtindex;
+	Index		referenced_rtindex;
+	bool		referenced_preserved;
+	bool		preserve_referencing_notnull;
+	bool		preserve_referenced_notnull;
+	bool		referencing_unique = false;
+	List	   *referencing_unique_deps = NIL;
 
 	Assert(left_rte != NULL);
 	Assert(right_rte != NULL);
 	Assert(joinrte->rtekind == RTE_JOIN);
-	Assert(j->keyJoin != NULL ||
-		   (j->quals == NULL && j->jointype == JOIN_INNER));
+	Assert(j->keyJoin != NULL);
 
 	joinrte->keyJoinFacts = NULL;
 	result = makeNode(KeyJoinSurfaceFacts);
@@ -3783,347 +3794,250 @@ compute_join_output_facts(JoinExpr *j,
 							  list_length(right_rte->eref->colnames));
 
 	/* Accepted key joins can export facts for later key-join proofs. */
-	if (j->keyJoin != NULL)
+	key_join_node = castNode(KeyJoinNode, j->keyJoin);
+	referencing_left = (key_join_node->referencingVarno == left_rtindex);
+	referenced_left = (key_join_node->referencedVarno == left_rtindex);
+	referencing_rte = referencing_left ? left_rte : right_rte;
+	referenced_rte = referenced_left ? left_rte : right_rte;
+	referencing_map = referencing_left ? lmap : rmap;
+	referenced_map = referenced_left ? lmap : rmap;
+	referencing_rtindex = referencing_left ? left_rtindex : right_rtindex;
+	referenced_rtindex = referenced_left ? left_rtindex : right_rtindex;
+	referenced_preserved = join_preserves_side(j->jointype, referenced_left);
+	preserve_referencing_notnull =
+		!join_null_extends_side(j->jointype, referencing_left);
+	preserve_referenced_notnull =
+		!join_null_extends_side(j->jointype, referenced_left);
+
+	Assert(key_join_node->referencingVarno == left_rtindex ||
+		   key_join_node->referencingVarno == right_rtindex);
+	Assert(key_join_node->referencedVarno == left_rtindex ||
+		   key_join_node->referencedVarno == right_rtindex);
+	Assert(key_join_node->referencingVarno != key_join_node->referencedVarno);
+
+	Assert(referencing_rte->keyJoinFactsComputed);
+	Assert(referenced_rte->keyJoinFactsComputed);
+	Assert(referencing_rte->keyJoinFacts != NULL);
+	Assert(referenced_rte->keyJoinFacts != NULL);
+
+	/*
+	 * Output-fact maintenance: detect referencing-side uniqueness
+	 * compatible with the accepted FK join predicate.
+	 */
 	{
-		KeyJoinNode *key_join_node;
-		bool		referencing_left;
-		bool		referenced_left;
-		RangeTblEntry *referencing_rte;
-		RangeTblEntry *referenced_rte;
-		List	  **referencing_map;
-		List	  **referenced_map;
-		Index		referencing_rtindex;
-		Index		referenced_rtindex;
-		bool		referenced_preserved;
-		bool		preserve_referencing_notnull;
-		bool		preserve_referenced_notnull;
-		bool		referencing_unique = false;
-		List	   *referencing_unique_deps = NIL;
+		KeyJoinSurfaceFacts *set = referencing_rte->keyJoinFacts;
 
-		key_join_node = castNode(KeyJoinNode, j->keyJoin);
-		referencing_left = (key_join_node->referencingVarno == left_rtindex);
-		referenced_left = (key_join_node->referencedVarno == left_rtindex);
-		referencing_rte = referencing_left ? left_rte : right_rte;
-		referenced_rte = referenced_left ? left_rte : right_rte;
-		referencing_map = referencing_left ? lmap : rmap;
-		referenced_map = referenced_left ? lmap : rmap;
-		referencing_rtindex = referencing_left ? left_rtindex : right_rtindex;
-		referenced_rtindex = referenced_left ? left_rtindex : right_rtindex;
-		referenced_preserved = join_preserves_side(j->jointype, referenced_left);
-		preserve_referencing_notnull =
-			!join_null_extends_side(j->jointype, referencing_left);
-		preserve_referenced_notnull =
-			!join_null_extends_side(j->jointype, referenced_left);
-
-		Assert(key_join_node->referencingVarno == left_rtindex ||
-			   key_join_node->referencingVarno == right_rtindex);
-		Assert(key_join_node->referencedVarno == left_rtindex ||
-			   key_join_node->referencedVarno == right_rtindex);
-		Assert(key_join_node->referencingVarno != key_join_node->referencedVarno);
-
-		Assert(referencing_rte->keyJoinFactsComputed);
-		Assert(referenced_rte->keyJoinFactsComputed);
-		Assert(referencing_rte->keyJoinFacts != NULL);
-		Assert(referenced_rte->keyJoinFacts != NULL);
-
-		/*
-		 * Output-fact maintenance: detect referencing-side uniqueness
-		 * compatible with the accepted FK join predicate.
-		 */
+		foreach_node(KeyJoinFact, fkfact, set->facts)
 		{
-			KeyJoinSurfaceFacts *set = referencing_rte->keyJoinFacts;
+			List	   *fk_key_positions;
 
-			foreach_node(KeyJoinFact, fkfact, set->facts)
+			if (fkfact->kind != KJF_FOREIGN_KEY)
+				continue;
+			if (fkfact->constraint != key_join_node->constraint)
+				continue;
+			if (!select_key_position_parts(key_join_node->referencingAttnums,
+										   fkfact->keyPositions,
+										   NIL, NULL, &fk_key_positions))
+				continue;
+			foreach_node(KeyJoinFact, fact, set->facts)
 			{
-				List	   *fk_key_positions;
+				bool		unique_matches = true;
 
-				if (fkfact->kind != KJF_FOREIGN_KEY)
+				if (fact->kind != KJF_UNIQUE)
 					continue;
-				if (fkfact->constraint != key_join_node->constraint)
-					continue;
-				if (!select_key_position_parts(key_join_node->referencingAttnums,
-											   fkfact->keyPositions,
-											   NIL, NULL, &fk_key_positions))
-					continue;
-				foreach_node(KeyJoinFact, fact, set->facts)
+
+				Assert(list_length(key_join_node->referencingAttnums) ==
+					   list_length(fk_key_positions));
+
+				/*
+				 * A referencing-side unique fact proves at-most-one match
+				 * only if it covers each referencing join column with the
+				 * same key identity as the FK positions selected for the
+				 * accepted join predicate.
+				 */
+				foreach_node(KeyJoinKeyPosition, keypos, fact->keyPositions)
 				{
-					bool		unique_matches = true;
+					ListCell   *lcattno;
+					ListCell   *lcfkpos;
+					bool		found = false;
 
-					if (fact->kind != KJF_UNIQUE)
+					forboth(lcattno, key_join_node->referencingAttnums,
+							lcfkpos, fk_key_positions)
+					{
+						KeyJoinKeyPosition *fkpos =
+							lfirst_node(KeyJoinKeyPosition, lcfkpos);
+
+						if (!list_member_int(keypos->attnums,
+											 lfirst_int(lcattno)))
+							continue;
+						if (!key_position_identity_equal(keypos, fkpos))
+						{
+							unique_matches = false;
+							break;
+						}
+						found = true;
+						break;
+					}
+					if (!found)
+						unique_matches = false;
+					if (!unique_matches)
+						break;
+				}
+
+				if (unique_matches)
+				{
+					referencing_unique = true;
+					referencing_unique_deps =
+						append_dependencies_unique(referencing_unique_deps,
+												   fact->dependencies);
+					break;
+				}
+			}
+			if (referencing_unique)
+				break;
+		}
+	}
+
+	/*
+	 * Project both input surfaces through the join output.  Null
+	 * extension can kill not-null facts; FK containment survives as
+	 * nullable containment, with not-null facts carrying condition 3.
+	 */
+	project_key_join_facts_from_rte(result, referencing_rte, referencing_map,
+									preserve_referencing_notnull, true, true,
+									join_filter_for_side(j->jointype,
+														 referencing_left,
+														 j->joinFilter),
+									NULL, NULL, referencing_rtindex, NIL, NIL);
+	project_key_join_facts_from_rte(result, referenced_rte, referenced_map,
+									preserve_referenced_notnull,
+									referencing_unique,
+									referenced_preserved,
+									join_filter_for_side(j->jointype,
+														 referenced_left,
+														 j->joinFilter),
+									NULL, NULL, referenced_rtindex, NIL,
+									referencing_unique_deps);
+
+	/*
+	 * Filter propagation: only safe when referenced side is fully
+	 * matched.  Filters may move only onto facts rooted in the FK's
+	 * referenced relation; FK output facts additionally match their own
+	 * constraint OID below.
+	 */
+	if (!referenced_preserved)
+	{
+		KeyJoinSurfaceFacts *rfacts = referencing_rte->keyJoinFacts;
+		KeyJoinSurfaceFacts *pfacts = referenced_rte->keyJoinFacts;
+
+		foreach_node(KeyJoinFact, source, rfacts->facts)
+		{
+			List	   *source_selected_base;
+			List	   *target_selected_base = NIL;
+
+			if (source->kind != KJF_FOREIGN_KEY)
+				continue;
+			if (source->constraint != key_join_node->constraint ||
+				source->filterConjuncts == NIL)
+				continue;
+			Assert(list_length(source->baseAttnums) ==
+				   list_length(source->referencedAttnums));
+			if (!select_key_position_parts(key_join_node->referencingAttnums,
+										   source->keyPositions,
+										   source->baseAttnums,
+										   &source_selected_base, NULL))
+				continue;
+			foreach_int(srcbase, source_selected_base)
+			{
+				ListCell   *lcbase;
+				ListCell   *lcref;
+
+				forboth(lcbase, source->baseAttnums,
+						lcref, source->referencedAttnums)
+				{
+					if (lfirst_int(lcbase) == srcbase)
+					{
+						target_selected_base =
+							lappend_int(target_selected_base,
+										lfirst_int(lcref));
+						break;
+					}
+				}
+			}
+
+			Assert(list_length(target_selected_base) == list_length(source_selected_base));
+
+			/*
+			 * Match FK and RowCoverage targets to out-facts; the FK case
+			 * also requires constraint match so canonical filters can't
+			 * cross distinct FKs.
+			 */
+			foreach_node(KeyJoinFact, target, pfacts->facts)
+			{
+				List	   *projected_positions;
+				List	   *position_map;
+
+				if (target->kind != KJF_FOREIGN_KEY &&
+					target->kind != KJF_ROW_COVERAGE)
+					continue;
+				if (target->relid != source->referencedRelid)
+					continue;
+				projected_positions =
+					project_key_positions(target->keyPositions,
+										  referenced_map);
+				Assert(projected_positions != NIL);
+				position_map =
+					make_filter_position_map(source->baseAttnums,
+											 source_selected_base,
+											 target->baseAttnums,
+											 target_selected_base);
+
+				foreach_node(KeyJoinFact, out, result->facts)
+				{
+					if (out->kind != target->kind)
 						continue;
-
-					Assert(list_length(key_join_node->referencingAttnums) ==
-						   list_length(fk_key_positions));
+					if (out->kind == KJF_FOREIGN_KEY)
+					{
+						if (out->constraint != target->constraint)
+							continue;
+					}
+					if (out->relid != target->relid)
+						continue;
+					if (!int_lists_same_members(out->baseAttnums,
+												target->baseAttnums))
+						continue;
+					if (!equal(out->keyPositions, projected_positions))
+						continue;
 
 					/*
-					 * A referencing-side unique fact proves at-most-one match
-					 * only if it covers each referencing join column with the
-					 * same key identity as the FK positions selected for the
-					 * accepted join predicate.
+					 * Remap each canonical FK-side filter onto the output
+					 * fact.  Keep only filters that still constrain the
+					 * output key positions after projection.
 					 */
-					foreach_node(KeyJoinKeyPosition, keypos, fact->keyPositions)
+					foreach_ptr(Node, conjunct, source->filterConjuncts)
 					{
-						ListCell   *lcattno;
-						ListCell   *lcfkpos;
-						bool		found = false;
+						Node	   *remapped;
 
-						forboth(lcattno, key_join_node->referencingAttnums,
-								lcfkpos, fk_key_positions)
-						{
-							KeyJoinKeyPosition *fkpos =
-								lfirst_node(KeyJoinKeyPosition, lcfkpos);
-
-							if (!list_member_int(keypos->attnums,
-												 lfirst_int(lcattno)))
-								continue;
-							if (!key_position_identity_equal(keypos, fkpos))
-							{
-								unique_matches = false;
-								break;
-							}
-							found = true;
-							break;
-						}
-						if (!found)
-							unique_matches = false;
-						if (!unique_matches)
-							break;
-					}
-
-					if (unique_matches)
-					{
-						referencing_unique = true;
-						referencing_unique_deps =
-							append_dependencies_unique(referencing_unique_deps,
-													   fact->dependencies);
-						break;
-					}
-				}
-				if (referencing_unique)
-					break;
-			}
-		}
-
-		/*
-		 * Project both input surfaces through the join output.  Null
-		 * extension can kill not-null facts; FK containment survives as
-		 * nullable containment, with not-null facts carrying condition 3.
-		 */
-		project_key_join_facts_from_rte(result, referencing_rte, referencing_map,
-										preserve_referencing_notnull, true, true,
-										join_filter_for_side(j->jointype,
-															 referencing_left,
-															 j->joinFilter),
-										NULL, NULL, referencing_rtindex, NIL, NIL);
-		project_key_join_facts_from_rte(result, referenced_rte, referenced_map,
-										preserve_referenced_notnull,
-										referencing_unique,
-										referenced_preserved,
-										join_filter_for_side(j->jointype,
-															 referenced_left,
-															 j->joinFilter),
-										NULL, NULL, referenced_rtindex, NIL,
-										referencing_unique_deps);
-
-		/*
-		 * Filter propagation: only safe when referenced side is fully
-		 * matched.  Filters may move only onto facts rooted in the FK's
-		 * referenced relation; FK output facts additionally match their own
-		 * constraint OID below.
-		 */
-		if (!referenced_preserved)
-		{
-			KeyJoinSurfaceFacts *rfacts = referencing_rte->keyJoinFacts;
-			KeyJoinSurfaceFacts *pfacts = referenced_rte->keyJoinFacts;
-
-			foreach_node(KeyJoinFact, source, rfacts->facts)
-			{
-				List	   *source_selected_base;
-				List	   *target_selected_base = NIL;
-
-				if (source->kind != KJF_FOREIGN_KEY)
-					continue;
-				if (source->constraint != key_join_node->constraint ||
-					source->filterConjuncts == NIL)
-					continue;
-				Assert(list_length(source->baseAttnums) ==
-					   list_length(source->referencedAttnums));
-				if (!select_key_position_parts(key_join_node->referencingAttnums,
-											   source->keyPositions,
-											   source->baseAttnums,
-											   &source_selected_base, NULL))
-					continue;
-				foreach_int(srcbase, source_selected_base)
-				{
-					ListCell   *lcbase;
-					ListCell   *lcref;
-
-					forboth(lcbase, source->baseAttnums,
-							lcref, source->referencedAttnums)
-					{
-						if (lfirst_int(lcbase) == srcbase)
-						{
-							target_selected_base =
-								lappend_int(target_selected_base,
-											lfirst_int(lcref));
-							break;
-						}
-					}
-				}
-
-				Assert(list_length(target_selected_base) == list_length(source_selected_base));
-
-				/*
-				 * Match FK and RowCoverage targets to out-facts; the FK case
-				 * also requires constraint match so canonical filters can't
-				 * cross distinct FKs.
-				 */
-				foreach_node(KeyJoinFact, target, pfacts->facts)
-				{
-					List	   *projected_positions;
-					List	   *position_map;
-
-					if (target->kind != KJF_FOREIGN_KEY &&
-						target->kind != KJF_ROW_COVERAGE)
-						continue;
-					if (target->relid != source->referencedRelid)
-						continue;
-					projected_positions =
-						project_key_positions(target->keyPositions,
-											  referenced_map);
-					Assert(projected_positions != NIL);
-					position_map =
-						make_filter_position_map(source->baseAttnums,
-												 source_selected_base,
-												 target->baseAttnums,
-												 target_selected_base);
-
-					foreach_node(KeyJoinFact, out, result->facts)
-					{
-						if (out->kind != target->kind)
+						if (!filter_conjunct_can_remap(conjunct,
+													   position_map))
 							continue;
-						if (out->kind == KJF_FOREIGN_KEY)
-						{
-							if (out->constraint != target->constraint)
-								continue;
-						}
-						if (out->relid != target->relid)
-							continue;
-						if (!int_lists_same_members(out->baseAttnums,
-													target->baseAttnums))
-							continue;
-						if (!equal(out->keyPositions, projected_positions))
+						remapped = remap_filter_conjunct(conjunct,
+														 position_map);
+						if (!filter_conjunct_matches_key_positions(remapped,
+																   out->keyPositions))
 							continue;
 
-						/*
-						 * Remap each canonical FK-side filter onto the output
-						 * fact.  Keep only filters that still constrain the
-						 * output key positions after projection.
-						 */
-						foreach_ptr(Node, conjunct, source->filterConjuncts)
-						{
-							Node	   *remapped;
-
-							if (!filter_conjunct_can_remap(conjunct,
-														   position_map))
-								continue;
-							remapped = remap_filter_conjunct(conjunct,
-															 position_map);
-							if (!filter_conjunct_matches_key_positions(remapped,
-																	   out->keyPositions))
-								continue;
-
-							(void) collect_filter_expr_dependencies_walker(remapped,
-																		   &out->dependencies);
-							if (!list_contains_equal_node(out->filterConjuncts,
-														  remapped))
-								out->filterConjuncts =
-									lappend(out->filterConjuncts, remapped);
-						}
+						(void) collect_filter_expr_dependencies_walker(remapped,
+																	   &out->dependencies);
+						if (!list_contains_equal_node(out->filterConjuncts,
+													  remapped))
+							out->filterConjuncts =
+								lappend(out->filterConjuncts, remapped);
 					}
 				}
 			}
 		}
 	}
-	else
-	{
-		RangeTblEntry *rtes[2];
-		bool		single_row[2];
-
-		/*
-		 * A plain inner cross join with one single-row input preserves the
-		 * other side's facts.  Keep this narrow: grouped aggregates without
-		 * grouping, and non-set-returning non-volatile functions.
-		 */
-		Assert(j->quals == NULL);
-		Assert(j->jointype == JOIN_INNER);
-		Assert(left_rte->keyJoinFactsComputed);
-		Assert(right_rte->keyJoinFactsComputed);
-
-		rtes[0] = left_rte;
-		rtes[1] = right_rte;
-		single_row[0] = false;
-		single_row[1] = false;
-
-		for (int i = 0; i < 2; i++)
-		{
-			RangeTblEntry *rte = rtes[i];
-
-			if (rte->rtekind == RTE_SUBQUERY)
-			{
-				Query	   *query = rte->subquery;
-
-				/*
-				 * Key-join fact computation works on parser Query trees.  Later
-				 * planner phases may clear RTE_SUBQUERY.subquery, but those
-				 * trees do not reach this code.  Parser-built subquery RTEs
-				 * likewise contain only SELECT queries; data-modifying CTEs
-				 * remain RTE_CTE.
-				 */
-				Assert(query != NULL);
-				Assert(query->commandType == CMD_SELECT);
-				if (query->setOperations != NULL ||
-					!query->hasAggs ||
-					query->hasTargetSRFs ||
-					query->groupClause != NIL ||
-					query->groupingSets != NIL ||
-					query->havingQual != NULL ||
-					query->limitOffset != NULL ||
-					query->limitCount != NULL ||
-					key_join_contains_volatile_after_planning((Node *) query))
-					continue;
-				single_row[i] = true;
-			}
-			else if (rte->rtekind == RTE_FUNCTION && !rte->funcordinality)
-			{
-				single_row[i] = true;
-				foreach_node(RangeTblFunction, rtfunc, rte->functions)
-				{
-					if (expression_returns_set(rtfunc->funcexpr))
-					{
-						single_row[i] = false;
-						break;
-					}
-					if (key_join_contains_volatile_after_planning(
-							rtfunc->funcexpr))
-					{
-						single_row[i] = false;
-						break;
-					}
-				}
-			}
-		}
-
-		if (single_row[0])
-			project_key_join_facts_from_rte(result, right_rte, rmap,
-											true, true, true, NULL, NULL, NULL, 0,
-											NIL, NIL);
-		else if (single_row[1])
-			project_key_join_facts_from_rte(result, left_rte, lmap,
-											true, true, true, NULL, NULL, NULL, 0,
-											NIL, NIL);
-	}
-
 	if (result->facts != NIL)
 		joinrte->keyJoinFacts = result;
 
