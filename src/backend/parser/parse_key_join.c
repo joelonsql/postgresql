@@ -1701,8 +1701,7 @@ filter_operator_matches_key_position(OpExpr *op, KeyJoinKeyPosition *keypos,
 		rettype = opform->oprresult;
 		ReleaseSysCache(optup);
 
-		if (!OidIsValid(funcid))
-			return false;
+		Assert(OidIsValid(funcid));
 
 		proctup = lock_and_fetch_key_join_proc((Oid) funcid);
 		procform = (Form_pg_proc) GETSTRUCT(proctup);
