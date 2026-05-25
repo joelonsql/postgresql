@@ -2638,11 +2638,8 @@ compute_key_join_relation_facts(KeyJoinFactContext *context,
 
 		contup = lock_and_fetch_key_join_constraint(fk->conoid);
 		con = (Form_pg_constraint) GETSTRUCT(contup);
-		if (con->contype != CONSTRAINT_FOREIGN ||
-			con->conrelid != rte->relid)
-			elog(ERROR,
-				 "locked constraint %u is not the expected foreign key constraint",
-				 con->oid);
+		Assert(con->contype == CONSTRAINT_FOREIGN);
+		Assert(con->conrelid == rte->relid);
 		if (!con->conenforced ||
 			!con->convalidated ||
 			con->condeferrable ||
