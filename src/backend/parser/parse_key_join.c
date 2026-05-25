@@ -2147,9 +2147,10 @@ ensure_key_join_surface_facts(KeyJoinFactContext *context, RangeTblEntry *rte)
 					 * views ran with revalidating_stored_query set.
 					 */
 					if (rte->keyJoinFacts != NULL &&
-						context->pstate != NULL &&
-						!context->revalidating_stored_query)
+						context->pstate != NULL)
 					{
+						Assert(!context->revalidating_stored_query);
+
 						foreach_node(KeyJoinFact, fact,
 									 rte->keyJoinFacts->facts)
 						{
