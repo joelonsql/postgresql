@@ -238,6 +238,11 @@ SELECT *
 FROM mcdc_text_cast_parent
 WHERE id::varchar === 'a'::varchar;
 
+CREATE VIEW mcdc_varchar_typmod_filter_v AS
+SELECT *
+FROM mcdc_varchar_parent
+WHERE id::varchar === 'aa'::varchar;
+
 CREATE VIEW mcdc_numdom_typmod_filter_v AS
 SELECT *
 FROM mcdc_numdom_parent
@@ -552,6 +557,12 @@ FROM mcdc_text_cast_filter_v v
 JOIN mcdc_text_cast_reader vr FOR KEY (parent_id) -> v (id)
 ORDER BY vr.id;
 
+-- Varchar typmod relabel filters are not canonical key filters.
+SELECT vc.id, v.id
+FROM mcdc_varchar_typmod_filter_v v
+JOIN mcdc_varchar_child vc FOR KEY (parent_id) -> v (id)
+ORDER BY vc.id;
+
 -- Domain relabel filters must keep the normalized base typmod.
 SELECT nr.id, v.id
 FROM mcdc_numdom_typmod_filter_v v
@@ -605,6 +616,7 @@ DROP TABLE mcdc_text_reader, mcdc_text_parent;
 DROP VIEW mcdc_text_cast_filter_v;
 DROP TABLE mcdc_text_cast_reader, mcdc_text_cast_parent;
 DROP TABLE mcdc_regclass_reader, mcdc_regclass_parent;
+DROP VIEW mcdc_varchar_typmod_filter_v;
 DROP TABLE mcdc_varchar_child, mcdc_varchar_parent;
 DROP OPERATOR CLASS mcdc_varchar_ops USING btree;
 DROP OPERATOR FAMILY mcdc_varchar_ops USING btree;
