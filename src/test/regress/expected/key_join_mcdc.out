@@ -184,8 +184,45 @@ CREATE TABLE mcdc_varchar_child
     id        int PRIMARY KEY,
     parent_id varchar(4) NOT NULL REFERENCES mcdc_varchar_parent (id)
 );
+CREATE DOMAIN mcdc_varchar_sig_dom AS varchar(4);
+CREATE FUNCTION mcdc_varchar_sig_dom_cmp(a mcdc_varchar_sig_dom,
+                                         b mcdc_varchar_sig_dom)
+RETURNS int LANGUAGE sql IMMUTABLE STRICT
+AS $$ SELECT bttextcmp(a::text, b::text) $$;
+CREATE FUNCTION mcdc_varchar_sig_dom_eq(a mcdc_varchar_sig_dom,
+                                        b mcdc_varchar_sig_dom)
+RETURNS boolean LANGUAGE sql IMMUTABLE STRICT
+AS $$ SELECT a::text = b::text $$;
+CREATE OPERATOR === (
+    LEFTARG = mcdc_varchar_sig_dom,
+    RIGHTARG = mcdc_varchar_sig_dom,
+    PROCEDURE = mcdc_varchar_sig_dom_eq,
+    COMMUTATOR = ===,
+    RESTRICT = eqsel,
+    JOIN = eqjoinsel,
+    MERGES
+);
+CREATE OPERATOR CLASS mcdc_varchar_sig_dom_ops
+FOR TYPE mcdc_varchar_sig_dom USING btree AS
+    OPERATOR 3 === (mcdc_varchar_sig_dom, mcdc_varchar_sig_dom),
+    FUNCTION 1 mcdc_varchar_sig_dom_cmp(mcdc_varchar_sig_dom,
+                                        mcdc_varchar_sig_dom);
+CREATE TABLE mcdc_varchar_sig_parent
+(
+    id mcdc_varchar_sig_dom
+);
+CREATE UNIQUE INDEX mcdc_varchar_sig_parent_idx
+    ON mcdc_varchar_sig_parent USING btree (id mcdc_varchar_sig_dom_ops);
+CREATE TABLE mcdc_varchar_sig_child
+(
+    id        int PRIMARY KEY,
+    parent_id mcdc_varchar_sig_dom NOT NULL
+        REFERENCES mcdc_varchar_sig_parent (id)
+);
 INSERT INTO mcdc_varchar_parent VALUES ('aa'), ('bb');
 INSERT INTO mcdc_varchar_child VALUES (901, 'aa'), (902, 'bb');
+INSERT INTO mcdc_varchar_sig_parent VALUES ('aa'), ('bb');
+INSERT INTO mcdc_varchar_sig_child VALUES (911, 'aa'), (912, 'bb');
 CREATE VIEW mcdc_text_cast_filter_v AS
 SELECT *
 FROM mcdc_text_cast_parent
@@ -607,6 +644,12 @@ FROM mcdc_sig_parent p
 JOIN mcdc_sig_child c FOR KEY (parent_id) -> p (id)
 ORDER BY c.id;
 ERROR:  key join from referencing relation c to referenced relation p cannot be proven at character 64
+-- Varchar-domain FK operators must use varchar or text equality input.
+SELECT c.id, p.id
+FROM mcdc_varchar_sig_parent p
+JOIN mcdc_varchar_sig_child c FOR KEY (parent_id) -> p (id)
+ORDER BY c.id;
+ERROR:  key join from referencing relation c to referenced relation p cannot be proven at character 80
 -- Procedure dependents without stored SQL bodies have nothing to revalidate.
 CREATE FUNCTION mcdc_support_func(internal)
 RETURNS internal
@@ -644,6 +687,15 @@ DROP OPERATOR FAMILY mcdc_varchar_ops USING btree;
 DROP FUNCTION mcdc_varchar_cmp(varchar, varchar);
 DROP OPERATOR === (varchar, varchar);
 DROP FUNCTION mcdc_varchar_eq(varchar, varchar);
+DROP TABLE mcdc_varchar_sig_child, mcdc_varchar_sig_parent;
+DROP OPERATOR CLASS mcdc_varchar_sig_dom_ops USING btree;
+DROP OPERATOR FAMILY mcdc_varchar_sig_dom_ops USING btree;
+DROP OPERATOR === (mcdc_varchar_sig_dom, mcdc_varchar_sig_dom);
+DROP FUNCTION mcdc_varchar_sig_dom_cmp(mcdc_varchar_sig_dom,
+                                       mcdc_varchar_sig_dom);
+DROP FUNCTION mcdc_varchar_sig_dom_eq(mcdc_varchar_sig_dom,
+                                      mcdc_varchar_sig_dom);
+DROP DOMAIN mcdc_varchar_sig_dom;
 DROP VIEW mcdc_numdom_typmod_filter_v;
 DROP TABLE mcdc_numdom_reader, mcdc_numdom_parent;
 DROP DOMAIN mcdc_num_dom;
