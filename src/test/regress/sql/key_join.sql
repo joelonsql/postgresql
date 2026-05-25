@@ -3983,6 +3983,36 @@ CREATE OR REPLACE VIEW rv_parent AS SELECT id FROM rv_base;
 DROP VIEW rv_dep, rv_parent;
 DROP TABLE rv_child, rv_base;
 
+-- Stored revalidation failure should format multi-column key lists from the
+-- stored RTE attnums, not just live parse-time column arrays.
+CREATE TABLE rv_multi_parent
+(
+    tenant_id int NOT NULL,
+    id int NOT NULL,
+    v int,
+    PRIMARY KEY (tenant_id, id)
+);
+CREATE TABLE rv_multi_child
+(
+    cid int PRIMARY KEY,
+    tenant_id int NOT NULL,
+    ref int NOT NULL,
+    FOREIGN KEY (tenant_id, ref)
+        REFERENCES rv_multi_parent (tenant_id, id)
+);
+CREATE VIEW rv_multi_parent_v AS
+SELECT tenant_id, id FROM rv_multi_parent;
+CREATE VIEW rv_multi_dep AS
+-- accepted
+    SELECT p.tenant_id, p.id, c.cid
+    FROM rv_multi_parent_v p
+    JOIN rv_multi_child c FOR KEY (tenant_id, ref) -> p (tenant_id, id);
+-- rejected, reason: replacement invalidates a stored composite-key proof
+CREATE OR REPLACE VIEW rv_multi_parent_v AS
+SELECT tenant_id, id FROM rv_multi_parent WHERE v > 0;
+DROP VIEW rv_multi_dep, rv_multi_parent_v;
+DROP TABLE rv_multi_child, rv_multi_parent;
+
 -- Regression: no false positive when view has WHERE on referenced base table.
 -- A naive revalidation passing the stored query to analyze_join_tree would see
 -- jointree->quals != NULL and falsely conclude rows_preserved = false.
