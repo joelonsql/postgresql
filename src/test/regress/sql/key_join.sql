@@ -4724,6 +4724,58 @@ DROP VIEW pf_kj_vp, pf_kj_vr;
 DROP TABLE pf_kj_r, pf_kj_p;
 DROP FUNCTION pf_kj_pick();
 
+-- A function's own SQL body must also be revalidated after replacement.
+-- The body is transformed while the old function properties are still
+-- visible, but it is stored with dependencies against the replaced function.
+CREATE FUNCTION pf_kj_self_replace_pick() RETURNS int
+    LANGUAGE sql STABLE RETURN 1;
+CREATE TABLE pf_kj_self_replace_p (id int PRIMARY KEY);
+CREATE TABLE pf_kj_self_replace_r (id int NOT NULL REFERENCES pf_kj_self_replace_p (id));
+INSERT INTO pf_kj_self_replace_p VALUES (1);
+INSERT INTO pf_kj_self_replace_r VALUES (1);
+CREATE VIEW pf_kj_self_replace_vp AS
+SELECT id FROM pf_kj_self_replace_p WHERE id = pf_kj_self_replace_pick();
+CREATE VIEW pf_kj_self_replace_vr AS
+SELECT id FROM pf_kj_self_replace_r WHERE id = pf_kj_self_replace_pick();
+-- rejected, reason: the function's own stored proof sees final VOLATILE state
+CREATE OR REPLACE FUNCTION pf_kj_self_replace_pick() RETURNS int
+    LANGUAGE sql VOLATILE
+    RETURN CASE WHEN false THEN (
+        SELECT count(*)::int
+        FROM pf_kj_self_replace_vp p
+        JOIN pf_kj_self_replace_vr r FOR KEY (id) -> p (id)
+    ) ELSE 1 END;
+DROP VIEW pf_kj_self_replace_vp, pf_kj_self_replace_vr;
+DROP TABLE pf_kj_self_replace_r, pf_kj_self_replace_p;
+DROP FUNCTION pf_kj_self_replace_pick();
+
+-- ALTER FUNCTION must revalidate the function's own stored SQL body too.
+CREATE FUNCTION pf_kj_self_alter_pick() RETURNS int
+    LANGUAGE sql STABLE RETURN 1;
+CREATE TABLE pf_kj_self_alter_p (id int PRIMARY KEY);
+CREATE TABLE pf_kj_self_alter_r (id int NOT NULL REFERENCES pf_kj_self_alter_p (id));
+INSERT INTO pf_kj_self_alter_p VALUES (1);
+INSERT INTO pf_kj_self_alter_r VALUES (1);
+CREATE VIEW pf_kj_self_alter_vp AS
+SELECT id FROM pf_kj_self_alter_p WHERE id = pf_kj_self_alter_pick();
+CREATE VIEW pf_kj_self_alter_vr AS
+SELECT id FROM pf_kj_self_alter_r WHERE id = pf_kj_self_alter_pick();
+-- accepted
+CREATE OR REPLACE FUNCTION pf_kj_self_alter_pick() RETURNS int
+    LANGUAGE sql STABLE
+    RETURN CASE WHEN false THEN (
+        SELECT count(*)::int
+        FROM pf_kj_self_alter_vp p
+        JOIN pf_kj_self_alter_vr r FOR KEY (id) -> p (id)
+    ) ELSE 1 END;
+-- rejected, reason: the function's own stored proof sees final VOLATILE state
+ALTER FUNCTION pf_kj_self_alter_pick() VOLATILE;
+CREATE OR REPLACE FUNCTION pf_kj_self_alter_pick() RETURNS int
+    LANGUAGE sql STABLE RETURN 1;
+DROP VIEW pf_kj_self_alter_vp, pf_kj_self_alter_vr;
+DROP TABLE pf_kj_self_alter_r, pf_kj_self_alter_p;
+DROP FUNCTION pf_kj_self_alter_pick();
+
 -- CoerceViaIO proof filters must depend on hidden type I/O functions too.
 -- Otherwise ALTER FUNCTION can make a stored proof stale without revalidation.
 SET client_min_messages = warning;

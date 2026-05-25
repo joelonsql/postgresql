@@ -344,6 +344,15 @@ RevalidateDependentKeyJoinObjectsOnProcedure(Oid procOid)
 {
 	Assert(OidIsValid(procOid));
 
+	/*
+	 * CREATE OR REPLACE FUNCTION transforms a new-style SQL function body
+	 * before the replacement tuple is visible.  If that body proves a key
+	 * join through objects that refer back to the function, it may have used
+	 * the old function properties; validate the function's own body once
+	 * against the final catalog state before walking dependents.  The
+	 * dependency walk intentionally skips direct self-dependencies and cycles.
+	 */
+	revalidate_dependent_key_join_function(procOid);
 	revalidate_dependent_key_join_objects_recurse(ProcedureRelationId,
 												  procOid, NIL);
 }
