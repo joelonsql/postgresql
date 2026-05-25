@@ -2468,12 +2468,9 @@ compute_key_join_relation_facts(KeyJoinFactContext *context,
 
 		contup = lock_and_fetch_key_join_constraint(conoid);
 		con = (Form_pg_constraint) GETSTRUCT(contup);
-		if (con->contype != CONSTRAINT_NOTNULL ||
-			con->conrelid != rte->relid ||
-			extractNotNullColumn(contup) != attno)
-			elog(ERROR,
-				 "locked constraint %u is not the expected not-null constraint",
-				 con->oid);
+		Assert(con->contype == CONSTRAINT_NOTNULL);
+		Assert(con->conrelid == rte->relid);
+		Assert(extractNotNullColumn(contup) == attno);
 
 		if (con->conenforced &&
 			con->convalidated)
