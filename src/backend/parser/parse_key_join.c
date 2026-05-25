@@ -387,7 +387,7 @@ transformAndValidateKeyJoin(ParseState *pstate, JoinExpr *j,
 {
 	KeyJoinClause *key_clause = castNode(KeyJoinClause, j->keyJoin);
 	ParseNamespaceItem *ref_nsitem = NULL;
-	bool		local_is_referencing = (key_clause->direction == KEY_JOIN_TO);
+	bool		local_is_referencing = (key_clause->direction == KEY_JOIN_RIGHT_ARROW);
 	bool		referencing_left = !local_is_referencing;
 	ParseNamespaceItem *fk_surface = local_is_referencing ?
 		r_nsitem : l_nsitem;
@@ -4705,7 +4705,7 @@ revalidate_query_jointree_proofs(Query *query, Node *jtnode,
 									 &match))
 			{
 				bool		local_is_referencing =
-					(key_join->direction == KEY_JOIN_TO);
+					(key_join->direction == KEY_JOIN_RIGHT_ARROW);
 				RangeTblEntry *ref_alias_rte =
 					rt_fetch(key_join->refAliasVarno, query->rtable);
 				KeyJoinFailureSide referencing = {0};

@@ -718,7 +718,6 @@ static Node *makeRecursiveViewSelect(char *relname, List *aliases, Node *query);
 				label_term
 %type <str>		opt_colid
 
-
 /*
  * Non-keyword token types.  These are hard-wired into the "flex" lexer.
  * They must be listed first so that their numeric codes do not depend on
@@ -14583,29 +14582,18 @@ joined_table:
 					if ($5 != NULL && IsA($5, List))
 					{
 						/* USING clause */
-						List *usingInfo = castNode(List, $5);
-						n->usingClause = linitial_node(List, usingInfo);
-						n->join_using_alias = lsecond_node(Alias, usingInfo);
-						n->joinFilter = NULL;
-						n->keyJoin = NULL;
-						n->quals = NULL;
+						n->usingClause = linitial_node(List, castNode(List, $5));
+						n->join_using_alias = lsecond_node(Alias, castNode(List, $5));
 					}
 					else if ($5 != NULL && IsA($5, KeyJoinClause))
 					{
 						/* KEY clause */
-						n->usingClause = NIL;
-						n->join_using_alias = NULL;
 						n->keyJoin = (Node *) $5;
 						n->joinFilter = ((KeyJoinClause *) $5)->filter;
-						n->quals = NULL;
 					}
 					else
 					{
 						/* ON clause */
-						n->usingClause = NIL;
-						n->join_using_alias = NULL;
-						n->keyJoin = NULL;
-						n->joinFilter = NULL;
 						n->quals = $5;
 					}
 					$$ = n;
@@ -14622,29 +14610,18 @@ joined_table:
 					if ($4 != NULL && IsA($4, List))
 					{
 						/* USING clause */
-						List *usingInfo = castNode(List, $4);
-						n->usingClause = linitial_node(List, usingInfo);
-						n->join_using_alias = lsecond_node(Alias, usingInfo);
-						n->joinFilter = NULL;
-						n->keyJoin = NULL;
-						n->quals = NULL;
+						n->usingClause = linitial_node(List, castNode(List, $4));
+						n->join_using_alias = lsecond_node(Alias, castNode(List, $4));
 					}
 					else if ($4 != NULL && IsA($4, KeyJoinClause))
 					{
 						/* KEY clause */
-						n->usingClause = NIL;
-						n->join_using_alias = NULL;
 						n->keyJoin = (Node *) $4;
 						n->joinFilter = ((KeyJoinClause *) $4)->filter;
-						n->quals = NULL;
 					}
 					else
 					{
 						/* ON clause */
-						n->usingClause = NIL;
-						n->join_using_alias = NULL;
-						n->keyJoin = NULL;
-						n->joinFilter = NULL;
 						n->quals = $4;
 					}
 					$$ = n;
@@ -14795,7 +14772,7 @@ join_qual: USING '(' name_list ')' opt_alias_clause_for_join_using
 				{
 					KeyJoinClause *n = makeNode(KeyJoinClause);
 					n->localCols = $4;
-					n->direction = KEY_JOIN_FROM;
+					n->direction = KEY_JOIN_LEFT_ARROW;
 					n->refAlias = $8;
 					n->refCols = $10;
 					n->filter = $12;
@@ -14806,14 +14783,14 @@ join_qual: USING '(' name_list ')' opt_alias_clause_for_join_using
 				{
 					KeyJoinClause *n = makeNode(KeyJoinClause);
 					n->localCols = $4;
-					n->direction = KEY_JOIN_TO;
+					n->direction = KEY_JOIN_RIGHT_ARROW;
 					n->refAlias = $7;
 					n->refCols = $9;
 					n->filter = $11;
 					n->location = @1;
 					$$ = (Node *) n;
 				}
-			;
+		;
 
 
 relation_expr:

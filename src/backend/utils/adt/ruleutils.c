@@ -13259,7 +13259,7 @@ get_from_clause_item(Node *jtnode, Query *query, deparse_context *context)
 			List	   *refattnums;
 			char	   *refname;
 
-			if (key_join->direction == KEY_JOIN_TO)
+			if (key_join->direction == KEY_JOIN_RIGHT_ARROW)
 			{
 				localvarno = key_join->referencingVarno;
 				localattnums = key_join->referencingAttnums;
@@ -13278,7 +13278,7 @@ get_from_clause_item(Node *jtnode, Query *query, deparse_context *context)
 			appendStringInfoString(buf, " FOR KEY ");
 			get_key_join_col_list(buf, query, localvarno, localattnums);
 			appendStringInfo(buf, " %s %s ",
-							 key_join->direction == KEY_JOIN_TO ? "->" : "<-",
+							 key_join->direction == KEY_JOIN_RIGHT_ARROW ? "->" : "<-",
 							 quote_identifier(refname));
 			get_key_join_col_list(buf, query, refvarno, refattnums);
 

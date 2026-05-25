@@ -2342,8 +2342,8 @@ typedef struct RangeTblRef
 
 typedef enum KeyJoinDirection
 {
-	KEY_JOIN_FROM,
-	KEY_JOIN_TO
+	KEY_JOIN_LEFT_ARROW,
+	KEY_JOIN_RIGHT_ARROW
 } KeyJoinDirection;
 
 /*----------

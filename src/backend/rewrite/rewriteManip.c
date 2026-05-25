@@ -372,7 +372,7 @@ CombineRangeTables(List **dst_rtable, List **dst_perminfos,
  * Find all Var nodes in the given tree with varlevelsup == sublevels_up,
  * and increment their varno fields (rangetable indexes) by 'offset'.
  * The varnosyn fields are adjusted similarly.  Also, adjust other nodes
- * that contain rangetable indexes, such as RangeTblRef, JoinExpr, and
+ * that contain rangetable indexes, such as RangeTblRef, JoinExpr and
  * KeyJoinNode.
  *
  * NOTE: although this has the form of a walker, we cheat and modify the
@@ -559,21 +559,13 @@ offset_relid_set(Relids relids, int offset)
  * Find all Var nodes in the given tree belonging to a specific relation
  * (identified by sublevels_up and rt_index), and change their varno fields
  * to 'new_index'.  The varnosyn fields are changed too.  Also, adjust other
- * nodes that contain rangetable indexes, such as RangeTblRef, JoinExpr, and
+ * nodes that contain rangetable indexes, such as RangeTblRef, JoinExpr and
  * KeyJoinNode.
  *
  * NOTE: although this has the form of a walker, we cheat and modify the
  * nodes in-place.  The given expression tree should have been copied
  * earlier to ensure that no unwanted side-effects occur!
  */
-
-static int
-change_varnode_rtindex(int rtindex, const ChangeVarNodes_context *context)
-{
-	if (rtindex == context->rt_index)
-		return context->new_index;
-	return rtindex;
-}
 
 static bool
 ChangeVarNodes_walker(Node *node, ChangeVarNodes_context *context)
@@ -623,8 +615,9 @@ ChangeVarNodes_walker(Node *node, ChangeVarNodes_context *context)
 	{
 		JoinExpr   *j = (JoinExpr *) node;
 
-		if (context->sublevels_up == 0)
-			j->rtindex = change_varnode_rtindex(j->rtindex, context);
+		if (context->sublevels_up == 0 &&
+			j->rtindex == context->rt_index)
+			j->rtindex = context->new_index;
 		ChangeVarNodes_walker(j->keyJoin, context);
 		/* fall through to examine children */
 	}
@@ -634,12 +627,12 @@ ChangeVarNodes_walker(Node *node, ChangeVarNodes_context *context)
 
 		if (context->sublevels_up == 0)
 		{
-			kjn->referencingVarno =
-				change_varnode_rtindex(kjn->referencingVarno, context);
-			kjn->referencedVarno =
-				change_varnode_rtindex(kjn->referencedVarno, context);
-			kjn->refAliasVarno =
-				change_varnode_rtindex(kjn->refAliasVarno, context);
+			if (kjn->referencingVarno == context->rt_index)
+				kjn->referencingVarno = context->new_index;
+			if (kjn->referencedVarno == context->rt_index)
+				kjn->referencedVarno = context->new_index;
+			if (kjn->refAliasVarno == context->rt_index)
+				kjn->refAliasVarno = context->new_index;
 		}
 		/* fall through to examine children */
 	}
