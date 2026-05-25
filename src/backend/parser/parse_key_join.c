@@ -1129,11 +1129,10 @@ find_key_join_match(RangeTblEntry *referencing_rte,
 		match->failReq = REQ_COVERAGE;
 	else if (reached < REQ_FKPAIR)
 		match->failReq = REQ_FKPAIR;
+	else if (reached < REQ_IDENTITY)
+		match->failReq = REQ_IDENTITY;
 	else if (reached < REQ_FILTER)
-	{
-		Assert(reached >= REQ_IDENTITY);
 		match->failReq = REQ_FILTER;
-	}
 	else
 		match->failReq = REQ_NOTNULL;
 

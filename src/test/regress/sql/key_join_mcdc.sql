@@ -156,6 +156,34 @@ CREATE OPERATOR === (
     PROCEDURE = mcdc_varchar_eq
 );
 
+CREATE FUNCTION mcdc_varchar_cmp(a varchar, b varchar) RETURNS int
+LANGUAGE sql IMMUTABLE STRICT
+AS $$ SELECT bttextcmp(a::text, b::text) $$;
+
+CREATE OPERATOR CLASS mcdc_varchar_ops
+FOR TYPE varchar USING btree AS
+    OPERATOR 3 === (varchar, varchar),
+    FUNCTION 1 mcdc_varchar_cmp(varchar, varchar);
+
+CREATE TABLE mcdc_varchar_parent
+(
+    id varchar(4) NOT NULL
+);
+
+CREATE UNIQUE INDEX mcdc_varchar_parent_custom_idx
+    ON mcdc_varchar_parent USING btree (id mcdc_varchar_ops);
+
+ALTER TABLE mcdc_varchar_parent ADD PRIMARY KEY (id);
+
+CREATE TABLE mcdc_varchar_child
+(
+    id        int PRIMARY KEY,
+    parent_id varchar(4) NOT NULL REFERENCES mcdc_varchar_parent (id)
+);
+
+INSERT INTO mcdc_varchar_parent VALUES ('aa'), ('bb');
+INSERT INTO mcdc_varchar_child VALUES (901, 'aa'), (902, 'bb');
+
 CREATE VIEW mcdc_text_cast_filter_v AS
 SELECT *
 FROM mcdc_text_cast_parent
@@ -431,6 +459,16 @@ FROM mcdc_numdom_typmod_filter_v v
 JOIN mcdc_numdom_reader nr FOR KEY (parent_id) -> v (id)
 ORDER BY nr.id;
 
+-- Varchar opclasses can use either varchar or text equality input.
+SELECT c.id, g.id
+FROM (
+    SELECT p.id
+    FROM mcdc_varchar_parent p
+    GROUP BY p.id
+) g
+JOIN mcdc_varchar_child c FOR KEY (parent_id) -> g (id)
+ORDER BY c.id;
+
 -- Same-domain FK operators must use the normalized base equality type.
 SELECT c.id, p.id
 FROM mcdc_sig_parent p
@@ -455,6 +493,10 @@ DROP FUNCTION mcdc_support_func(internal);
 DROP TABLE mcdc_text_reader, mcdc_text_parent;
 DROP VIEW mcdc_text_cast_filter_v;
 DROP TABLE mcdc_text_cast_reader, mcdc_text_cast_parent;
+DROP TABLE mcdc_varchar_child, mcdc_varchar_parent;
+DROP OPERATOR CLASS mcdc_varchar_ops USING btree;
+DROP OPERATOR FAMILY mcdc_varchar_ops USING btree;
+DROP FUNCTION mcdc_varchar_cmp(varchar, varchar);
 DROP OPERATOR === (varchar, varchar);
 DROP FUNCTION mcdc_varchar_eq(varchar, varchar);
 DROP VIEW mcdc_numdom_typmod_filter_v;
