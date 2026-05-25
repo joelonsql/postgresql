@@ -5015,8 +5015,8 @@ key_join_equality_type(Oid typeOid, int32 typmod, int32 *eqTypmod)
 	Oid			result;
 
 	result = getBaseTypeAndTypmod(typeOid, &localTypmod);
-	if (eqTypmod != NULL)
-		*eqTypmod = localTypmod;
+	Assert(eqTypmod != NULL);
+	*eqTypmod = localTypmod;
 	return result;
 }
 
