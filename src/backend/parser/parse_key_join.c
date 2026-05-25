@@ -5222,13 +5222,13 @@ key_join_failure_detail(KeyJoinReq req, bool inactivated,
 							referencing_relcols, referenced_relation);
 
 		case REQ_UNIQUE:
-			if (inactivated && reason == KJI_JOIN_FANOUT)
+			if (inactivated)
+			{
+				Assert(reason == KJI_JOIN_FANOUT);
 				return psprintf("A preceding join%s may duplicate rows from referenced relation %s, so referenced columns %s are not proven unique at this point in the query.",
 								origin_suffix, referenced_relation,
 								referenced_relcols);
-			if (inactivated)
-				return psprintf("Referenced columns %s are not proven unique at this point in the query.",
-								referenced_relcols);
+			}
 			return psprintf("Referenced columns %s are not proven unique.",
 							referenced_relcols);
 
