@@ -2673,10 +2673,7 @@ compute_key_join_relation_facts(KeyJoinFactContext *context,
 
 				parenttup = lock_and_fetch_key_join_constraint(parentid);
 				parentcon = (Form_pg_constraint) GETSTRUCT(parenttup);
-				if (parentcon->contype != CONSTRAINT_FOREIGN)
-					elog(ERROR,
-						 "locked constraint %u is not the expected foreign key constraint",
-						 parentcon->oid);
+				Assert(parentcon->contype == CONSTRAINT_FOREIGN);
 				if (!dependency_member(deps, ConstraintRelationId,
 									   parentid, 0))
 					deps = lappend(deps,
