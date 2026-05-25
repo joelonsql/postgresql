@@ -2154,9 +2154,11 @@ ensure_key_join_surface_facts(KeyJoinFactContext *context, RangeTblEntry *rte)
 						foreach_node(KeyJoinFact, fact,
 									 rte->keyJoinFacts->facts)
 						{
-							if (!fact->active &&
-								!OidIsValid(fact->inactiveOriginView))
+							if (!fact->active)
+							{
+								Assert(!OidIsValid(fact->inactiveOriginView));
 								fact->inactiveOriginView = rte->relid;
+							}
 						}
 					}
 				}
