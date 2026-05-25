@@ -1684,8 +1684,7 @@ filter_operator_matches_key_position(OpExpr *op, KeyJoinKeyPosition *keypos,
 	left = linitial(op->args);
 	right = lsecond(op->args);
 
-	if (!OidIsValid(op->opno))
-		return false;
+	Assert(OidIsValid(op->opno));
 
 	if (lock_operator)
 	{
