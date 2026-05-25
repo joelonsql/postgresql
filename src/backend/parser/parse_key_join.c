@@ -3801,8 +3801,7 @@ direct_filter_var_from_node(Node *node)
 		baseTypmod = var->vartypmod;
 		baseType = key_join_equality_type(var->vartype, var->vartypmod,
 										  &baseTypmod);
-		if (relabel->resultcollid != var->varcollid)
-			return NULL;
+		Assert(relabel->resultcollid == var->varcollid);
 		if (relabel->resulttype == baseType &&
 			relabel->resulttypmod == baseTypmod)
 			return var;
