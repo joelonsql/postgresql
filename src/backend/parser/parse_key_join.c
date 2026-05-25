@@ -1953,23 +1953,20 @@ lock_key_join_dependency_or_error(const KeyJoinProofDependency *dep)
 	Assert(dep->classId == OperatorRelationId ||
 		   dep->classId == ProcedureRelationId);
 
-	LockDatabaseObject(dep->classId, dep->objectId, dep->objectSubId,
-					   AccessShareLock);
-
 	if (dep->classId == OperatorRelationId)
 	{
-		if (!SearchSysCacheExists1(OPEROID, ObjectIdGetDatum(dep->objectId)))
-			ereport(ERROR,
-					(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
-					 errmsg("key join proof dependency operator was concurrently dropped")));
+		HeapTuple	optup;
+
+		optup = lock_and_fetch_key_join_operator(dep->objectId);
+		ReleaseSysCache(optup);
 	}
 	else
 	{
+		HeapTuple	proctup;
+
 		Assert(dep->classId == ProcedureRelationId);
-		if (!SearchSysCacheExists1(PROCOID, ObjectIdGetDatum(dep->objectId)))
-			ereport(ERROR,
-					(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
-					 errmsg("key join proof dependency function was concurrently dropped")));
+		proctup = lock_and_fetch_key_join_proc(dep->objectId);
+		ReleaseSysCache(proctup);
 	}
 }
 
