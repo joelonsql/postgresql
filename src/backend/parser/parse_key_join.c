@@ -4234,8 +4234,8 @@ compute_join_output_facts(JoinExpr *j,
 			}
 		}
 	}
-	if (result->facts != NIL)
-		joinrte->keyJoinFacts = result;
+	Assert(result->facts != NIL);
+	joinrte->keyJoinFacts = result;
 
 	pfree(lmap);
 	pfree(rmap);
