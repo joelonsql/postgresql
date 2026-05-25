@@ -4965,8 +4965,8 @@ key_join_equality_operator_is_usable(Oid opno, Oid expectedTypeOid,
 	INJECTION_POINT("key-join-after-equality-operator-lock", NULL);
 
 	Assert(OidIsValid(lefttype));
-	if (lefttype != righttype ||
-		(OidIsValid(expectedTypeOid) && lefttype != expectedTypeOid) ||
+	Assert(lefttype == righttype);
+	if ((OidIsValid(expectedTypeOid) && lefttype != expectedTypeOid) ||
 		rettype != BOOLOID)
 	{
 		ReleaseSysCache(optup);
