@@ -121,6 +121,17 @@ CREATE TABLE mcdc_text_cast_reader
     parent_id text NOT NULL REFERENCES mcdc_text_cast_parent (id)
 );
 
+CREATE TABLE mcdc_regclass_parent
+(
+    id regclass PRIMARY KEY
+);
+
+CREATE TABLE mcdc_regclass_reader
+(
+    id        int PRIMARY KEY,
+    parent_id regclass NOT NULL REFERENCES mcdc_regclass_parent (id)
+);
+
 CREATE DOMAIN mcdc_num_dom AS numeric(4,0);
 
 CREATE TABLE mcdc_numdom_parent
@@ -177,6 +188,8 @@ INSERT INTO mcdc_text_parent VALUES ('a'), ('b');
 INSERT INTO mcdc_text_reader VALUES (301, 'a'), (302, 'b');
 INSERT INTO mcdc_text_cast_parent VALUES ('a'), ('b');
 INSERT INTO mcdc_text_cast_reader VALUES (401, 'a'), (402, 'b');
+INSERT INTO mcdc_regclass_parent VALUES ('pg_class'), ('pg_type');
+INSERT INTO mcdc_regclass_reader VALUES (451, 'pg_class'), (452, 'pg_type');
 INSERT INTO mcdc_numdom_parent VALUES (1), (2);
 INSERT INTO mcdc_numdom_reader VALUES (501, 1), (502, 2);
 INSERT INTO mcdc_sig_parent VALUES (1), (2);
@@ -508,6 +521,16 @@ FROM (
 JOIN mcdc_text_reader tr FOR KEY (parent_id) -> g (id)
 ORDER BY tr.id;
 
+-- GROUP BY binary-compatible equality identity path: no projected key facts.
+SELECT rr.id, g.id
+FROM (
+    SELECT p.id
+    FROM mcdc_regclass_parent p
+    GROUP BY p.id
+) g
+JOIN mcdc_regclass_reader rr FOR KEY (parent_id) -> g (id)
+ORDER BY rr.id;
+
 -- Non-domain relabel filters are not canonical key filters.
 SELECT vr.id, v.id
 FROM mcdc_text_cast_filter_v v
@@ -564,6 +587,7 @@ DROP FUNCTION mcdc_hash_bridge_eq(int, bigint);
 DROP TABLE mcdc_text_reader, mcdc_text_parent;
 DROP VIEW mcdc_text_cast_filter_v;
 DROP TABLE mcdc_text_cast_reader, mcdc_text_cast_parent;
+DROP TABLE mcdc_regclass_reader, mcdc_regclass_parent;
 DROP TABLE mcdc_varchar_child, mcdc_varchar_parent;
 DROP OPERATOR CLASS mcdc_varchar_ops USING btree;
 DROP OPERATOR FAMILY mcdc_varchar_ops USING btree;
