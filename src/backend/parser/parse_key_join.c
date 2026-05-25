@@ -1717,8 +1717,9 @@ filter_operator_matches_key_position(OpExpr *op, KeyJoinKeyPosition *keypos,
 		rettype = get_op_rettype(op->opno);
 		Assert(OidIsValid(funcid));
 		Assert(func_strict(funcid));
-		result = func_volatile(funcid) == PROVOLATILE_IMMUTABLE &&
-			!get_func_retset(funcid);
+		Assert(func_volatile(funcid) == PROVOLATILE_IMMUTABLE);
+		Assert(!get_func_retset(funcid));
+		result = true;
 	}
 
 	result &= lefttype == keypos->eqTypeOid;
