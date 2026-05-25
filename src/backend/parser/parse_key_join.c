@@ -5172,9 +5172,10 @@ key_join_failure_detail(KeyJoinReq req, bool inactivated,
 		char	   *relname = get_rel_name(origin_view);
 		char	   *nspname = get_namespace_name(get_rel_namespace(origin_view));
 
+		Assert(relname != NULL);
+		Assert(nspname != NULL);
 		origin_suffix = psprintf(" inside view \"%s.%s\"",
-								 nspname ? nspname : "?",
-								 relname ? relname : "?");
+								 nspname, relname);
 	}
 
 	switch (reason)
