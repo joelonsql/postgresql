@@ -4953,8 +4953,7 @@ key_join_equality_operator_is_usable(Oid opno, Oid expectedTypeOid,
 	Oid			righttype;
 	Oid			rettype;
 
-	if (!OidIsValid(opno))
-		return false;
+	Assert(OidIsValid(opno));
 
 	optup = lock_and_fetch_key_join_operator(opno);
 	operform = (Form_pg_operator) GETSTRUCT(optup);
