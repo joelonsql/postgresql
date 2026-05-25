@@ -4986,6 +4986,7 @@ key_join_equality_operator_is_usable(Oid opno, Oid expectedTypeOid,
 	ReleaseSysCache(optup);
 
 	Assert(dependencies != NULL);
+	Assert(eqTypeOid != NULL);
 	if (!dependency_member(*dependencies, OperatorRelationId, opno, 0))
 		*dependencies = lappend(*dependencies,
 								make_dependency(OperatorRelationId, opno));
@@ -4993,8 +4994,7 @@ key_join_equality_operator_is_usable(Oid opno, Oid expectedTypeOid,
 		*dependencies = lappend(*dependencies,
 								make_dependency(ProcedureRelationId,
 												(Oid) funcid));
-	if (eqTypeOid != NULL)
-		*eqTypeOid = lefttype;
+	*eqTypeOid = lefttype;
 	return true;
 }
 
