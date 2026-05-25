@@ -321,6 +321,18 @@ CREATE VIEW mcdc_duplicate_filter_reader_v AS
 SELECT *
 FROM mcdc_reader
 WHERE parent_id = 1;
+CREATE VIEW mcdc_group_inactive_rowcov_v AS
+SELECT p.id, p.tenant_id, p.code
+FROM mcdc_parent p
+GROUP BY p.id;
+CREATE VIEW mcdc_reader_parent_1_v AS
+SELECT *
+FROM mcdc_reader
+WHERE parent_id = 1;
+CREATE VIEW mcdc_group_inactive_rowcov_join_v AS
+SELECT r.parent_id
+FROM mcdc_group_inactive_rowcov_v v
+JOIN mcdc_reader_parent_1_v r FOR KEY (parent_id) -> v (id);
 CREATE VIEW mcdc_distinct_filter_v AS
 SELECT p.id
 FROM mcdc_parent p
@@ -416,6 +428,16 @@ ORDER BY r.id;
  id  | id 
 -----+----
  101 |  1
+(1 row)
+
+-- Filter propagation skips inactive row-coverage targets.
+SELECT q.parent_id, p.id
+FROM mcdc_group_inactive_rowcov_join_v q
+JOIN mcdc_parent p FOR KEY (id) <- q (parent_id)
+ORDER BY q.parent_id;
+ parent_id | id 
+-----------+----
+         1 |  1
 (1 row)
 
 SELECT r.id, v.id
@@ -598,6 +620,9 @@ DROP FUNCTION mcdc_support_subject(int);
 DROP FUNCTION mcdc_support_func(internal);
 DROP VIEW mcdc_duplicate_filter_reader_v;
 DROP VIEW mcdc_duplicate_filter_parent_v;
+DROP VIEW mcdc_group_inactive_rowcov_join_v;
+DROP VIEW mcdc_reader_parent_1_v;
+DROP VIEW mcdc_group_inactive_rowcov_v;
 DROP VIEW mcdc_stable_filter_v;
 DROP OPERATOR === (int, int);
 DROP FUNCTION mcdc_stable_int_eq(int, int);
