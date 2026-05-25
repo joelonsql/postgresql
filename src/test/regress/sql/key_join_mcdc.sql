@@ -59,6 +59,16 @@ CREATE OPERATOR @+ (
     FUNCTION = mcdc_positive_int
 );
 
+CREATE FUNCTION mcdc_stable_int_eq(a int, b int) RETURNS boolean
+LANGUAGE sql STABLE STRICT
+AS $$ SELECT a = b $$;
+
+CREATE OPERATOR === (
+    LEFTARG = int,
+    RIGHTARG = int,
+    PROCEDURE = mcdc_stable_int_eq
+);
+
 CREATE COLLATION mcdc_nondet (provider = icu, locale = 'und',
     deterministic = false);
 
@@ -327,6 +337,11 @@ SELECT *
 FROM mcdc_parent
 WHERE (id::text)::varchar = '1';
 
+CREATE VIEW mcdc_stable_filter_v AS
+SELECT *
+FROM mcdc_parent
+WHERE id === 1;
+
 CREATE VIEW mcdc_multi_v AS
 SELECT p.tenant_id, p.code
 FROM mcdc_parent p
@@ -385,6 +400,11 @@ ORDER BY r.id;
 
 SELECT r.id, v.id
 FROM mcdc_relabel_expr_filter_v v
+JOIN mcdc_reader r FOR KEY (parent_id) -> v (id)
+ORDER BY r.id;
+
+SELECT r.id, v.id
+FROM mcdc_stable_filter_v v
 JOIN mcdc_reader r FOR KEY (parent_id) -> v (id)
 ORDER BY r.id;
 
@@ -489,6 +509,9 @@ ALTER FUNCTION mcdc_support_func(internal) STABLE;
 
 DROP FUNCTION mcdc_support_subject(int);
 DROP FUNCTION mcdc_support_func(internal);
+DROP VIEW mcdc_stable_filter_v;
+DROP OPERATOR === (int, int);
+DROP FUNCTION mcdc_stable_int_eq(int, int);
 
 DROP TABLE mcdc_text_reader, mcdc_text_parent;
 DROP VIEW mcdc_text_cast_filter_v;
