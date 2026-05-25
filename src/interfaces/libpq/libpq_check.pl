@@ -20,6 +20,7 @@ my $nm_path;
 my $input_file;
 my $stamp_file;
 my @problematic_lines;
+my $allow_mcdc_profile_atexit = $ENV{POSTGRES_MCDC_ALLOW_ATEEXIT};
 
 Getopt::Long::GetOptions(
 	'nm:s' => \$nm_path,
@@ -54,6 +55,11 @@ while (<$fh>)
 	# The exclusion of __cxa_atexit is necessary on OpenBSD, which seems
 	# to insert references to that even in pure C code.
 	next if /__cxa_atexit/;
+
+	# LLVM source-based coverage profiling can insert a plain atexit()
+	# registration into an instrumented libpq.  Keep that exception local to
+	# the MC/DC helper script instead of weakening normal builds.
+	next if $allow_mcdc_profile_atexit && /\b_?atexit\b/;
 
 	# Excluding __tsan_func_exit is necessary when using ThreadSanitizer data
 	# race detector which uses this function for instrumentation of function

@@ -470,6 +470,7 @@ transformAndValidateKeyJoin(ParseState *pstate, JoinExpr *j,
 								  local_is_referencing ? refvar : localvar);
 	}
 
+	// XXX - Should we really use memset or C99 feature to zero init structs?
 	memset(&fk_context, 0, sizeof(fk_context));
 	fk_context.pstate = pstate;
 	ensure_key_join_surface_facts(&fk_context, fk_surface->p_rte);
@@ -536,7 +537,8 @@ transformAndValidateKeyJoin(ParseState *pstate, JoinExpr *j,
  * Called by:
  *		transformAndValidateKeyJoin
  */
-static KeyJoinColumn *
+// XXX - Remove all "Called by:" in all comments
+ static KeyJoinColumn *
 resolve_columns_on_nsitem(ParseState *pstate,
 						  ParseNamespaceItem *lookup,
 						  ParseNamespaceItem *surface, List *names,
@@ -678,7 +680,7 @@ build_key_join_quals(List *referenced_args,
 	Assert(locations == NIL ||
 		   list_length(locations) == list_length(eqoperators));
 
-	lcloc = list_head(locations);
+	lcloc = list_head(locations); // XXX - This looks suspicious
 	forfive(lcrpk, referenced_args, lcrfk, referencing_args,
 			lcop, eqoperators, lctype, eqtypes, lctypmod, eqtypmods)
 	{
@@ -823,7 +825,7 @@ find_key_join_match(RangeTblEntry *referencing_rte,
 									   fkfact->baseAttnums,
 									   &referencing_base, NULL))
 			continue;
-		Assert(fkfact->active);
+		Assert(fkfact->active); // XXX - shouldn't this be before select_key_position_parts?
 		if (reached < REQ_FK)
 			reached = REQ_FK;
 
@@ -853,7 +855,7 @@ find_key_join_match(RangeTblEntry *referencing_rte,
 				continue;
 			}
 			catalog_unique = OidIsValid(uniqfact->relid);
-			Assert(int_lists_same_members(uniqfact->baseAttnums, unique_base));
+			Assert(int_lists_same_members(uniqfact->baseAttnums, unique_base)); // XXX - Should be moved earlier?
 
 			/*
 			 * A catalog-backed unique fact has to be on the same relation the
