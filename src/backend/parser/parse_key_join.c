@@ -2449,7 +2449,7 @@ compute_key_join_relation_facts(KeyJoinFactContext *context,
 	 * below must already be locked for the transaction before the fact is added.
 	 */
 
-	/* Validated enforced NOT NULL constraints feed condition 3. */
+	/* Validated NOT NULL constraints feed condition 3. */
 	for (int attno = 1; attno <= tupdesc->natts; attno++)
 	{
 		Form_pg_attribute att = TupleDescAttr(tupdesc, attno - 1);
@@ -2471,9 +2471,9 @@ compute_key_join_relation_facts(KeyJoinFactContext *context,
 		Assert(con->contype == CONSTRAINT_NOTNULL);
 		Assert(con->conrelid == rte->relid);
 		Assert(extractNotNullColumn(contup) == attno);
+		Assert(con->conenforced);
 
-		if (con->conenforced &&
-			con->convalidated)
+		if (con->convalidated)
 		{
 			KeyJoinFact *fact = add_fact(set, KJF_NOT_NULL);
 
