@@ -4019,8 +4019,7 @@ compute_join_output_facts(JoinExpr *j,
 
 			if (fkfact->kind != KJF_FOREIGN_KEY)
 				continue;
-			if (!fkfact->active)
-				continue;
+			Assert(fkfact->active);
 			if (fkfact->constraint != key_join_node->constraint)
 				continue;
 			if (!select_key_position_parts(key_join_node->referencingAttnums,
