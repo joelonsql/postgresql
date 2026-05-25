@@ -207,6 +207,10 @@ INSERT INTO mcdc_dupe_nullable_reader VALUES (801, 1), (802, NULL);
 CREATE VIEW mcdc_dupe_active_v AS
 SELECT DISTINCT p.id
 FROM mcdc_dupe_parent p;
+CREATE VIEW mcdc_dupe_inactive_nn_v AS
+SELECT r.parent_id
+FROM mcdc_dupe_parent p
+LEFT JOIN mcdc_dupe_reader r FOR KEY (parent_id) -> p (id);
 CREATE VIEW mcdc_dupe_v AS
 SELECT q.id
 FROM (SELECT DISTINCT p.id FROM mcdc_dupe_parent p) q
@@ -221,6 +225,11 @@ FROM mcdc_dupe_active_v v
 JOIN mcdc_dupe_nullable_reader n FOR KEY (parent_id) -> v (id)
 ORDER BY n.id, v.id;
 ERROR:  key join from referencing relation n to referenced relation v cannot be proven at character 78
+SELECT rv.parent_id, v.id
+FROM mcdc_dupe_inactive_nn_v rv
+JOIN mcdc_dupe_active_v v FOR KEY (id) <- rv (parent_id)
+ORDER BY rv.parent_id, v.id;
+ERROR:  key join from referencing relation rv to referenced relation v cannot be proven at character 85
 -- Stored revalidation path: no FILTER, join-local FILTERs, and multi-column.
 CREATE VIEW mcdc_plain_v AS
 SELECT p.id
@@ -472,4 +481,4 @@ DROP FUNCTION mcdc_sig_dom_eq(mcdc_sig_dom, mcdc_sig_dom);
 DROP DOMAIN mcdc_sig_dom;
 DROP COLLATION mcdc_nondet;
 DROP SCHEMA key_join_mcdc CASCADE;
-NOTICE:  drop cascades to 22 other objects
+NOTICE:  drop cascades to 23 other objects

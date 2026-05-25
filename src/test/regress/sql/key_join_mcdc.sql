@@ -228,6 +228,11 @@ CREATE VIEW mcdc_dupe_active_v AS
 SELECT DISTINCT p.id
 FROM mcdc_dupe_parent p;
 
+CREATE VIEW mcdc_dupe_inactive_nn_v AS
+SELECT r.parent_id
+FROM mcdc_dupe_parent p
+LEFT JOIN mcdc_dupe_reader r FOR KEY (parent_id) -> p (id);
+
 CREATE VIEW mcdc_dupe_v AS
 SELECT q.id
 FROM (SELECT DISTINCT p.id FROM mcdc_dupe_parent p) q
@@ -242,6 +247,11 @@ SELECT n.id, v.id
 FROM mcdc_dupe_active_v v
 JOIN mcdc_dupe_nullable_reader n FOR KEY (parent_id) -> v (id)
 ORDER BY n.id, v.id;
+
+SELECT rv.parent_id, v.id
+FROM mcdc_dupe_inactive_nn_v rv
+JOIN mcdc_dupe_active_v v FOR KEY (id) <- rv (parent_id)
+ORDER BY rv.parent_id, v.id;
 
 -- Stored revalidation path: no FILTER, join-local FILTERs, and multi-column.
 CREATE VIEW mcdc_plain_v AS
