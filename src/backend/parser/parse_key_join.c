@@ -1715,9 +1715,9 @@ filter_operator_matches_key_position(OpExpr *op, KeyJoinKeyPosition *keypos,
 		funcid = get_opcode(op->opno);
 		op_input_types(op->opno, &lefttype, &righttype);
 		rettype = get_op_rettype(op->opno);
-		result = OidIsValid(funcid) &&
-			func_strict(funcid) &&
-			func_volatile(funcid) == PROVOLATILE_IMMUTABLE &&
+		Assert(OidIsValid(funcid));
+		Assert(func_strict(funcid));
+		result = func_volatile(funcid) == PROVOLATILE_IMMUTABLE &&
 			!get_func_retset(funcid);
 	}
 
