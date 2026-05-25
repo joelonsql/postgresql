@@ -1216,6 +1216,19 @@ SELECT * FROM
 -- rejected, reason: c_e_id is null-extended by the preceding LEFT key join
 JOIN ne3_e FOR KEY (id) <- q (c_e_id);
 
+CREATE VIEW ne3_right_nested_v AS
+SELECT ne3_a.id AS a_id, ne3_c.e_id AS c_e_id
+FROM ne3_a
+-- accepted
+LEFT JOIN (ne3_c JOIN ne3_b FOR KEY (c_id) -> ne3_c (id))
+    FOR KEY (a_id) -> ne3_a (id);
+
+SELECT *
+FROM ne3_right_nested_v q
+-- rejected, reason: c_e_id is null-extended by the stored right-nested key join
+JOIN ne3_e FOR KEY (id) <- q (c_e_id);
+
+DROP VIEW ne3_right_nested_v;
 DROP TABLE ne3_b, ne3_c, ne3_e, ne3_a;
 
 DROP TABLE t2_nn, t1_nn;
