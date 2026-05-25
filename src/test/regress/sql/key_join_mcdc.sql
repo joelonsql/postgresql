@@ -354,6 +354,16 @@ FROM mcdc_parent p
 LEFT JOIN mcdc_child c FOR KEY (parent_id) -> p (id)
 FILTER (WHERE p.id = 1);
 
+CREATE VIEW mcdc_duplicate_filter_parent_v AS
+SELECT *
+FROM mcdc_parent
+WHERE id = 1 AND id = 1;
+
+CREATE VIEW mcdc_duplicate_filter_reader_v AS
+SELECT *
+FROM mcdc_reader
+WHERE parent_id = 1;
+
 CREATE VIEW mcdc_distinct_filter_v AS
 SELECT p.id
 FROM mcdc_parent p
@@ -430,6 +440,11 @@ ORDER BY r.id;
 SELECT r.id, v.id
 FROM mcdc_other_side_filter_v v
 JOIN mcdc_reader r FOR KEY (parent_id) -> v (id)
+ORDER BY r.id;
+
+SELECT r.id, v.id
+FROM mcdc_duplicate_filter_parent_v v
+JOIN mcdc_duplicate_filter_reader_v r FOR KEY (parent_id) -> v (id)
 ORDER BY r.id;
 
 SELECT r.id, v.id
@@ -573,6 +588,8 @@ ALTER FUNCTION mcdc_support_func(internal) STABLE;
 
 DROP FUNCTION mcdc_support_subject(int);
 DROP FUNCTION mcdc_support_func(internal);
+DROP VIEW mcdc_duplicate_filter_reader_v;
+DROP VIEW mcdc_duplicate_filter_parent_v;
 DROP VIEW mcdc_stable_filter_v;
 DROP OPERATOR === (int, int);
 DROP FUNCTION mcdc_stable_int_eq(int, int);
