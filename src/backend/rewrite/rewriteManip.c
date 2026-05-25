@@ -567,6 +567,14 @@ offset_relid_set(Relids relids, int offset)
  * earlier to ensure that no unwanted side-effects occur!
  */
 
+static int
+change_varnode_rtindex(int rtindex, const ChangeVarNodes_context *context)
+{
+	if (rtindex == context->rt_index)
+		return context->new_index;
+	return rtindex;
+}
+
 static bool
 ChangeVarNodes_walker(Node *node, ChangeVarNodes_context *context)
 {
@@ -615,9 +623,8 @@ ChangeVarNodes_walker(Node *node, ChangeVarNodes_context *context)
 	{
 		JoinExpr   *j = (JoinExpr *) node;
 
-		if (context->sublevels_up == 0 &&
-			j->rtindex == context->rt_index)
-			j->rtindex = context->new_index;
+		if (context->sublevels_up == 0)
+			j->rtindex = change_varnode_rtindex(j->rtindex, context);
 		ChangeVarNodes_walker(j->keyJoin, context);
 		/* fall through to examine children */
 	}
@@ -627,12 +634,12 @@ ChangeVarNodes_walker(Node *node, ChangeVarNodes_context *context)
 
 		if (context->sublevels_up == 0)
 		{
-			if (kjn->referencingVarno == context->rt_index)
-				kjn->referencingVarno = context->new_index;
-			if (kjn->referencedVarno == context->rt_index)
-				kjn->referencedVarno = context->new_index;
-			if (kjn->refAliasVarno == context->rt_index)
-				kjn->refAliasVarno = context->new_index;
+			kjn->referencingVarno =
+				change_varnode_rtindex(kjn->referencingVarno, context);
+			kjn->referencedVarno =
+				change_varnode_rtindex(kjn->referencedVarno, context);
+			kjn->refAliasVarno =
+				change_varnode_rtindex(kjn->refAliasVarno, context);
 		}
 		/* fall through to examine children */
 	}
