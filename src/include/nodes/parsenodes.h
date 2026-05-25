@@ -1134,12 +1134,16 @@ typedef enum RTEKind
 	RTE_GROUP,					/* the grouping step */
 } RTEKind;
 
+/*
+ * ObjectAddress-like node, for storing key-join proof dependencies in query
+ * trees.  ObjectAddress itself is not a Node, and key-join proofs depend only
+ * on whole objects, so there is no objectSubId field.
+ */
 typedef struct KeyJoinProofDependency
 {
 	NodeTag		type;
 	Oid			classId;
 	Oid			objectId;
-	int32		objectSubId;
 } KeyJoinProofDependency;
 
 typedef struct KeyJoinKeyPosition
@@ -1157,13 +1161,13 @@ typedef struct KeyJoinKeyPosition
 } KeyJoinKeyPosition;
 
 /*
- * Tagged union of the four kinds of transient key-join proof fact.  These
- * facts are parser scratch data attached to RangeTblEntry.keyJoinFacts while
- * proving FOR KEY joins; stored KeyJoinNodes retain only the dependencies
+ * Transient key-join proof fact.
+ *
+ * These facts are parser scratch data attached to RangeTblEntry.keyJoinFacts
+ * while proving FOR KEY joins; stored KeyJoinNodes retain only the dependencies
  * they actually consumed.
  *
- * Fields not used by a given kind are NIL or InvalidOid.  See the
- * kind-specific consumers in parse_key_join.c for the meaning of each fact.
+ * The kind field identifies which fact is represented.
  */
 typedef enum KeyJoinFactKind
 {

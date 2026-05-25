@@ -2405,8 +2405,7 @@ find_expr_references_walker(Node *node,
 	{
 		KeyJoinProofDependency *dep = (KeyJoinProofDependency *) node;
 
-		add_object_address(dep->classId, dep->objectId, dep->objectSubId,
-						   context->addrs);
+		add_object_address(dep->classId, dep->objectId, 0, context->addrs);
 		return false;
 	}
 	else if (IsA(node, RangeTblFunction))

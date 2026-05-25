@@ -293,8 +293,7 @@ static bool filter_operator_matches_key_position(OpExpr *op,
 static bool filter_operator_is_compatible_equality(Oid opno, Oid keyop);
 static bool list_contains_equal_node(List *list, Node *node);
 static List *append_dependencies_unique(List *dst, List *src);
-static bool dependency_member(List *deps, Oid classId, Oid objectId,
-							  int32 objectSubId);
+static bool dependency_member(List *deps, Oid classId, Oid objectId);
 static KeyJoinProofDependency *make_dependency(Oid classId, Oid objectId);
 static void lock_key_join_dependency_or_error(const KeyJoinProofDependency *dep);
 static void lock_key_join_dependencies_or_error(List *dependencies);
@@ -1878,8 +1877,7 @@ append_dependencies_unique(List *dst, List *src)
 {
 	foreach_node(KeyJoinProofDependency, dep, src)
 	{
-		if (!dependency_member(dst, dep->classId, dep->objectId,
-							   dep->objectSubId))
+		if (!dependency_member(dst, dep->classId, dep->objectId))
 			dst = lappend(dst, copyObject(dep));
 	}
 	return dst;
@@ -1888,7 +1886,7 @@ append_dependencies_unique(List *dst, List *src)
 /*
  * dependency_member
  *
- *		Return true if a dependency list contains the given object address.
+ *		Return true if a dependency list contains the given object.
  *
  * Called by:
  *		append_dependencies_unique
@@ -1897,13 +1895,10 @@ append_dependencies_unique(List *dst, List *src)
  *		key_join_equality_operator_is_usable
  */
 static bool
-dependency_member(List *deps, Oid classId, Oid objectId, int32 objectSubId)
+dependency_member(List *deps, Oid classId, Oid objectId)
 {
-	Assert(objectSubId == 0);
-
 	foreach_node(KeyJoinProofDependency, dep, deps)
 	{
-		Assert(dep->objectSubId == 0);
 		if (dep->classId != classId)
 			continue;
 		if (dep->objectId != objectId)
@@ -1930,7 +1925,6 @@ make_dependency(Oid classId, Oid objectId)
 
 	dep->classId = classId;
 	dep->objectId = objectId;
-	dep->objectSubId = 0;
 	return dep;
 }
 
@@ -1949,8 +1943,6 @@ make_dependency(Oid classId, Oid objectId)
 static void
 lock_key_join_dependency_or_error(const KeyJoinProofDependency *dep)
 {
-	Assert(dep->objectSubId == 0);
-
 	Assert(dep->classId == OperatorRelationId ||
 		   dep->classId == ProcedureRelationId);
 
@@ -2676,7 +2668,7 @@ compute_key_join_relation_facts(KeyJoinFactContext *context,
 				parentcon = (Form_pg_constraint) GETSTRUCT(parenttup);
 				Assert(parentcon->contype == CONSTRAINT_FOREIGN);
 				Assert(!dependency_member(deps, ConstraintRelationId,
-										  parentid, 0));
+										  parentid));
 				deps = lappend(deps,
 							   make_dependency(ConstraintRelationId,
 											   parentid));
@@ -3927,7 +3919,7 @@ append_filter_dependency(List *dependencies, Oid classId, Oid objectId)
 {
 	Assert(OidIsValid(objectId));
 
-	if (dependency_member(dependencies, classId, objectId, 0))
+	if (dependency_member(dependencies, classId, objectId))
 		return dependencies;
 	return lappend(dependencies, make_dependency(classId, objectId));
 }
@@ -4487,8 +4479,7 @@ dependency_list_is_subset(List *candidate, List *superset)
 {
 	foreach_node(KeyJoinProofDependency, dep, candidate)
 	{
-		if (!dependency_member(superset, dep->classId, dep->objectId,
-							   dep->objectSubId))
+		if (!dependency_member(superset, dep->classId, dep->objectId))
 			return false;
 	}
 	return true;
@@ -4988,10 +4979,10 @@ key_join_equality_operator_is_usable(Oid opno, Oid expectedTypeOid,
 
 	Assert(dependencies != NULL);
 	Assert(eqTypeOid != NULL);
-	if (!dependency_member(*dependencies, OperatorRelationId, opno, 0))
+	if (!dependency_member(*dependencies, OperatorRelationId, opno))
 		*dependencies = lappend(*dependencies,
 								make_dependency(OperatorRelationId, opno));
-	if (!dependency_member(*dependencies, ProcedureRelationId, (Oid) funcid, 0))
+	if (!dependency_member(*dependencies, ProcedureRelationId, (Oid) funcid))
 		*dependencies = lappend(*dependencies,
 								make_dependency(ProcedureRelationId,
 												(Oid) funcid));
