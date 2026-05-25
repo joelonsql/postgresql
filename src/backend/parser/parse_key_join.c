@@ -1936,10 +1936,11 @@ make_dependency(Oid classId, Oid objectId)
 /*
  * lock_key_join_dependency_or_error
  *
- *		Lock one proof dependency with the same object-lock family used by
- *		dependency deletion, then verify the locked object still exists.
- *		Relation proof dependencies are emitted only for bare unique indexes,
- *		which need ShareLock through the stored-dependency creation window.
+ *		Lock one filter expression dependency with the same object-lock family
+ *		used by dependency deletion, then verify the locked object still
+ *		exists.  Filter expressions can depend on operators and functions only.
+ *		Relation and constraint proof dependencies are locked by their fact
+ *		builders before publication.
  *
  * Called by:
  *		lock_key_join_dependencies_or_error
@@ -1949,54 +1950,26 @@ lock_key_join_dependency_or_error(const KeyJoinProofDependency *dep)
 {
 	Assert(dep->objectSubId == 0);
 
-	if (dep->classId == RelationRelationId)
-	{
-		char		relkind;
+	Assert(dep->classId == OperatorRelationId ||
+		   dep->classId == ProcedureRelationId);
 
-		LockRelationOid(dep->objectId, ShareLock);
-		relkind = get_rel_relkind(dep->objectId);
-		if (relkind == '\0')
+	LockDatabaseObject(dep->classId, dep->objectId, dep->objectSubId,
+					   AccessShareLock);
+
+	if (dep->classId == OperatorRelationId)
+	{
+		if (!SearchSysCacheExists1(OPEROID, ObjectIdGetDatum(dep->objectId)))
 			ereport(ERROR,
 					(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
-					 errmsg("key join proof dependency relation was concurrently dropped")));
-		if (relkind != RELKIND_INDEX &&
-			relkind != RELKIND_PARTITIONED_INDEX)
-			ereport(ERROR,
-					(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
-					 errmsg("key join proof dependency relation is no longer an index")));
+					 errmsg("key join proof dependency operator was concurrently dropped")));
 	}
 	else
 	{
-		LockDatabaseObject(dep->classId, dep->objectId, dep->objectSubId,
-						   AccessShareLock);
-
-		if (dep->classId == ConstraintRelationId)
-		{
-			if (!SearchSysCacheExists1(CONSTROID,
-									   ObjectIdGetDatum(dep->objectId)))
-				ereport(ERROR,
-						(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
-						 errmsg("key join proof dependency constraint was concurrently dropped")));
-		}
-		else if (dep->classId == OperatorRelationId)
-		{
-			if (!SearchSysCacheExists1(OPEROID,
-									   ObjectIdGetDatum(dep->objectId)))
-				ereport(ERROR,
-						(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
-						 errmsg("key join proof dependency operator was concurrently dropped")));
-		}
-		else if (dep->classId == ProcedureRelationId)
-		{
-			if (!SearchSysCacheExists1(PROCOID,
-									   ObjectIdGetDatum(dep->objectId)))
-				ereport(ERROR,
-						(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
-						 errmsg("key join proof dependency function was concurrently dropped")));
-		}
-		else
-			elog(ERROR, "unsupported key join proof dependency class: %u",
-				 dep->classId);
+		Assert(dep->classId == ProcedureRelationId);
+		if (!SearchSysCacheExists1(PROCOID, ObjectIdGetDatum(dep->objectId)))
+			ereport(ERROR,
+					(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+					 errmsg("key join proof dependency function was concurrently dropped")));
 	}
 }
 
