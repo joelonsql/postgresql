@@ -361,7 +361,6 @@ static char *key_join_failure_detail(KeyJoinReq req, bool inactivated,
 									 const char *referencing_relation,
 									 const char *referenced_relation,
 									 const char *join_name);
-static char *key_join_failure_hint(KeyJoinReq req, KeyJoinInactiveReason reason);
 static void key_join_report_failure(ParseState *pstate, ParseLoc location,
 									JoinType jointype,
 									const KeyJoinMatch *match,
@@ -5247,56 +5246,16 @@ key_join_failure_detail(KeyJoinReq req, bool inactivated,
 
 		case REQ_NOTNULL:
 			if (inactivated)
-				return psprintf("Referencing columns %s might contain nulls because of %s%s, so this %s could filter rows from %s.",
+				return psprintf("Referencing columns %s can be null because of %s%s, so this %s could filter rows from %s.",
 								referencing_relcols, cause, origin_suffix,
 								join_name, referencing_relation);
-			return psprintf("Referencing columns %s might contain nulls, so this %s could filter rows from %s.",
+			return psprintf("Referencing columns %s can be null, so this %s could filter rows from %s.",
 							referencing_relcols, join_name,
 							referencing_relation);
 
 		default:
 			return psprintf("There is no matching foreign key constraint for %s referencing %s.",
 							referencing_relcols, referenced_relcols);
-	}
-}
-
-/*
- * key_join_failure_hint
- *
- *		Build an actionable HINT for a rejected key join.
- */
-static char *
-key_join_failure_hint(KeyJoinReq req, KeyJoinInactiveReason reason)
-{
-	switch (req)
-	{
-		case REQ_FK:
-			return NULL;
-
-		case REQ_UNIQUE:
-			if (reason == KJI_NONE)
-				return pstrdup("If possible duplication of rows is intended, use JOIN ... ON (...).");
-			return NULL;
-
-		case REQ_COVERAGE:
-			if (reason == KJI_UNACCOUNTED_FILTER)
-				return pstrdup("If filtering referenced rows before this key join is not intended, move or remove the filter; otherwise use JOIN ... ON (...).");
-			return pstrdup("If row removal on the referenced side is not intended, preserve referenced rows before this key join; otherwise use JOIN ... ON (...).");
-
-		case REQ_FKPAIR:
-			return NULL;
-
-		case REQ_IDENTITY:
-			return pstrdup("If this comparison is intended, use JOIN ... ON (...).");
-
-		case REQ_FILTER:
-			return NULL;
-
-		case REQ_NOTNULL:
-			return pstrdup("If rows with null referencing columns should be preserved, use an outer join type; otherwise use JOIN ... ON (...).");
-
-		default:
-			return NULL;
 	}
 }
 
@@ -5317,7 +5276,6 @@ key_join_report_failure(ParseState *pstate, ParseLoc location,
 	const char *relations[2];
 	char	   *relcols[2];
 	char	   *detail;
-	char	   *hint;
 
 	for (int i = 0; i < 2; i++)
 	{
@@ -5368,13 +5326,11 @@ key_join_report_failure(ParseState *pstate, ParseLoc location,
 								relations[0], relations[1],
 								jointype == JOIN_INNER ?
 								"inner join" : "join");
-	hint = key_join_failure_hint(match->failReq, match->failReason);
 
 	ereport(ERROR,
 			(errcode(ERRCODE_INVALID_FOREIGN_KEY),
 			 errmsg("key join from referencing relation %s to referenced relation %s cannot be proven",
 					relations[0], relations[1]),
 			 errdetail("%s", detail),
-			 hint != NULL ? errhint("%s", hint) : 0,
 			 pstate != NULL ? parser_errposition(pstate, location) : 0));
 }

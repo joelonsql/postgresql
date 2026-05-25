@@ -157,7 +157,6 @@ ERROR:  key join from referencing relation t2 to referenced relation t1 cannot b
 LINE 1: SELECT * FROM t1 JOIN t2 FOR KEY (c3) -> t1 (c2);
                                  ^
 DETAIL:  Referenced columns t1 (c2) are not proven unique.
-HINT:  If possible duplication of rows is intended, use JOIN ... ON (...).
 SELECT * FROM t1 JOIN t2 FOR KEY (c4) -> t1 (c1); -- rejected, reason: referencing column is not backed by the FK
 ERROR:  key join from referencing relation t2 to referenced relation t1 cannot be proven
 LINE 1: SELECT * FROM t1 JOIN t2 FOR KEY (c4) -> t1 (c1);
@@ -197,7 +196,6 @@ ERROR:  key join from referencing relation b to referenced relation a cannot be 
 LINE 1: SELECT * FROM t1 AS a JOIN t2 AS b FOR KEY (c3) -> a (c2);
                                            ^
 DETAIL:  Referenced columns a (c2) are not proven unique.
-HINT:  If possible duplication of rows is intended, use JOIN ... ON (...).
 SELECT * FROM t2 JOIN t1 FOR KEY (c1) <- t2 (c3); -- accepted
  c3 | c4 | c1 | c2 
 ----+----+----+----
@@ -254,7 +252,6 @@ ERROR:  key join from referencing relation t2 to referenced relation t1 cannot b
 LINE 1: SELECT * FROM t2 JOIN t1 FOR KEY (c2) <- t2 (c3);
                                  ^
 DETAIL:  Referenced columns t1 (c2) are not proven unique.
-HINT:  If possible duplication of rows is intended, use JOIN ... ON (...).
 SELECT * FROM t2 JOIN t1 FOR KEY (c1,c2) <- t2 (c3,c4); -- rejected, reason: selected key does not match the FK arity
 ERROR:  key join from referencing relation t2 to referenced relation t1 cannot be proven
 LINE 1: SELECT * FROM t2 JOIN t1 FOR KEY (c1,c2) <- t2 (c3,c4);
@@ -322,7 +319,6 @@ ERROR:  key join from referencing relation c3 to referenced relation p cannot be
 LINE 9:         FOR KEY (c3) -> p (c1)
                 ^
 DETAIL:  Referenced relation p may lose rows before this key join because of a preceding join, so not every c3 (c3) value can be proven to have a matching p row.
-HINT:  If row removal on the referenced side is not intended, preserve referenced rows before this key join; otherwise use JOIN ... ON (...).
 SELECT *
 FROM pg_catalog.pg_class pc
 -- rejected, reason: catalog NOT NULL columns do not provide proof facts
@@ -331,7 +327,6 @@ ERROR:  key join from referencing relation t2 to referenced relation pc cannot b
 LINE 4: JOIN t2 FOR KEY (c3) -> pc (relname);
                 ^
 DETAIL:  Referenced columns pc (relname) are not proven unique.
-HINT:  If possible duplication of rows is intended, use JOIN ... ON (...).
 CREATE TABLE no_key_join_fact_parent (id int);
 CREATE TABLE no_key_join_fact_child (parent_id int);
 SELECT *
@@ -630,7 +625,6 @@ ERROR:  key join from referencing relation c to referenced relation p1 cannot be
 LINE 4: JOIN kj_part_child c FOR KEY (pid) -> p1 (id)
                              ^
 DETAIL:  Referenced columns p1 (id) are not proven unique.
-HINT:  If possible duplication of rows is intended, use JOIN ... ON (...).
 CREATE VIEW kj_part_bad_view AS
 SELECT c.id AS child_id, c.pid, p1.id AS parent_id
 FROM kj_part_parent_1 p1
@@ -640,7 +634,6 @@ ERROR:  key join from referencing relation c to referenced relation p1 cannot be
 LINE 5: JOIN kj_part_child c FOR KEY (pid) -> p1 (id);
                              ^
 DETAIL:  Referenced columns p1 (id) are not proven unique.
-HINT:  If possible duplication of rows is intended, use JOIN ... ON (...).
 CREATE TABLE kj_part_ref_parent (id int PRIMARY KEY);
 CREATE TABLE kj_part_ref_child
 (
@@ -704,7 +697,6 @@ ERROR:  key join from referencing relation t3 to referenced relation t1 cannot b
 LINE 5: JOIN t3 FOR KEY (c5,c6) -> t1 (c1,c2);
                 ^
 DETAIL:  Referenced relation t1 may lose rows before this key join because of a preceding join, so not every t3 (c5, c6) value can be proven to have a matching t1 row.
-HINT:  If row removal on the referenced side is not intended, preserve referenced rows before this key join; otherwise use JOIN ... ON (...).
 SELECT *
 FROM t1
 -- rejected, reason: nullable referencing columns are on the non-preserved side
@@ -714,7 +706,6 @@ ERROR:  key join from referencing relation t3 to referenced relation t1 cannot b
 LINE 5: LEFT JOIN t3 FOR KEY (c5,c6) -> t1 (c1,c2);
                      ^
 DETAIL:  Referenced relation t1 may lose rows before this key join because of a preceding join, so not every t3 (c5, c6) value can be proven to have a matching t1 row.
-HINT:  If row removal on the referenced side is not intended, preserve referenced rows before this key join; otherwise use JOIN ... ON (...).
 SELECT *
 FROM t1
 -- rejected, reason: referenced t1 surface is unique but not row-covered after the preceding inner key join
@@ -724,7 +715,6 @@ ERROR:  key join from referencing relation t3 to referenced relation t1 cannot b
 LINE 5: RIGHT JOIN t3 FOR KEY (c5,c6) -> t1 (c1,c2);
                       ^
 DETAIL:  Referenced relation t1 may lose rows before this key join because of a preceding join, so not every t3 (c5, c6) value can be proven to have a matching t1 row.
-HINT:  If row removal on the referenced side is not intended, preserve referenced rows before this key join; otherwise use JOIN ... ON (...).
 --
 -- Test composite key joins with swapped column orders
 --
@@ -737,7 +727,6 @@ ERROR:  key join from referencing relation t3 to referenced relation t1 cannot b
 LINE 5: JOIN t3 FOR KEY (c6,c5) -> t1 (c2,c1);
                 ^
 DETAIL:  Referenced relation t1 may lose rows before this key join because of a preceding join, so not every t3 (c6, c5) value can be proven to have a matching t1 row.
-HINT:  If row removal on the referenced side is not intended, preserve referenced rows before this key join; otherwise use JOIN ... ON (...).
 --
 -- Test mismatched column orders between referencing and referenced sides
 --
@@ -750,7 +739,6 @@ ERROR:  key join from referencing relation t3 to referenced relation t1 cannot b
 LINE 5: JOIN t3 FOR KEY (c6,c5) -> t1 (c1,c2);
                 ^
 DETAIL:  Referenced relation t1 may lose rows before this key join because of a preceding join, so not every t3 (c6, c5) value can be proven to have a matching t1 row.
-HINT:  If row removal on the referenced side is not intended, preserve referenced rows before this key join; otherwise use JOIN ... ON (...).
 --
 -- Test defining foreign key constraints with MATCH FULL
 --
@@ -784,7 +772,6 @@ ERROR:  key join from referencing relation t4 to referenced relation t1 cannot b
 LINE 5: JOIN t4 FOR KEY (c7,c8) -> t1 (c1,c2);
                 ^
 DETAIL:  Referenced relation t1 may lose rows before this key join because of a preceding join, so not every t4 (c7, c8) value can be proven to have a matching t1 row.
-HINT:  If row removal on the referenced side is not intended, preserve referenced rows before this key join; otherwise use JOIN ... ON (...).
 SELECT *
 FROM t1
 -- rejected, reason: nullable referencing columns are on the non-preserved side
@@ -794,7 +781,6 @@ ERROR:  key join from referencing relation t4 to referenced relation t1 cannot b
 LINE 5: LEFT JOIN t4 FOR KEY (c7,c8) -> t1 (c1,c2);
                      ^
 DETAIL:  Referenced relation t1 may lose rows before this key join because of a preceding join, so not every t4 (c7, c8) value can be proven to have a matching t1 row.
-HINT:  If row removal on the referenced side is not intended, preserve referenced rows before this key join; otherwise use JOIN ... ON (...).
 SELECT *
 FROM t1
 -- rejected, reason: referenced t1 surface is unique but not row-covered after the preceding inner key join
@@ -804,7 +790,6 @@ ERROR:  key join from referencing relation t4 to referenced relation t1 cannot b
 LINE 5: RIGHT JOIN t4 FOR KEY (c7,c8) -> t1 (c1,c2);
                       ^
 DETAIL:  Referenced relation t1 may lose rows before this key join because of a preceding join, so not every t4 (c7, c8) value can be proven to have a matching t1 row.
-HINT:  If row removal on the referenced side is not intended, preserve referenced rows before this key join; otherwise use JOIN ... ON (...).
 -- Recreate stuff for pg_dump tests
 ALTER TABLE t2
     ADD CONSTRAINT t2_c3_fkey FOREIGN KEY (c3) REFERENCES t1 (c1);
@@ -1275,7 +1260,6 @@ ERROR:  key join from referencing relation t2 to referenced relation v1 cannot b
 LINE 1: SELECT * FROM v1 JOIN t2 FOR KEY (c3) -> v1 (c1);
                                  ^
 DETAIL:  Referenced relation v1 is filtered before this key join inside view "public.v1", so not every t2 (c3) value can be proven to have a matching v1 row.
-HINT:  If filtering referenced rows before this key join is not intended, move or remove the filter; otherwise use JOIN ... ON (...).
 -- accepted, filtering allowed since v2 is the referencing table
 SELECT * FROM t1 JOIN v2 FOR KEY (c3) -> t1 (c1);
  c1 | c2 | c3 | c4 
@@ -1292,7 +1276,6 @@ ERROR:  key join from referencing relation v2 to referenced relation v1 cannot b
 LINE 1: SELECT * FROM v1 JOIN v2 FOR KEY (c3) -> v1 (c1);
                                  ^
 DETAIL:  Referenced relation v1 is filtered before this key join inside view "public.v1", so not every v2 (c3) value can be proven to have a matching v1 row.
-HINT:  If filtering referenced rows before this key join is not intended, move or remove the filter; otherwise use JOIN ... ON (...).
 -- rejected, reason: referenced-side HAVING filter is not a matched key filter
 SELECT * FROM
 (
@@ -1303,7 +1286,6 @@ ERROR:  key join from referencing relation t2 to referenced relation u cannot be
 LINE 5: JOIN t2 FOR KEY (c3) -> u (c1);
                 ^
 DETAIL:  Referenced relation u may lose rows before this key join because of HAVING, LIMIT, OFFSET, or FOR UPDATE, so not every t2 (c3) value can be proven to have a matching u row.
-HINT:  If row removal on the referenced side is not intended, preserve referenced rows before this key join; otherwise use JOIN ... ON (...).
 -- rejected, reason: u is filtered and is the referenced table
 SELECT * FROM (SELECT c1 FROM t1 LIMIT 1) AS u
 JOIN t2 FOR KEY (c3) -> u (c1);
@@ -1311,7 +1293,6 @@ ERROR:  key join from referencing relation t2 to referenced relation u cannot be
 LINE 2: JOIN t2 FOR KEY (c3) -> u (c1);
                 ^
 DETAIL:  Referenced relation u may lose rows before this key join because of HAVING, LIMIT, OFFSET, or FOR UPDATE, so not every t2 (c3) value can be proven to have a matching u row.
-HINT:  If row removal on the referenced side is not intended, preserve referenced rows before this key join; otherwise use JOIN ... ON (...).
 -- rejected, reason: u is filtered and is the referenced table
 SELECT * FROM (SELECT c1 FROM t1 OFFSET 1) AS u
 JOIN t2 FOR KEY (c3) -> u (c1);
@@ -1319,7 +1300,6 @@ ERROR:  key join from referencing relation t2 to referenced relation u cannot be
 LINE 2: JOIN t2 FOR KEY (c3) -> u (c1);
                 ^
 DETAIL:  Referenced relation u may lose rows before this key join because of HAVING, LIMIT, OFFSET, or FOR UPDATE, so not every t2 (c3) value can be proven to have a matching u row.
-HINT:  If row removal on the referenced side is not intended, preserve referenced rows before this key join; otherwise use JOIN ... ON (...).
 WITH q2 AS
 (
     SELECT * FROM t5 WHERE t5.c11 > 0
@@ -1345,7 +1325,6 @@ ERROR:  key join from referencing relation t7 to referenced relation q1 cannot b
 LINE 21: JOIN t7 FOR KEY (c15, c16) -> q1 (c9, c10);
                  ^
 DETAIL:  Referenced relation q1 is filtered before this key join, so not every t7 (c15, c16) value can be proven to have a matching q1 row.
-HINT:  If filtering referenced rows before this key join is not intended, move or remove the filter; otherwise use JOIN ... ON (...).
 --
 -- Test allowed joins not affecting uniqueness
 --
@@ -1584,8 +1563,7 @@ FROM t1_nn JOIN v_notnull_producer p
 ERROR:  key join from referencing relation p to referenced relation t1_nn cannot be proven
 LINE 4:     FOR KEY (t2_t1_id_nn) -> t1_nn (t1_id);
             ^
-DETAIL:  Referencing columns p (t2_t1_id_nn) might contain nulls, so this inner join could filter rows from p.
-HINT:  If rows with null referencing columns should be preserved, use an outer join type; otherwise use JOIN ... ON (...).
+DETAIL:  Referencing columns p (t2_t1_id_nn) can be null, so this inner join could filter rows from p.
 ALTER TABLE t2_nn ALTER COLUMN t2_t1_id_nn SET NOT NULL;
 DROP VIEW v_notnull_producer;
 --
@@ -1598,8 +1576,7 @@ JOIN t1_nn FOR KEY (t1_id) <- t2_nn (t2_t1_id_nullable);
 ERROR:  key join from referencing relation t2_nn to referenced relation t1_nn cannot be proven
 LINE 3: JOIN t1_nn FOR KEY (t1_id) <- t2_nn (t2_t1_id_nullable);
                    ^
-DETAIL:  Referencing columns t2_nn (t2_t1_id_nullable) might contain nulls, so this inner join could filter rows from t2_nn.
-HINT:  If rows with null referencing columns should be preserved, use an outer join type; otherwise use JOIN ... ON (...).
+DETAIL:  Referencing columns t2_nn (t2_t1_id_nullable) can be null, so this inner join could filter rows from t2_nn.
 -- N3: Nullable FK, LEFT JOIN preserving referencing side → accepted
 SELECT * FROM t2_nn
 -- accepted
@@ -1639,8 +1616,7 @@ LEFT JOIN t2_nn FOR KEY (t2_t1_id_nullable) -> t1_nn (t1_id);
 ERROR:  key join from referencing relation t2_nn to referenced relation t1_nn cannot be proven
 LINE 3: LEFT JOIN t2_nn FOR KEY (t2_t1_id_nullable) -> t1_nn (t1_id)...
                         ^
-DETAIL:  Referencing columns t2_nn (t2_t1_id_nullable) might contain nulls, so this join could filter rows from t2_nn.
-HINT:  If rows with null referencing columns should be preserved, use an outer join type; otherwise use JOIN ... ON (...).
+DETAIL:  Referencing columns t2_nn (t2_t1_id_nullable) can be null, so this join could filter rows from t2_nn.
 -- NE1: NOT NULL FK col null-extended by prior FK LEFT JOIN → null-extended error
 -- t1_nn a LEFT JOIN t2_nn makes t2_t1_id_nn null-extended; the subsequent INNER key join
 -- on that column should fire the null-extended branch of the error.
@@ -1652,8 +1628,7 @@ SELECT * FROM
 ERROR:  key join from referencing relation t2_nn to referenced relation b cannot be proven
 LINE 5:     JOIN t1_nn b FOR KEY (t1_id) <- t2_nn (t2_t1_id_nn);
                          ^
-DETAIL:  Referencing columns t2_nn (t2_t1_id_nn) might contain nulls because of a preceding outer join that can null-extend it, so this inner join could filter rows from t2_nn.
-HINT:  If rows with null referencing columns should be preserved, use an outer join type; otherwise use JOIN ... ON (...).
+DETAIL:  Referencing columns t2_nn (t2_t1_id_nn) can be null because of a preceding outer join that can null-extend it, so this inner join could filter rows from t2_nn.
 -- NE2: NOT NULL FK col null-extended through prior outer key joins → error
 CREATE TABLE t1_nn_chain (t1_id INTEGER PRIMARY KEY);
 CREATE TABLE t2_nn_chain (
@@ -1677,8 +1652,7 @@ SELECT * FROM
 ERROR:  key join from referencing relation m2 to referenced relation r cannot be proven
 LINE 7:     JOIN t1_nn_chain r FOR KEY (t1_id) <- m2 (t2_t1_id);
                                ^
-DETAIL:  Referencing columns m2 (t2_t1_id) might contain nulls because of a preceding outer join that can null-extend it, so this inner join could filter rows from m2.
-HINT:  If rows with null referencing columns should be preserved, use an outer join type; otherwise use JOIN ... ON (...).
+DETAIL:  Referencing columns m2 (t2_t1_id) can be null because of a preceding outer join that can null-extend it, so this inner join could filter rows from m2.
 DROP TABLE t3_nn_chain, t2_nn_chain, t1_nn_chain;
 -- NE3: outer padding null-extends every base table in a nested subtree
 CREATE TABLE ne3_a (id INTEGER PRIMARY KEY);
@@ -1709,8 +1683,7 @@ JOIN ne3_e FOR KEY (id) <- q (c_e_id);
 ERROR:  key join from referencing relation q to referenced relation ne3_e cannot be proven
 LINE 10: JOIN ne3_e FOR KEY (id) <- q (c_e_id);
                     ^
-DETAIL:  Referencing columns q (c_e_id) might contain nulls because of a preceding outer join that can null-extend it, so this inner join could filter rows from q.
-HINT:  If rows with null referencing columns should be preserved, use an outer join type; otherwise use JOIN ... ON (...).
+DETAIL:  Referencing columns q (c_e_id) can be null because of a preceding outer join that can null-extend it, so this inner join could filter rows from q.
 CREATE VIEW ne3_right_nested_v AS
 SELECT ne3_a.id AS a_id, ne3_c.e_id AS c_e_id
 FROM ne3_a
@@ -1724,8 +1697,7 @@ JOIN ne3_e FOR KEY (id) <- q (c_e_id);
 ERROR:  key join from referencing relation q to referenced relation ne3_e cannot be proven
 LINE 4: JOIN ne3_e FOR KEY (id) <- q (c_e_id);
                    ^
-DETAIL:  Referencing columns q (c_e_id) might contain nulls because of a preceding outer join that can null-extend it inside view "public.ne3_right_nested_v", so this inner join could filter rows from q.
-HINT:  If rows with null referencing columns should be preserved, use an outer join type; otherwise use JOIN ... ON (...).
+DETAIL:  Referencing columns q (c_e_id) can be null because of a preceding outer join that can null-extend it inside view "public.ne3_right_nested_v", so this inner join could filter rows from q.
 DROP VIEW ne3_right_nested_v;
 DROP TABLE ne3_b, ne3_c, ne3_e, ne3_a;
 DROP TABLE t2_nn, t1_nn;
@@ -1943,7 +1915,6 @@ ERROR:  key join from referencing relation t2 to referenced relation v1 cannot b
 LINE 1: SELECT * FROM v1 JOIN t2 FOR KEY (c3, c4) -> v1 (c1_1, c1_2)...
                                  ^
 DETAIL:  Referenced columns v1 (c1_1, c1_2) are not proven unique.
-HINT:  If possible duplication of rows is intended, use JOIN ... ON (...).
 -- rejected, reason: referenced column does not exist
 SELECT * FROM v1 JOIN t2 FOR KEY (c3, c4) -> v1 (c1_1, nonexistent);
 ERROR:  referenced column "nonexistent" does not exist
@@ -1974,7 +1945,6 @@ ERROR:  key join from referencing relation t2 to referenced relation v1 cannot b
 LINE 1: SELECT * FROM v1 JOIN t2 FOR KEY (c3, c4) -> v1 (c1_1, c2_1)...
                                  ^
 DETAIL:  Referenced columns v1 (c1_1, c2_1) are not proven unique.
-HINT:  If possible duplication of rows is intended, use JOIN ... ON (...).
 SELECT * FROM v1 JOIN t2 FOR KEY (c3, c4) -> v1 (c1_2, c2_1); -- accepted
  c1_1 | c1_2 | c2_1 | c2_2 | c3 | c4 
 ------+------+------+------+----+----
@@ -2022,7 +1992,6 @@ ERROR:  key join from referencing relation t2 to referenced relation u cannot be
 LINE 6: JOIN t2 FOR KEY (c3, c4) -> u (c1, c2);
                 ^
 DETAIL:  Referenced relation u is filtered before this key join, so not every t2 (c3, c4) value can be proven to have a matching u row.
-HINT:  If filtering referenced rows before this key join is not intended, move or remove the filter; otherwise use JOIN ... ON (...).
 SELECT *
 FROM t1
 JOIN
@@ -3324,7 +3293,6 @@ ERROR:  key join from referencing relation r to referenced relation q cannot be 
 LINE 4: JOIN reviews_do r FOR KEY (product_id) -> q (id);
                           ^
 DETAIL:  Referenced relation q may lose rows before this key join because of DISTINCT, so not every r (product_id) value can be proven to have a matching q row.
-HINT:  If row removal on the referenced side is not intended, preserve referenced rows before this key join; otherwise use JOIN ... ON (...).
 DROP TABLE reviews_do, products_do;
 -- DISTINCT ON drops sibling rows for each distinct group, so a base
 -- rowCoverage on the wider key is no longer valid for the resulting
@@ -3350,7 +3318,6 @@ ERROR:  key join from referencing relation rowcov_fk to referenced relation sub 
 LINE 9: JOIN rowcov_fk FOR KEY (fk_a, fk_b) -> sub (a, b);
                        ^
 DETAIL:  Referenced relation sub may lose rows before this key join because of DISTINCT, so not every rowcov_fk (fk_a, fk_b) value can be proven to have a matching sub row.
-HINT:  If row removal on the referenced side is not intended, preserve referenced rows before this key join; otherwise use JOIN ... ON (...).
 SELECT *
 FROM (
     SELECT DISTINCT a, b
@@ -3362,7 +3329,6 @@ ERROR:  key join from referencing relation rowcov_fk to referenced relation sub 
 LINE 7: JOIN rowcov_fk FOR KEY (fk_a, fk_b) -> sub (a, b);
                        ^
 DETAIL:  Referenced relation sub may lose rows before this key join because of DISTINCT, so not every rowcov_fk (fk_a, fk_b) value can be proven to have a matching sub row.
-HINT:  If row removal on the referenced side is not intended, preserve referenced rows before this key join; otherwise use JOIN ... ON (...).
 DROP TABLE rowcov_fk, rowcov_pk;
 -- GROUP BY/DISTINCT preserve row coverage only when their equality identity
 -- exactly matches the key equality identity.
@@ -3441,7 +3407,6 @@ ERROR:  key join from referencing relation c to referenced relation p cannot be 
 LINE 4: JOIN rowcov_nullable_child c FOR KEY (parent_code) -> p (cod...
                                      ^
 DETAIL:  Referenced relation p may lose rows before this key join because of HAVING, LIMIT, OFFSET, or FOR UPDATE, so not every c (parent_code) value can be proven to have a matching p row.
-HINT:  If row removal on the referenced side is not intended, preserve referenced rows before this key join; otherwise use JOIN ... ON (...).
 DROP TABLE rowcov_nullable_child, rowcov_nullable_parent;
 -- Extra row-collapse columns may have different identity from the key.
 -- Row coverage is preserved as long as the grouped key column itself has
@@ -3574,7 +3539,6 @@ ERROR:  key join from referencing relation c to referenced relation p cannot be 
 LINE 4: JOIN rowcov_numeric_child c FOR KEY (parent_id) -> p (id);
                                     ^
 DETAIL:  Referenced relation p may lose rows before this key join because of GROUP BY, so not every c (parent_id) value can be proven to have a matching p row.
-HINT:  If row removal on the referenced side is not intended, preserve referenced rows before this key join; otherwise use JOIN ... ON (...).
 SELECT *
 FROM (SELECT DISTINCT id FROM rowcov_numeric_parent) p
 -- rejected, reason: DISTINCT equality collapses keys distinct under FK equality
@@ -3583,7 +3547,6 @@ ERROR:  key join from referencing relation c to referenced relation p cannot be 
 LINE 4: JOIN rowcov_numeric_child c FOR KEY (parent_id) -> p (id);
                                     ^
 DETAIL:  Referenced relation p may lose rows before this key join because of DISTINCT, so not every c (parent_id) value can be proven to have a matching p row.
-HINT:  If row removal on the referenced side is not intended, preserve referenced rows before this key join; otherwise use JOIN ... ON (...).
 SELECT *
 FROM (
     SELECT DISTINCT ON (id) id
@@ -3596,7 +3559,6 @@ ERROR:  key join from referencing relation c to referenced relation p cannot be 
 LINE 8: JOIN rowcov_numeric_child c FOR KEY (parent_id) -> p (id);
                                     ^
 DETAIL:  Referenced relation p may lose rows before this key join because of DISTINCT, so not every c (parent_id) value can be proven to have a matching p row.
-HINT:  If row removal on the referenced side is not intended, preserve referenced rows before this key join; otherwise use JOIN ... ON (...).
 DROP TABLE rowcov_numeric_child, rowcov_numeric_parent;
 DROP OPERATOR CLASS rowcov_numeric_scale_ops USING btree;
 DROP OPERATOR FAMILY rowcov_numeric_scale_ops USING btree;
@@ -3675,7 +3637,6 @@ ERROR:  key join from referencing relation c to referenced relation p cannot be 
 LINE 4: JOIN scalar_array_filter_child_v c FOR KEY (parent_id) -> p ...
                                            ^
 DETAIL:  Referenced relation p is filtered before this key join inside view "public.scalar_array_filter_parent_v", so not every c (parent_id) value can be proven to have a matching p row.
-HINT:  If filtering referenced rows before this key join is not intended, move or remove the filter; otherwise use JOIN ... ON (...).
 DROP VIEW scalar_array_filter_child_v, scalar_array_filter_parent_v;
 DROP TABLE scalar_array_filter_child, scalar_array_filter_parent;
 -- FILTER1b: strict proof-filter value allowlist accepts constants
@@ -3830,7 +3791,6 @@ ERROR:  key join from referencing relation c to referenced relation p cannot be 
 LINE 4: JOIN filter_func_arg_child_v c FOR KEY (parent_id) -> p (id)...
                                        ^
 DETAIL:  Referenced relation p is filtered before this key join inside view "public.filter_func_arg_parent_v", so not every c (parent_id) value can be proven to have a matching p row.
-HINT:  If filtering referenced rows before this key join is not intended, move or remove the filter; otherwise use JOIN ... ON (...).
 DROP VIEW filter_func_arg_child_v, filter_func_arg_parent_v;
 DROP TABLE filter_func_child, filter_func_parent;
 DROP FUNCTION filter_stable_identity(int);
@@ -3856,7 +3816,6 @@ ERROR:  key join from referencing relation c to referenced relation p cannot be 
 LINE 4: JOIN filter_volatile_child_v c FOR KEY (parent_id) -> p (id)...
                                        ^
 DETAIL:  Referenced relation p is filtered before this key join inside view "public.filter_volatile_parent_v", so not every c (parent_id) value can be proven to have a matching p row.
-HINT:  If filtering referenced rows before this key join is not intended, move or remove the filter; otherwise use JOIN ... ON (...).
 DROP VIEW filter_volatile_child_v, filter_volatile_parent_v;
 DROP TABLE filter_volatile_child, filter_volatile_parent;
 DROP FUNCTION filter_volatile_identity(int);
@@ -3932,7 +3891,6 @@ ERROR:  key join from referencing relation g to referenced relation c cannot be 
 LINE 8: JOIN filter_coerce_io_grandchild g FOR KEY (id) -> c (id);
                                            ^
 DETAIL:  Referenced relation c is filtered before this key join, so not every g (id) value can be proven to have a matching c row.
-HINT:  If filtering referenced rows before this key join is not intended, move or remove the filter; otherwise use JOIN ... ON (...).
 DROP TABLE filter_coerce_io_grandchild, filter_coerce_io_child,
            filter_coerce_io_parent;
 DROP CAST (filter_coerce_io_type AS integer);
@@ -4104,7 +4062,6 @@ ERROR:  key join from referencing relation d to referenced relation q cannot be 
 LINE 8: ) q FOR KEY (bridge_id) <- d (bridge_id);
             ^
 DETAIL:  Referenced relation q is filtered before this key join, so not every d (bridge_id) value can be proven to have a matching q row.
-HINT:  If filtering referenced rows before this key join is not intended, move or remove the filter; otherwise use JOIN ... ON (...).
 SELECT d.id AS detail_id, q.bridge_id
 FROM filter_detail d
 JOIN (
@@ -4293,7 +4250,6 @@ ERROR:  key join from referencing relation c to referenced relation p cannot be 
 LINE 4: JOIN filter_bool_child_or c FOR KEY (parent_id) -> p (id);
                                     ^
 DETAIL:  Referenced relation p is filtered before this key join inside view "public.filter_bool_parent_or", so not every c (parent_id) value can be proven to have a matching p row.
-HINT:  If filtering referenced rows before this key join is not intended, move or remove the filter; otherwise use JOIN ... ON (...).
 CREATE VIEW filter_bool_parent_test AS
 SELECT id FROM filter_bool_parent WHERE id = (true IS TRUE);
 CREATE VIEW filter_bool_child_test AS
@@ -4306,7 +4262,6 @@ ERROR:  key join from referencing relation c to referenced relation p cannot be 
 LINE 4: JOIN filter_bool_child_test c FOR KEY (parent_id) -> p (id);
                                       ^
 DETAIL:  Referenced relation p is filtered before this key join inside view "public.filter_bool_parent_test", so not every c (parent_id) value can be proven to have a matching p row.
-HINT:  If filtering referenced rows before this key join is not intended, move or remove the filter; otherwise use JOIN ... ON (...).
 DROP VIEW filter_bool_child_test, filter_bool_parent_test,
           filter_bool_child_or, filter_bool_parent_or;
 DROP TABLE filter_bool_child, filter_bool_parent;
@@ -4333,7 +4288,6 @@ ERROR:  key join from referencing relation c to referenced relation p cannot be 
 LINE 4: JOIN filter_case_child_v c FOR KEY (parent_id) -> p (id)
                                    ^
 DETAIL:  Referenced relation p is filtered before this key join inside view "public.filter_case_parent_v", so not every c (parent_id) value can be proven to have a matching p row.
-HINT:  If filtering referenced rows before this key join is not intended, move or remove the filter; otherwise use JOIN ... ON (...).
 DROP VIEW filter_case_child_v, filter_case_parent_v;
 CREATE VIEW filter_minmax_parent_v AS
 SELECT id FROM filter_pseudo_parent WHERE id = LEAST(1, 2);
@@ -4347,7 +4301,6 @@ ERROR:  key join from referencing relation c to referenced relation p cannot be 
 LINE 4: JOIN filter_minmax_child_v c FOR KEY (parent_id) -> p (id);
                                      ^
 DETAIL:  Referenced relation p is filtered before this key join inside view "public.filter_minmax_parent_v", so not every c (parent_id) value can be proven to have a matching p row.
-HINT:  If filtering referenced rows before this key join is not intended, move or remove the filter; otherwise use JOIN ... ON (...).
 DROP VIEW filter_minmax_child_v, filter_minmax_parent_v;
 CREATE VIEW filter_coalesce_parent_v AS
 SELECT id FROM filter_pseudo_parent WHERE id = COALESCE(1, 2);
@@ -4361,7 +4314,6 @@ ERROR:  key join from referencing relation c to referenced relation p cannot be 
 LINE 4: JOIN filter_coalesce_child_v c FOR KEY (parent_id) -> p (id)...
                                        ^
 DETAIL:  Referenced relation p is filtered before this key join inside view "public.filter_coalesce_parent_v", so not every c (parent_id) value can be proven to have a matching p row.
-HINT:  If filtering referenced rows before this key join is not intended, move or remove the filter; otherwise use JOIN ... ON (...).
 DROP VIEW filter_coalesce_child_v, filter_coalesce_parent_v;
 CREATE VIEW filter_nullif_parent_v AS
 SELECT id FROM filter_pseudo_parent WHERE id = NULLIF(1, 2);
@@ -4375,7 +4327,6 @@ ERROR:  key join from referencing relation c to referenced relation p cannot be 
 LINE 4: JOIN filter_nullif_child_v c FOR KEY (parent_id) -> p (id);
                                      ^
 DETAIL:  Referenced relation p is filtered before this key join inside view "public.filter_nullif_parent_v", so not every c (parent_id) value can be proven to have a matching p row.
-HINT:  If filtering referenced rows before this key join is not intended, move or remove the filter; otherwise use JOIN ... ON (...).
 DROP VIEW filter_nullif_child_v, filter_nullif_parent_v;
 DROP TABLE filter_pseudo_child, filter_pseudo_parent;
 -- FILTER5e: matched-filter propagation skips other same-relation keys
@@ -4551,7 +4502,6 @@ ERROR:  key join from referencing relation c to referenced relation p cannot be 
 LINE 3: JOIN shadow_child_filter c FOR KEY (parent_id) -> p (id);
                                    ^
 DETAIL:  Referenced relation p is filtered before this key join inside view "key_join_shadow.shadow_parent_filter", so not every c (parent_id) value can be proven to have a matching p row.
-HINT:  If filtering referenced rows before this key join is not intended, move or remove the filter; otherwise use JOIN ... ON (...).
 DROP VIEW shadow_child_filter, shadow_parent_filter;
 DROP TABLE shadow_child, shadow_parent;
 DROP OPERATOR = (int4, int4);
@@ -4648,7 +4598,6 @@ ERROR:  key join from referencing relation c to referenced relation p cannot be 
 LINE 3: JOIN filter_opfamily_child_big c FOR KEY (tenant_id, parent_...
                                          ^
 DETAIL:  Referenced relation p is filtered before this key join inside view "public.filter_opfamily_parent_right_big", so not every c (tenant_id, parent_id) value can be proven to have a matching p row.
-HINT:  If filtering referenced rows before this key join is not intended, move or remove the filter; otherwise use JOIN ... ON (...).
 DROP VIEW filter_opfamily_parent_right_big, filter_opfamily_child_int,
           filter_opfamily_parent_int, filter_opfamily_parent_big,
           filter_opfamily_child_big,
@@ -4793,7 +4742,6 @@ ERROR:  key join from referencing relation c to referenced relation p cannot be 
 LINE 3: JOIN filter_collation_child_nondet c FOR KEY (code) -> p (co...
                                              ^
 DETAIL:  Referenced relation p is filtered before this key join inside view "public.filter_collation_parent_nondet", so not every c (code) value can be proven to have a matching p row.
-HINT:  If filtering referenced rows before this key join is not intended, move or remove the filter; otherwise use JOIN ... ON (...).
 DROP VIEW filter_collation_child_nondet, filter_collation_parent_nondet;
 DROP COLLATION filter_collation_nondet;
 DROP VIEW filter_collation_child_exact, filter_collation_parent_exact,
@@ -4818,7 +4766,6 @@ CREATE VIEW rv_dep AS
 CREATE OR REPLACE VIEW rv_parent AS SELECT id FROM rv_base WHERE v > 0;
 ERROR:  key join from referencing relation rv_child to referenced relation rv_parent cannot be proven
 DETAIL:  Referenced relation rv_parent is filtered before this key join, so not every rv_child (ref) value can be proven to have a matching rv_parent row.
-HINT:  If filtering referenced rows before this key join is not intended, move or remove the filter; otherwise use JOIN ... ON (...).
 -- Replace rv_parent back to unfiltered — rv_dep becomes valid again
 CREATE OR REPLACE VIEW rv_parent AS SELECT id FROM rv_base;
 DROP VIEW rv_dep, rv_parent;
@@ -6019,8 +5966,7 @@ JOIN output_fk_null_ext_gp g FOR KEY (id) <- q (gp_id);
 ERROR:  key join from referencing relation q to referenced relation g cannot be proven
 LINE 7: JOIN output_fk_null_ext_gp g FOR KEY (id) <- q (gp_id);
                                      ^
-DETAIL:  Referencing columns q (gp_id) might contain nulls because of a preceding outer join that can null-extend it, so this inner join could filter rows from q.
-HINT:  If rows with null referencing columns should be preserved, use an outer join type; otherwise use JOIN ... ON (...).
+DETAIL:  Referencing columns q (gp_id) can be null because of a preceding outer join that can null-extend it, so this inner join could filter rows from q.
 DROP TABLE output_fk_null_ext_child,
            output_fk_null_ext_parent,
            output_fk_null_ext_gp;
@@ -6267,7 +6213,6 @@ ERROR:  key join from referencing relation c to referenced relation o cannot be 
 LINE 5:     FOR KEY (id) <- c (parent_id);
             ^
 DETAIL:  Referenced relation o is not proven to contain every referenced key row, so not every c (parent_id) value can be proven to have a matching o row.
-HINT:  If row removal on the referenced side is not intended, preserve referenced rows before this key join; otherwise use JOIN ... ON (...).
 DROP TABLE key_join_wrong_coverage_child,
            key_join_wrong_coverage_other,
            key_join_wrong_coverage_parent;
@@ -6591,7 +6536,6 @@ ERROR:  key join from referencing relation c to referenced relation p cannot be 
 LINE 3: JOIN kd_child c FOR KEY (parent_id) -> p (id);
                         ^
 DETAIL:  Referenced relation p may lose rows before this key join because of HAVING, LIMIT, OFFSET, or FOR UPDATE, so not every c (parent_id) value can be proven to have a matching p row.
-HINT:  If row removal on the referenced side is not intended, preserve referenced rows before this key join; otherwise use JOIN ... ON (...).
 -- Inactivated by HAVING: the row-removing clause is named.
 SELECT *
 FROM (SELECT id FROM kd_parent GROUP BY id HAVING count(*) > 0) p
@@ -6600,7 +6544,6 @@ ERROR:  key join from referencing relation c to referenced relation p cannot be 
 LINE 3: JOIN kd_child c FOR KEY (parent_id) -> p (id);
                         ^
 DETAIL:  Referenced relation p may lose rows before this key join because of HAVING, LIMIT, OFFSET, or FOR UPDATE, so not every c (parent_id) value can be proven to have a matching p row.
-HINT:  If row removal on the referenced side is not intended, preserve referenced rows before this key join; otherwise use JOIN ... ON (...).
 -- Inactivated inside a view: the message names the view to inspect.
 CREATE VIEW kd_parent_limited AS SELECT id FROM kd_parent LIMIT 1;
 SELECT *
@@ -6610,7 +6553,6 @@ ERROR:  key join from referencing relation c to referenced relation p cannot be 
 LINE 3: JOIN kd_child c FOR KEY (parent_id) -> p (id);
                         ^
 DETAIL:  Referenced relation p may lose rows before this key join because of HAVING, LIMIT, OFFSET, or FOR UPDATE inside view "key_join_diag.kd_parent_limited", so not every c (parent_id) value can be proven to have a matching p row.
-HINT:  If row removal on the referenced side is not intended, preserve referenced rows before this key join; otherwise use JOIN ... ON (...).
 DROP VIEW kd_parent_limited;
 RESET search_path;
 DROP SCHEMA key_join_diag CASCADE;
