@@ -1342,8 +1342,7 @@ key_position_identity_equal(KeyJoinKeyPosition *left, KeyJoinKeyPosition *right)
 		return false;
 	if (left->eqTypeOid != right->eqTypeOid)
 		return false;
-	if (left->eqTypmod != right->eqTypmod)
-		return false;
+	Assert(left->eqTypmod == right->eqTypmod);
 	return left->eqOperator == right->eqOperator;
 }
 
