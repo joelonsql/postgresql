@@ -173,9 +173,8 @@ Recursive Workflow:
      present to approve a signing prompt.
    - Use a PostgreSQL style commit message: concise subject,
      explanatory body, no marketing language, and clear reasoning for why the
-     change is correct.
-   - Limit every line of the commit message, including the subject, to at most
-     72 characters.
+     change is correct. Wrap the body of the commit messages at 72 characters.
+     Limit the subject of the commit message to at most 72 characters.
    - Include the reasoning in the commit message: whether the expression was
      real behavior needing tests, or unreachable defensive code turned into an
      invariant, and what verification was run.
