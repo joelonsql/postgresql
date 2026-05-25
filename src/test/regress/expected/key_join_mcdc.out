@@ -57,6 +57,25 @@ CREATE OPERATOR === (
     RIGHTARG = int,
     PROCEDURE = mcdc_stable_int_eq
 );
+CREATE FUNCTION mcdc_hash_bridge_eq(a int, b bigint) RETURNS boolean
+LANGUAGE sql IMMUTABLE STRICT
+AS $$ SELECT a = b::int $$;
+CREATE OPERATOR =## (
+    LEFTARG = int,
+    RIGHTARG = bigint,
+    PROCEDURE = mcdc_hash_bridge_eq
+);
+CREATE OPERATOR FAMILY mcdc_btree_bridge_ops USING btree;
+ALTER OPERATOR FAMILY mcdc_btree_bridge_ops USING btree ADD
+    OPERATOR 3 =## (int, bigint);
+CREATE OPERATOR FAMILY mcdc_hash_bridge_ops USING hash;
+CREATE OPERATOR CLASS mcdc_hash_bridge_int_ops
+FOR TYPE int USING hash FAMILY mcdc_hash_bridge_ops AS
+    OPERATOR 1 = (int, int),
+    FUNCTION 1 hashint4(int);
+ALTER OPERATOR FAMILY mcdc_hash_bridge_ops USING hash ADD
+    OPERATOR 1 =## (int, bigint),
+    FUNCTION 1 hashint8(bigint);
 CREATE COLLATION mcdc_nondet (provider = icu, locale = 'und',
     deterministic = false);
 CREATE TABLE mcdc_text_parent
@@ -301,6 +320,14 @@ CREATE VIEW mcdc_stable_filter_v AS
 SELECT *
 FROM mcdc_parent
 WHERE id === 1;
+CREATE VIEW mcdc_hash_filter_parent_v AS
+SELECT *
+FROM mcdc_parent
+WHERE id =## 1::bigint;
+CREATE VIEW mcdc_hash_filter_reader_v AS
+SELECT *
+FROM mcdc_reader
+WHERE parent_id =## 1::bigint;
 CREATE VIEW mcdc_multi_v AS
 SELECT p.tenant_id, p.code
 FROM mcdc_parent p
@@ -394,6 +421,15 @@ FROM mcdc_stable_filter_v v
 JOIN mcdc_reader r FOR KEY (parent_id) -> v (id)
 ORDER BY r.id;
 ERROR:  key join from referencing relation r to referenced relation v cannot be proven at character 66
+SELECT r.id, v.id
+FROM mcdc_hash_filter_parent_v v
+JOIN mcdc_hash_filter_reader_v r FOR KEY (parent_id) -> v (id)
+ORDER BY r.id;
+ id  | id 
+-----+----
+ 101 |  1
+(1 row)
+
 SELECT r.id, v.tenant_id, v.code
 FROM mcdc_multi_v v
 JOIN mcdc_reader r FOR KEY (tenant_id, code) -> v (tenant_id, code)
@@ -515,6 +551,13 @@ DROP FUNCTION mcdc_support_func(internal);
 DROP VIEW mcdc_stable_filter_v;
 DROP OPERATOR === (int, int);
 DROP FUNCTION mcdc_stable_int_eq(int, int);
+DROP VIEW mcdc_hash_filter_reader_v;
+DROP VIEW mcdc_hash_filter_parent_v;
+DROP OPERATOR CLASS mcdc_hash_bridge_int_ops USING hash;
+DROP OPERATOR FAMILY mcdc_hash_bridge_ops USING hash;
+DROP OPERATOR FAMILY mcdc_btree_bridge_ops USING btree;
+DROP OPERATOR =## (int, bigint);
+DROP FUNCTION mcdc_hash_bridge_eq(int, bigint);
 DROP TABLE mcdc_text_reader, mcdc_text_parent;
 DROP VIEW mcdc_text_cast_filter_v;
 DROP TABLE mcdc_text_cast_reader, mcdc_text_cast_parent;
