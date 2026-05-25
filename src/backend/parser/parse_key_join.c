@@ -4916,9 +4916,9 @@ key_join_equality_identity_is_usable(Oid typeOid, int32 typmod,
 	}
 
 	if (baseType == VARCHAROID &&
-		eqTypeOid == TEXTOID &&
-		IsBinaryCoercible(typeOid, eqTypeOid))
+		eqTypeOid == TEXTOID)
 	{
+		Assert(IsBinaryCoercible(typeOid, eqTypeOid));
 		*eqTypmod = -1;
 		return true;
 	}
