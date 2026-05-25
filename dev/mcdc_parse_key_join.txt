@@ -179,6 +179,9 @@ Recursive Workflow:
    - Include the reasoning in the commit message: whether the expression was
      real behavior needing tests, or unreachable defensive code turned into an
      invariant, and what verification was run.
+   - Include Missed (Regions|Functions|Lines|Branches|Conditions) Cover %
+     from parse_key_join_mcdc_summary.txt for parser/parse_key_join.c at
+     the end of the git commit message.
 
 9. Start over:
    - Inspect the updated detailed report again.
