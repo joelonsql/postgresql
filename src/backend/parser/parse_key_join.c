@@ -4128,8 +4128,7 @@ compute_join_output_facts(JoinExpr *j,
 
 			if (source->kind != KJF_FOREIGN_KEY)
 				continue;
-			if (!source->active)
-				continue;
+			Assert(source->active);
 			if (source->constraint != key_join_node->constraint ||
 				source->filterConjuncts == NIL)
 				continue;
