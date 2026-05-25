@@ -32,7 +32,7 @@ Environment overrides:
   TARGET_SOURCE=/path/to/one/source.c
   TARGET_SOURCES="/path/to/a.c /path/to/b.c"
   ISOLATION_TESTS="key-join-function-race key-join-lazy-facts-lock"
-  INJECTION_ISOLATION_TESTS="key_join_proof_race_operator_prelock key_join_proof_race_function_prelock"
+  INJECTION_ISOLATION_TESTS="key_join_proof_race_operator_prelock key_join_proof_race_filter_operator_prelock key_join_proof_race_function_prelock"
 EOF
 }
 
@@ -146,7 +146,7 @@ ICU_PREFIX=${ICU_PREFIX:-$(brew --prefix icu4c 2>/dev/null || true)}
 REGRESS_SUITE_ARGS=${REGRESS_SUITE_ARGS:-"--suite setup --suite regress --num-processes 10"}
 REGRESS_TESTS=${REGRESS_TESTS:-}
 ISOLATION_TESTS=${ISOLATION_TESTS:-"key-join-function-race key-join-lazy-facts-lock"}
-INJECTION_ISOLATION_TESTS=${INJECTION_ISOLATION_TESTS:-"key_join_proof_race_operator_prelock key_join_proof_race_function_prelock"}
+INJECTION_ISOLATION_TESTS=${INJECTION_ISOLATION_TESTS:-"key_join_proof_race_operator_prelock key_join_proof_race_filter_operator_prelock key_join_proof_race_function_prelock"}
 RUN_ISOLATION=${RUN_ISOLATION:-1}
 RUN_INJECTION_ISOLATION=${RUN_INJECTION_ISOLATION:-1}
 NINJA_ARGS=${NINJA_ARGS:-}
