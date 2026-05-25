@@ -779,7 +779,6 @@ find_key_join_match(RangeTblEntry *referencing_rte,
 	KeyJoinSurfaceFacts *rfacts;
 	KeyJoinSurfaceFacts *pfacts;
 	KeyJoinReq	reached = REQ_NONE;
-	KeyJoinFact *inactive_fk = NULL;
 	KeyJoinFact *inactive_unique = NULL;
 	KeyJoinFact *inactive_coverage = NULL;
 	KeyJoinFact *inactive_notnull = NULL;
@@ -825,12 +824,7 @@ find_key_join_match(RangeTblEntry *referencing_rte,
 									   fkfact->baseAttnums,
 									   &referencing_base, NULL))
 			continue;
-		if (!fkfact->active)
-		{
-			if (inactive_fk == NULL)
-				inactive_fk = fkfact;
-			continue;
-		}
+		Assert(fkfact->active);
 		if (reached < REQ_FK)
 			reached = REQ_FK;
 
@@ -1124,8 +1118,8 @@ find_key_join_match(RangeTblEntry *referencing_rte,
 
 	/*
 	 * No proof.  Report the first unmet requirement: the deepest an active
-	 * candidate reached, plus one.  When that requirement is a fact we never
-	 * found active, blame the inactive one stashed for it, if any.
+	 * candidate reached, plus one.  When a later requirement is a fact we
+	 * never found active, blame the inactive one stashed for it, if any.
 	 */
 	if (reached < REQ_FK)
 		match->failReq = REQ_FK;
@@ -1145,9 +1139,7 @@ find_key_join_match(RangeTblEntry *referencing_rte,
 	{
 		KeyJoinFact *blame = NULL;
 
-		if (match->failReq == REQ_FK)
-			blame = inactive_fk;
-		else if (match->failReq == REQ_UNIQUE)
+		if (match->failReq == REQ_UNIQUE)
 			blame = inactive_unique;
 		else if (match->failReq == REQ_COVERAGE)
 			blame = inactive_coverage;
