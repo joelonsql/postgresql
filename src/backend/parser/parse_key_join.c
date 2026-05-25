@@ -2006,10 +2006,7 @@ lock_and_fetch_key_join_constraint(Oid constraintOid)
 	LockDatabaseObject(ConstraintRelationId, constraintOid, 0,
 					   AccessShareLock);
 	contup = SearchSysCache1(CONSTROID, ObjectIdGetDatum(constraintOid));
-	if (!HeapTupleIsValid(contup))
-		ereport(ERROR,
-				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
-				 errmsg("key join proof dependency constraint was concurrently dropped")));
+	Assert(HeapTupleIsValid(contup));
 	return contup;
 }
 
