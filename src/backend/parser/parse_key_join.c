@@ -2738,7 +2738,6 @@ compute_key_join_relation_facts(KeyJoinFactContext *context,
 				fkatt->attcollation != pkatt->attcollation ||
 				!key_join_collation_is_usable(fkatt->attcollation) ||
 				pf_eq_oprs[i] != pp_eq_oprs[i] ||
-				pf_eq_oprs[i] != ff_eq_oprs[i] ||
 				!key_join_equality_operator_is_usable(pf_eq_oprs[i],
 													  InvalidOid,
 													  &eqtype, &deps) ||
@@ -2750,6 +2749,7 @@ compute_key_join_relation_facts(KeyJoinFactContext *context,
 				usable = false;
 				break;
 			}
+			Assert(pf_eq_oprs[i] == ff_eq_oprs[i]);
 			eqtypes[i] = eqtype;
 			eqtypmods[i] = eqtypmod;
 			eqoperators[i] = pf_eq_oprs[i];
