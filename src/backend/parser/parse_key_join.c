@@ -3167,8 +3167,7 @@ project_key_join_facts_from_rte(KeyJoinSurfaceFacts *dst, RangeTblEntry *src,
 	int			natts;
 
 	Assert(src != NULL);
-	if (src->keyJoinFacts == NULL)
-		return;
+	Assert(src->keyJoinFacts != NULL);
 
 	tablesample = (src->rtekind == RTE_RELATION && src->tablesample != NULL);
 	Assert(attrmap != NULL);
