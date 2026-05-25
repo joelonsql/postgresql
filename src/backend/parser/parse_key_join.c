@@ -4966,8 +4966,8 @@ key_join_equality_operator_is_usable(Oid opno, Oid expectedTypeOid,
 
 	Assert(OidIsValid(lefttype));
 	Assert(lefttype == righttype);
-	if ((OidIsValid(expectedTypeOid) && lefttype != expectedTypeOid) ||
-		rettype != BOOLOID)
+	Assert(!OidIsValid(expectedTypeOid) || lefttype == expectedTypeOid);
+	if (rettype != BOOLOID)
 	{
 		ReleaseSysCache(optup);
 		return false;
