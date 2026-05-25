@@ -2499,12 +2499,7 @@ compute_key_join_relation_facts(KeyJoinFactContext *context,
 		bool		usable = true;
 		bool		keep_index_lock = false;
 
-		LockRelationOid(indexoid, ShareLock);
-		if (!SearchSysCacheExists1(RELOID, ObjectIdGetDatum(indexoid)))
-			ereport(ERROR,
-					(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
-					 errmsg("key join proof dependency relation was concurrently dropped")));
-		indexrel = index_open(indexoid, NoLock);
+		indexrel = index_open(indexoid, ShareLock);
 		index = indexrel->rd_index;
 
 		/*
