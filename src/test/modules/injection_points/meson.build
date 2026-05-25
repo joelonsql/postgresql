@@ -53,6 +53,7 @@ tests += {
       'syscache-update-pruned',
       'heap_lock_update',
       'key_join_proof_race_constraints',
+      'key_join_proof_race_filter_function_prelock',
       'key_join_proof_race_filter_operator_prelock',
       'key_join_proof_race_function_prelock',
       'key_join_proof_race_indexes',

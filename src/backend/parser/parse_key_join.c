@@ -1983,6 +1983,8 @@ lock_key_join_dependency_or_error(const KeyJoinProofDependency *dep)
 static void
 lock_key_join_dependencies_or_error(List *dependencies)
 {
+	INJECTION_POINT("key-join-before-filter-dependency-lock", NULL);
+
 	foreach_node(KeyJoinProofDependency, dep, dependencies)
 		lock_key_join_dependency_or_error(dep);
 }
