@@ -214,8 +214,19 @@ CREATE TABLE mcdc_dupe_reader
     parent_id int NOT NULL REFERENCES mcdc_dupe_parent (id)
 );
 
+CREATE TABLE mcdc_dupe_nullable_reader
+(
+    id        int PRIMARY KEY,
+    parent_id int REFERENCES mcdc_dupe_parent (id)
+);
+
 INSERT INTO mcdc_dupe_parent VALUES (1), (2);
 INSERT INTO mcdc_dupe_reader VALUES (701, 1), (702, 1), (703, 2);
+INSERT INTO mcdc_dupe_nullable_reader VALUES (801, 1), (802, NULL);
+
+CREATE VIEW mcdc_dupe_active_v AS
+SELECT DISTINCT p.id
+FROM mcdc_dupe_parent p;
 
 CREATE VIEW mcdc_dupe_v AS
 SELECT q.id
@@ -226,6 +237,11 @@ SELECT r.id, v.id
 FROM mcdc_dupe_v v
 JOIN mcdc_dupe_reader r FOR KEY (parent_id) -> v (id)
 ORDER BY r.id, v.id;
+
+SELECT n.id, v.id
+FROM mcdc_dupe_active_v v
+JOIN mcdc_dupe_nullable_reader n FOR KEY (parent_id) -> v (id)
+ORDER BY n.id, v.id;
 
 -- Stored revalidation path: no FILTER, join-local FILTERs, and multi-column.
 CREATE VIEW mcdc_plain_v AS
