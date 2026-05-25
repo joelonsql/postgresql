@@ -186,6 +186,27 @@ FROM (
 JOIN mcdc_reader r FOR KEY (parent_id) -> j (id)
 ORDER BY r.id;
 ERROR:  key join from referencing relation r to referenced relation j cannot be proven at character 160
+-- Duplicate inactive unique facts preserve the first diagnostic source.
+CREATE TABLE mcdc_dupe_parent
+(
+    id int PRIMARY KEY
+);
+CREATE TABLE mcdc_dupe_reader
+(
+    id        int PRIMARY KEY,
+    parent_id int NOT NULL REFERENCES mcdc_dupe_parent (id)
+);
+INSERT INTO mcdc_dupe_parent VALUES (1), (2);
+INSERT INTO mcdc_dupe_reader VALUES (701, 1), (702, 1), (703, 2);
+CREATE VIEW mcdc_dupe_v AS
+SELECT q.id
+FROM (SELECT DISTINCT p.id FROM mcdc_dupe_parent p) q
+LEFT JOIN mcdc_dupe_reader r FOR KEY (parent_id) -> q (id);
+SELECT r.id, v.id
+FROM mcdc_dupe_v v
+JOIN mcdc_dupe_reader r FOR KEY (parent_id) -> v (id)
+ORDER BY r.id, v.id;
+ERROR:  key join from referencing relation r to referenced relation v cannot be proven at character 62
 -- Stored revalidation path: no FILTER, join-local FILTERs, and multi-column.
 CREATE VIEW mcdc_plain_v AS
 SELECT p.id
@@ -437,4 +458,4 @@ DROP FUNCTION mcdc_sig_dom_eq(mcdc_sig_dom, mcdc_sig_dom);
 DROP DOMAIN mcdc_sig_dom;
 DROP COLLATION mcdc_nondet;
 DROP SCHEMA key_join_mcdc CASCADE;
-NOTICE:  drop cascades to 17 other objects
+NOTICE:  drop cascades to 20 other objects
