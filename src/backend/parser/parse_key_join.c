@@ -3806,10 +3806,12 @@ direct_filter_var_from_node(Node *node)
 			relabel->resulttypmod == baseTypmod)
 			return var;
 		if (baseType == VARCHAROID &&
-			relabel->resulttype == TEXTOID &&
-			relabel->resulttypmod == -1 &&
-			IsBinaryCoercible(var->vartype, relabel->resulttype))
+			relabel->resulttype == TEXTOID)
+		{
+			Assert(relabel->resulttypmod == -1);
+			Assert(IsBinaryCoercible(var->vartype, relabel->resulttype));
 			return var;
+		}
 		return NULL;
 	}
 }
