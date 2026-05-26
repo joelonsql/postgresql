@@ -3046,7 +3046,8 @@ project_key_join_query_facts(KeyJoinFactContext *context, Query *query)
 
 	/*
 	 * GROUP BY / DISTINCT also proves uniqueness of the grouped/distinct
-	 * output columns; query-level so no relid/catalog dependency.
+	 * output columns.  These query-level facts have no base-relation relid,
+	 * but still depend on the equality operators and functions used below.
 	 */
 	if (query->groupClause != NIL || query->distinctClause != NIL)
 	{
@@ -5183,7 +5184,7 @@ key_join_failure_detail(KeyJoinReq req, bool inactivated,
 			cause = "a preceding join that can match a referenced row more than once";
 			break;
 		case KJI_ROW_REMOVING_CLAUSE:
-			cause = "HAVING, LIMIT, OFFSET, or FOR UPDATE";
+			cause = "HAVING, LIMIT, OFFSET, FOR UPDATE, or TABLESAMPLE";
 			break;
 		case KJI_GROUP_BY:
 			cause = "GROUP BY";

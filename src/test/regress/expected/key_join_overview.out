@@ -431,7 +431,7 @@ JOIN fk_orders FOR KEY (ord_prod_id) -> q (prod_id);
 ERROR:  key join from referencing relation fk_orders to referenced relation q cannot be proven
 LINE 2: JOIN fk_orders FOR KEY (ord_prod_id) -> q (prod_id);
                        ^
-DETAIL:  Referenced relation q may lose rows before this key join because of HAVING, LIMIT, OFFSET, or FOR UPDATE, so not every fk_orders (ord_prod_id) value can be proven to have a matching q row.
+DETAIL:  Referenced relation q may lose rows before this key join because of HAVING, LIMIT, OFFSET, FOR UPDATE, or TABLESAMPLE, so not every fk_orders (ord_prod_id) value can be proven to have a matching q row.
 -- rejected, reason: TABLESAMPLE on referenced side (R violated)
 SELECT * FROM ref_products rp TABLESAMPLE SYSTEM (0)
 JOIN fk_orders FOR KEY (ord_prod_id) -> rp (prod_id);
@@ -445,14 +445,14 @@ JOIN fk_orders FOR KEY (ord_prod_id) -> q (prod_id);
 ERROR:  key join from referencing relation fk_orders to referenced relation q cannot be proven
 LINE 2: JOIN fk_orders FOR KEY (ord_prod_id) -> q (prod_id);
                        ^
-DETAIL:  Referenced relation q may lose rows before this key join because of HAVING, LIMIT, OFFSET, or FOR UPDATE, so not every fk_orders (ord_prod_id) value can be proven to have a matching q row.
+DETAIL:  Referenced relation q may lose rows before this key join because of HAVING, LIMIT, OFFSET, FOR UPDATE, or TABLESAMPLE, so not every fk_orders (ord_prod_id) value can be proven to have a matching q row.
 -- rejected, reason: SKIP LOCKED on referenced side may remove rows at execution (R violated)
 SELECT * FROM (SELECT prod_id FROM ref_products FOR UPDATE SKIP LOCKED) AS q
 JOIN fk_orders FOR KEY (ord_prod_id) -> q (prod_id);
 ERROR:  key join from referencing relation fk_orders to referenced relation q cannot be proven
 LINE 2: JOIN fk_orders FOR KEY (ord_prod_id) -> q (prod_id);
                        ^
-DETAIL:  Referenced relation q may lose rows before this key join because of HAVING, LIMIT, OFFSET, or FOR UPDATE, so not every fk_orders (ord_prod_id) value can be proven to have a matching q row.
+DETAIL:  Referenced relation q may lose rows before this key join because of HAVING, LIMIT, OFFSET, FOR UPDATE, or TABLESAMPLE, so not every fk_orders (ord_prod_id) value can be proven to have a matching q row.
 -- rejected, reason: recursive CTE
 WITH RECURSIVE rcte AS (
     SELECT prod_id FROM ref_products
