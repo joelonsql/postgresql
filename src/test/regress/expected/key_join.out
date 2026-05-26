@@ -1285,21 +1285,21 @@ JOIN t2 FOR KEY (c3) -> u (c1);
 ERROR:  key join from referencing relation t2 to referenced relation u cannot be proven
 LINE 5: JOIN t2 FOR KEY (c3) -> u (c1);
                 ^
-DETAIL:  Referenced relation u may lose rows before this key join because of HAVING, LIMIT, OFFSET, FOR UPDATE, or TABLESAMPLE, so not every t2 (c3) value can be proven to have a matching u row.
+DETAIL:  Referenced relation u may lose rows before this key join because of HAVING, LIMIT, OFFSET, FOR UPDATE or TABLESAMPLE, so not every t2 (c3) value can be proven to have a matching u row.
 -- rejected, reason: u is filtered and is the referenced table
 SELECT * FROM (SELECT c1 FROM t1 LIMIT 1) AS u
 JOIN t2 FOR KEY (c3) -> u (c1);
 ERROR:  key join from referencing relation t2 to referenced relation u cannot be proven
 LINE 2: JOIN t2 FOR KEY (c3) -> u (c1);
                 ^
-DETAIL:  Referenced relation u may lose rows before this key join because of HAVING, LIMIT, OFFSET, FOR UPDATE, or TABLESAMPLE, so not every t2 (c3) value can be proven to have a matching u row.
+DETAIL:  Referenced relation u may lose rows before this key join because of HAVING, LIMIT, OFFSET, FOR UPDATE or TABLESAMPLE, so not every t2 (c3) value can be proven to have a matching u row.
 -- rejected, reason: u is filtered and is the referenced table
 SELECT * FROM (SELECT c1 FROM t1 OFFSET 1) AS u
 JOIN t2 FOR KEY (c3) -> u (c1);
 ERROR:  key join from referencing relation t2 to referenced relation u cannot be proven
 LINE 2: JOIN t2 FOR KEY (c3) -> u (c1);
                 ^
-DETAIL:  Referenced relation u may lose rows before this key join because of HAVING, LIMIT, OFFSET, FOR UPDATE, or TABLESAMPLE, so not every t2 (c3) value can be proven to have a matching u row.
+DETAIL:  Referenced relation u may lose rows before this key join because of HAVING, LIMIT, OFFSET, FOR UPDATE or TABLESAMPLE, so not every t2 (c3) value can be proven to have a matching u row.
 WITH q2 AS
 (
     SELECT * FROM t5 WHERE t5.c11 > 0
@@ -3406,7 +3406,7 @@ JOIN rowcov_nullable_child c FOR KEY (parent_code) -> p (code);
 ERROR:  key join from referencing relation c to referenced relation p cannot be proven
 LINE 4: JOIN rowcov_nullable_child c FOR KEY (parent_code) -> p (cod...
                                      ^
-DETAIL:  Referenced relation p may lose rows before this key join because of HAVING, LIMIT, OFFSET, FOR UPDATE, or TABLESAMPLE, so not every c (parent_code) value can be proven to have a matching p row.
+DETAIL:  Referenced relation p may lose rows before this key join because of HAVING, LIMIT, OFFSET, FOR UPDATE or TABLESAMPLE, so not every c (parent_code) value can be proven to have a matching p row.
 DROP TABLE rowcov_nullable_child, rowcov_nullable_parent;
 -- Extra row-collapse columns may have different identity from the key.
 -- Row coverage is preserved as long as the grouped key column itself has
@@ -6566,7 +6566,7 @@ JOIN kd_child c FOR KEY (parent_id) -> p (id);
 ERROR:  key join from referencing relation c to referenced relation p cannot be proven
 LINE 3: JOIN kd_child c FOR KEY (parent_id) -> p (id);
                         ^
-DETAIL:  Referenced relation p may lose rows before this key join because of HAVING, LIMIT, OFFSET, FOR UPDATE, or TABLESAMPLE, so not every c (parent_id) value can be proven to have a matching p row.
+DETAIL:  Referenced relation p may lose rows before this key join because of HAVING, LIMIT, OFFSET, FOR UPDATE or TABLESAMPLE, so not every c (parent_id) value can be proven to have a matching p row.
 -- Inactivated by HAVING: the row-removing clause is named.
 SELECT *
 FROM (SELECT id FROM kd_parent GROUP BY id HAVING count(*) > 0) p
@@ -6574,7 +6574,7 @@ JOIN kd_child c FOR KEY (parent_id) -> p (id);
 ERROR:  key join from referencing relation c to referenced relation p cannot be proven
 LINE 3: JOIN kd_child c FOR KEY (parent_id) -> p (id);
                         ^
-DETAIL:  Referenced relation p may lose rows before this key join because of HAVING, LIMIT, OFFSET, FOR UPDATE, or TABLESAMPLE, so not every c (parent_id) value can be proven to have a matching p row.
+DETAIL:  Referenced relation p may lose rows before this key join because of HAVING, LIMIT, OFFSET, FOR UPDATE or TABLESAMPLE, so not every c (parent_id) value can be proven to have a matching p row.
 -- Inactivated inside a view: the message names the view to inspect.
 CREATE VIEW kd_parent_limited AS SELECT id FROM kd_parent LIMIT 1;
 SELECT *
@@ -6583,7 +6583,7 @@ JOIN kd_child c FOR KEY (parent_id) -> p (id);
 ERROR:  key join from referencing relation c to referenced relation p cannot be proven
 LINE 3: JOIN kd_child c FOR KEY (parent_id) -> p (id);
                         ^
-DETAIL:  Referenced relation p may lose rows before this key join because of HAVING, LIMIT, OFFSET, FOR UPDATE, or TABLESAMPLE inside view "key_join_diag.kd_parent_limited", so not every c (parent_id) value can be proven to have a matching p row.
+DETAIL:  Referenced relation p may lose rows before this key join because of HAVING, LIMIT, OFFSET, FOR UPDATE or TABLESAMPLE inside view "key_join_diag.kd_parent_limited", so not every c (parent_id) value can be proven to have a matching p row.
 DROP VIEW kd_parent_limited;
 RESET search_path;
 DROP SCHEMA key_join_diag CASCADE;

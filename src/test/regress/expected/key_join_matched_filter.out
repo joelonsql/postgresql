@@ -623,7 +623,7 @@ JOIN c_outer_lim c FOR KEY (tenant_id, id) <- o (tenant_id, customer_id);
 ERROR:  key join from referencing relation o to referenced relation c cannot be proven
 LINE 4: JOIN c_outer_lim c FOR KEY (tenant_id, id) <- o (tenant_id, ...
                            ^
-DETAIL:  Referenced relation c may lose rows before this key join because of HAVING, LIMIT, OFFSET, FOR UPDATE, or TABLESAMPLE inside view "mf.c_outer_lim", so not every o (tenant_id, customer_id) value can be proven to have a matching c row.
+DETAIL:  Referenced relation c may lose rows before this key join because of HAVING, LIMIT, OFFSET, FOR UPDATE or TABLESAMPLE inside view "mf.c_outer_lim", so not every o (tenant_id, customer_id) value can be proven to have a matching c row.
 DROP VIEW c_outer_lim, c_inner_for_lim;
 -- M20: Multi-layer view with a SubLink in the outer WHERE — the conjunct
 -- cannot be represented as a safe key conjunct after Var translation, so the

@@ -5184,7 +5184,7 @@ key_join_failure_detail(KeyJoinReq req, bool inactivated,
 			cause = "a preceding join that can match a referenced row more than once";
 			break;
 		case KJI_ROW_REMOVING_CLAUSE:
-			cause = "HAVING, LIMIT, OFFSET, FOR UPDATE, or TABLESAMPLE";
+			cause = "HAVING, LIMIT, OFFSET, FOR UPDATE or TABLESAMPLE";
 			break;
 		case KJI_GROUP_BY:
 			cause = "GROUP BY";
