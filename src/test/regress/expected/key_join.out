@@ -3559,6 +3559,28 @@ ERROR:  key join from referencing relation c to referenced relation p cannot be 
 LINE 8: JOIN rowcov_numeric_child c FOR KEY (parent_id) -> p (id);
                                     ^
 DETAIL:  Referenced relation p may lose rows before this key join because of DISTINCT, so not every c (parent_id) value can be proven to have a matching p row.
+CREATE VIEW rowcov_numeric_group_v AS
+SELECT id FROM rowcov_numeric_parent GROUP BY id;
+SELECT *
+FROM rowcov_numeric_group_v p
+-- rejected, reason: GROUP BY row coverage loss occurred inside the view
+JOIN rowcov_numeric_child c FOR KEY (parent_id) -> p (id);
+ERROR:  key join from referencing relation c to referenced relation p cannot be proven
+LINE 4: JOIN rowcov_numeric_child c FOR KEY (parent_id) -> p (id);
+                                    ^
+DETAIL:  Referenced relation p may lose rows before this key join because of GROUP BY inside view "public.rowcov_numeric_group_v", so not every c (parent_id) value can be proven to have a matching p row.
+DROP VIEW rowcov_numeric_group_v;
+CREATE VIEW rowcov_numeric_distinct_v AS
+SELECT DISTINCT id FROM rowcov_numeric_parent;
+SELECT *
+FROM rowcov_numeric_distinct_v p
+-- rejected, reason: DISTINCT row coverage loss occurred inside the view
+JOIN rowcov_numeric_child c FOR KEY (parent_id) -> p (id);
+ERROR:  key join from referencing relation c to referenced relation p cannot be proven
+LINE 4: JOIN rowcov_numeric_child c FOR KEY (parent_id) -> p (id);
+                                    ^
+DETAIL:  Referenced relation p may lose rows before this key join because of DISTINCT inside view "public.rowcov_numeric_distinct_v", so not every c (parent_id) value can be proven to have a matching p row.
+DROP VIEW rowcov_numeric_distinct_v;
 DROP TABLE rowcov_numeric_child, rowcov_numeric_parent;
 DROP OPERATOR CLASS rowcov_numeric_scale_ops USING btree;
 DROP OPERATOR FAMILY rowcov_numeric_scale_ops USING btree;
@@ -6553,6 +6575,16 @@ CREATE SCHEMA key_join_diag;
 SET search_path = key_join_diag;
 CREATE TABLE kd_parent (id int PRIMARY KEY);
 CREATE TABLE kd_child (id int, parent_id int REFERENCES kd_parent (id));
+CREATE TABLE kd_fanout_child
+(
+    id int,
+    parent_id int NOT NULL REFERENCES kd_parent (id)
+);
+CREATE TABLE kd_unique_child
+(
+    id int,
+    parent_id int UNIQUE NOT NULL REFERENCES kd_parent (id)
+);
 -- Missing: no foreign key matches the referencing columns (id is not an FK).
 SELECT * FROM kd_parent p JOIN kd_child c FOR KEY (id) -> p (id);
 ERROR:  key join from referencing relation c to referenced relation p cannot be proven
@@ -6575,6 +6607,43 @@ ERROR:  key join from referencing relation c to referenced relation p cannot be 
 LINE 3: JOIN kd_child c FOR KEY (parent_id) -> p (id);
                         ^
 DETAIL:  Referenced relation p may lose rows before this key join because of HAVING, LIMIT, OFFSET, FOR UPDATE or TABLESAMPLE, so not every c (parent_id) value can be proven to have a matching p row.
+-- Inactivated uniqueness: the referenced surface may fan out.
+SELECT *
+FROM (
+    SELECT p.id
+    FROM kd_parent p
+    LEFT JOIN kd_fanout_child f FOR KEY (parent_id) -> p (id)
+) q
+JOIN kd_child c FOR KEY (parent_id) -> q (id);
+ERROR:  key join from referencing relation c to referenced relation q cannot be proven
+LINE 7: JOIN kd_child c FOR KEY (parent_id) -> q (id);
+                        ^
+DETAIL:  A preceding join may duplicate rows from referenced relation q, so referenced columns q (id) are not proven unique at this point in the query.
+-- Inactivated row coverage: the referenced surface may lose rows.
+SELECT *
+FROM (
+    SELECT p.id
+    FROM kd_parent p
+    JOIN kd_unique_child u FOR KEY (parent_id) -> p (id)
+) q
+JOIN kd_child c FOR KEY (parent_id) -> q (id);
+ERROR:  key join from referencing relation c to referenced relation q cannot be proven
+LINE 7: JOIN kd_child c FOR KEY (parent_id) -> q (id);
+                        ^
+DETAIL:  Referenced relation q may lose rows before this key join because of a preceding join, so not every c (parent_id) value can be proven to have a matching q row.
+-- Inactivated row coverage inside a view: name the view with the preceding join.
+CREATE VIEW kd_parent_joined AS
+SELECT p.id
+FROM kd_parent p
+JOIN kd_unique_child u FOR KEY (parent_id) -> p (id);
+SELECT *
+FROM kd_parent_joined p
+JOIN kd_child c FOR KEY (parent_id) -> p (id);
+ERROR:  key join from referencing relation c to referenced relation p cannot be proven
+LINE 3: JOIN kd_child c FOR KEY (parent_id) -> p (id);
+                        ^
+DETAIL:  Referenced relation p may lose rows before this key join because of a preceding join inside view "key_join_diag.kd_parent_joined", so not every c (parent_id) value can be proven to have a matching p row.
+DROP VIEW kd_parent_joined;
 -- Inactivated inside a view: the message names the view to inspect.
 CREATE VIEW kd_parent_limited AS SELECT id FROM kd_parent LIMIT 1;
 SELECT *
@@ -6587,9 +6656,11 @@ DETAIL:  Referenced relation p may lose rows before this key join because of HAV
 DROP VIEW kd_parent_limited;
 RESET search_path;
 DROP SCHEMA key_join_diag CASCADE;
-NOTICE:  drop cascades to 2 other objects
+NOTICE:  drop cascades to 4 other objects
 DETAIL:  drop cascades to table key_join_diag.kd_parent
 drop cascades to table key_join_diag.kd_child
+drop cascades to table key_join_diag.kd_fanout_child
+drop cascades to table key_join_diag.kd_unique_child
 -- Final cleanup: drop all remaining objects
 DROP VIEW v1, v2;
 DROP TABLE shipments, orders, order_items, packages CASCADE;

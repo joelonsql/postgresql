@@ -2859,6 +2859,22 @@ FROM (
 -- rejected, reason: duplicate DISTINCT ON ordering adds no key coverage
 JOIN rowcov_numeric_child c FOR KEY (parent_id) -> p (id);
 
+CREATE VIEW rowcov_numeric_group_v AS
+SELECT id FROM rowcov_numeric_parent GROUP BY id;
+SELECT *
+FROM rowcov_numeric_group_v p
+-- rejected, reason: GROUP BY row coverage loss occurred inside the view
+JOIN rowcov_numeric_child c FOR KEY (parent_id) -> p (id);
+DROP VIEW rowcov_numeric_group_v;
+
+CREATE VIEW rowcov_numeric_distinct_v AS
+SELECT DISTINCT id FROM rowcov_numeric_parent;
+SELECT *
+FROM rowcov_numeric_distinct_v p
+-- rejected, reason: DISTINCT row coverage loss occurred inside the view
+JOIN rowcov_numeric_child c FOR KEY (parent_id) -> p (id);
+DROP VIEW rowcov_numeric_distinct_v;
+
 DROP TABLE rowcov_numeric_child, rowcov_numeric_parent;
 DROP OPERATOR CLASS rowcov_numeric_scale_ops USING btree;
 DROP OPERATOR FAMILY rowcov_numeric_scale_ops USING btree;
@@ -5637,6 +5653,16 @@ CREATE SCHEMA key_join_diag;
 SET search_path = key_join_diag;
 CREATE TABLE kd_parent (id int PRIMARY KEY);
 CREATE TABLE kd_child (id int, parent_id int REFERENCES kd_parent (id));
+CREATE TABLE kd_fanout_child
+(
+    id int,
+    parent_id int NOT NULL REFERENCES kd_parent (id)
+);
+CREATE TABLE kd_unique_child
+(
+    id int,
+    parent_id int UNIQUE NOT NULL REFERENCES kd_parent (id)
+);
 
 -- Missing: no foreign key matches the referencing columns (id is not an FK).
 SELECT * FROM kd_parent p JOIN kd_child c FOR KEY (id) -> p (id);
@@ -5650,6 +5676,36 @@ JOIN kd_child c FOR KEY (parent_id) -> p (id);
 SELECT *
 FROM (SELECT id FROM kd_parent GROUP BY id HAVING count(*) > 0) p
 JOIN kd_child c FOR KEY (parent_id) -> p (id);
+
+-- Inactivated uniqueness: the referenced surface may fan out.
+SELECT *
+FROM (
+    SELECT p.id
+    FROM kd_parent p
+    LEFT JOIN kd_fanout_child f FOR KEY (parent_id) -> p (id)
+) q
+JOIN kd_child c FOR KEY (parent_id) -> q (id);
+
+-- Inactivated row coverage: the referenced surface may lose rows.
+SELECT *
+FROM (
+    SELECT p.id
+    FROM kd_parent p
+    JOIN kd_unique_child u FOR KEY (parent_id) -> p (id)
+) q
+JOIN kd_child c FOR KEY (parent_id) -> q (id);
+
+-- Inactivated row coverage inside a view: name the view with the preceding join.
+CREATE VIEW kd_parent_joined AS
+SELECT p.id
+FROM kd_parent p
+JOIN kd_unique_child u FOR KEY (parent_id) -> p (id);
+
+SELECT *
+FROM kd_parent_joined p
+JOIN kd_child c FOR KEY (parent_id) -> p (id);
+
+DROP VIEW kd_parent_joined;
 
 -- Inactivated inside a view: the message names the view to inspect.
 CREATE VIEW kd_parent_limited AS SELECT id FROM kd_parent LIMIT 1;

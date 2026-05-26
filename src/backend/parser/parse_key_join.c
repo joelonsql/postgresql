@@ -92,7 +92,6 @@ typedef enum KeyJoinReq
 	REQ_UNIQUE,					/* referenced unique fact for the FK target */
 	REQ_COVERAGE,				/* referenced row-coverage fact */
 	REQ_FKPAIR,					/* FK pairs the named columns (cond. 2a) */
-	REQ_IDENTITY,				/* key equality identities agree (cond. 2b) */
 	REQ_FILTER,					/* referenced filters remap (cond. 2c) */
 	REQ_NOTNULL,				/* referencing not-null evidence (cond. 3) */
 } KeyJoinReq;
@@ -998,7 +997,8 @@ find_key_join_match(RangeTblEntry *referencing_rte,
 				 * A relation can expose multiple usable unique indexes on the
 				 * same column list.  Only the unique and row-coverage facts
 				 * whose key identity matches the FK key identity can prove
-				 * this key join.
+				 * this key join.  Identity mismatches are normal candidate
+				 * misses, not separately reportable user-facing failures.
 				 */
 				if (!key_position_identity_lists_equal(unique_key_positions,
 													   fk_key_positions))
@@ -1006,8 +1006,6 @@ find_key_join_match(RangeTblEntry *referencing_rte,
 				if (!key_position_identity_lists_equal(coverage_key_positions,
 													   fk_key_positions))
 					continue;
-				if (reached < REQ_IDENTITY)
-					reached = REQ_IDENTITY;
 
 				/* ---- Condition 2c: referenced filters remap into FK ---- */
 				if (coverage->filterConjuncts != NIL)
@@ -1129,8 +1127,6 @@ find_key_join_match(RangeTblEntry *referencing_rte,
 		match->failReq = REQ_COVERAGE;
 	else if (reached < REQ_FKPAIR)
 		match->failReq = REQ_FKPAIR;
-	else if (reached < REQ_IDENTITY)
-		match->failReq = REQ_IDENTITY;
 	else if (reached < REQ_FILTER)
 		match->failReq = REQ_FILTER;
 	else
@@ -5158,8 +5154,7 @@ key_join_failure_detail(KeyJoinReq req, bool inactivated,
 						const char *referenced_relation,
 						const char *join_name)
 {
-	char	   *origin_suffix = pstrdup("");
-	const char *cause;
+	char	   *origin_view_name = NULL;
 
 	if (OidIsValid(origin_view))
 	{
@@ -5168,90 +5163,107 @@ key_join_failure_detail(KeyJoinReq req, bool inactivated,
 
 		Assert(relname != NULL);
 		Assert(nspname != NULL);
-		origin_suffix = psprintf(" inside view \"%s.%s\"",
-								 nspname, relname);
+		origin_view_name = psprintf("\"%s.%s\"", nspname, relname);
 	}
 
-	switch (reason)
+	if (req == REQ_FKPAIR)
+		return psprintf("The matching foreign key for %s references different columns than %s.",
+						referencing_relcols, referenced_relcols);
+	else if (req == REQ_FILTER)
+		return psprintf("Referenced relation %s has a filter that is not matched by referencing relation %s, so not every %s value can be proven to have a matching %s row.",
+						referenced_relation, referencing_relation,
+						referencing_relcols, referenced_relation);
+	else if (req == REQ_UNIQUE && inactivated)
 	{
-		case KJI_NULL_EXTENDING_JOIN:
-			cause = "a preceding outer join that can null-extend it";
-			break;
-		case KJI_JOIN_NOT_PRESERVED:
-			cause = "a preceding join";
-			break;
-		case KJI_JOIN_FANOUT:
-			cause = "a preceding join that can match a referenced row more than once";
-			break;
-		case KJI_ROW_REMOVING_CLAUSE:
-			cause = "HAVING, LIMIT, OFFSET, FOR UPDATE or TABLESAMPLE";
-			break;
-		case KJI_GROUP_BY:
-			cause = "GROUP BY";
-			break;
-		case KJI_DISTINCT:
-			cause = "DISTINCT";
-			break;
-		case KJI_UNACCOUNTED_FILTER:
-			cause = "a filter that cannot be accounted for";
-			break;
-		default:
-			cause = "an intervening operation";
-			break;
-	}
+		/* KJI_JOIN_FANOUT is unique-specific. */
+		Assert(reason == KJI_JOIN_FANOUT);
 
-	switch (req)
-	{
-		case REQ_FKPAIR:
-			return psprintf("The matching foreign key for %s references different columns than %s.",
-							referencing_relcols, referenced_relcols);
-
-		case REQ_IDENTITY:
-			return psprintf("Equality semantics for %s and %s do not match.",
-							referencing_relcols, referenced_relcols);
-
-		case REQ_FILTER:
-			return psprintf("Referenced relation %s has a filter that is not matched by referencing relation %s, so not every %s value can be proven to have a matching %s row.",
-							referenced_relation, referencing_relation,
-							referencing_relcols, referenced_relation);
-
-		case REQ_UNIQUE:
-			if (inactivated)
-			{
-				Assert(reason == KJI_JOIN_FANOUT);
-				return psprintf("A preceding join%s may duplicate rows from referenced relation %s, so referenced columns %s are not proven unique at this point in the query.",
-								origin_suffix, referenced_relation,
-								referenced_relcols);
-			}
-			return psprintf("Referenced columns %s are not proven unique.",
+		if (origin_view_name != NULL)
+			return psprintf("A preceding join inside view %s may duplicate rows from referenced relation %s, so referenced columns %s are not proven unique at this point in the query.",
+							origin_view_name, referenced_relation,
 							referenced_relcols);
-
-		case REQ_COVERAGE:
-			if (inactivated && reason == KJI_UNACCOUNTED_FILTER)
-				return psprintf("Referenced relation %s is filtered before this key join%s, so not every %s value can be proven to have a matching %s row.",
-								referenced_relation, origin_suffix,
-								referencing_relcols, referenced_relation);
-			if (inactivated)
-				return psprintf("Referenced relation %s may lose rows before this key join because of %s%s, so not every %s value can be proven to have a matching %s row.",
-								referenced_relation, cause, origin_suffix,
-								referencing_relcols, referenced_relation);
-			return psprintf("Referenced relation %s is not proven to contain every referenced key row, so not every %s value can be proven to have a matching %s row.",
-							referenced_relation, referencing_relcols,
-							referenced_relation);
-
-		case REQ_NOTNULL:
-			if (inactivated)
-				return psprintf("Referencing columns %s can be null because of %s%s, so this %s could filter rows from %s.",
-								referencing_relcols, cause, origin_suffix,
-								join_name, referencing_relation);
-			return psprintf("Referencing columns %s can be null, so this %s could filter rows from %s.",
-							referencing_relcols, join_name,
-							referencing_relation);
-
-		default:
-			return psprintf("There is no matching foreign key constraint for %s referencing %s.",
-							referencing_relcols, referenced_relcols);
+		return psprintf("A preceding join may duplicate rows from referenced relation %s, so referenced columns %s are not proven unique at this point in the query.",
+						referenced_relation, referenced_relcols);
 	}
+	else if (req == REQ_UNIQUE)
+		return psprintf("Referenced columns %s are not proven unique.",
+						referenced_relcols);
+	else if (req == REQ_COVERAGE && inactivated &&
+			 reason == KJI_UNACCOUNTED_FILTER)
+	{
+		if (origin_view_name != NULL)
+			return psprintf("Referenced relation %s is filtered before this key join inside view %s, so not every %s value can be proven to have a matching %s row.",
+							referenced_relation, origin_view_name,
+							referencing_relcols, referenced_relation);
+		return psprintf("Referenced relation %s is filtered before this key join, so not every %s value can be proven to have a matching %s row.",
+						referenced_relation, referencing_relcols,
+						referenced_relation);
+	}
+	else if (req == REQ_COVERAGE && inactivated &&
+			 reason == KJI_JOIN_NOT_PRESERVED)
+	{
+		if (origin_view_name != NULL)
+			return psprintf("Referenced relation %s may lose rows before this key join because of a preceding join inside view %s, so not every %s value can be proven to have a matching %s row.",
+							referenced_relation, origin_view_name,
+							referencing_relcols, referenced_relation);
+		return psprintf("Referenced relation %s may lose rows before this key join because of a preceding join, so not every %s value can be proven to have a matching %s row.",
+						referenced_relation, referencing_relcols,
+						referenced_relation);
+	}
+	else if (req == REQ_COVERAGE && inactivated &&
+			 reason == KJI_ROW_REMOVING_CLAUSE)
+	{
+		if (origin_view_name != NULL)
+			return psprintf("Referenced relation %s may lose rows before this key join because of HAVING, LIMIT, OFFSET, FOR UPDATE or TABLESAMPLE inside view %s, so not every %s value can be proven to have a matching %s row.",
+							referenced_relation, origin_view_name,
+							referencing_relcols, referenced_relation);
+		return psprintf("Referenced relation %s may lose rows before this key join because of HAVING, LIMIT, OFFSET, FOR UPDATE or TABLESAMPLE, so not every %s value can be proven to have a matching %s row.",
+						referenced_relation, referencing_relcols,
+						referenced_relation);
+	}
+	else if (req == REQ_COVERAGE && inactivated && reason == KJI_GROUP_BY)
+	{
+		if (origin_view_name != NULL)
+			return psprintf("Referenced relation %s may lose rows before this key join because of GROUP BY inside view %s, so not every %s value can be proven to have a matching %s row.",
+							referenced_relation, origin_view_name,
+							referencing_relcols, referenced_relation);
+		return psprintf("Referenced relation %s may lose rows before this key join because of GROUP BY, so not every %s value can be proven to have a matching %s row.",
+						referenced_relation, referencing_relcols,
+						referenced_relation);
+	}
+	else if (req == REQ_COVERAGE && inactivated)
+	{
+		Assert(reason == KJI_DISTINCT);
+
+		if (origin_view_name != NULL)
+			return psprintf("Referenced relation %s may lose rows before this key join because of DISTINCT inside view %s, so not every %s value can be proven to have a matching %s row.",
+							referenced_relation, origin_view_name,
+							referencing_relcols, referenced_relation);
+		return psprintf("Referenced relation %s may lose rows before this key join because of DISTINCT, so not every %s value can be proven to have a matching %s row.",
+						referenced_relation, referencing_relcols,
+						referenced_relation);
+	}
+	else if (req == REQ_COVERAGE)
+		return psprintf("Referenced relation %s is not proven to contain every referenced key row, so not every %s value can be proven to have a matching %s row.",
+						referenced_relation, referencing_relcols,
+						referenced_relation);
+	else if (req == REQ_NOTNULL && inactivated)
+	{
+		Assert(reason == KJI_NULL_EXTENDING_JOIN);
+
+		if (origin_view_name != NULL)
+			return psprintf("Referencing columns %s can be null because of a preceding outer join that can null-extend it inside view %s, so this %s could filter rows from %s.",
+							referencing_relcols, origin_view_name,
+							join_name, referencing_relation);
+		return psprintf("Referencing columns %s can be null because of a preceding outer join that can null-extend it, so this %s could filter rows from %s.",
+						referencing_relcols, join_name, referencing_relation);
+	}
+	else if (req == REQ_NOTNULL)
+		return psprintf("Referencing columns %s can be null, so this %s could filter rows from %s.",
+						referencing_relcols, join_name, referencing_relation);
+
+	return psprintf("There is no matching foreign key constraint for %s referencing %s.",
+					referencing_relcols, referenced_relcols);
 }
 
 /*
