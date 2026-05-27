@@ -424,14 +424,14 @@ JOIN fk_orders FOR KEY (ord_prod_id) -> v (prod_id);
 ERROR:  key join from referencing relation fk_orders to referenced relation v cannot be proven
 LINE 3: JOIN fk_orders FOR KEY (ord_prod_id) -> v (prod_id);
                        ^
-DETAIL:  Referenced relation v is filtered before this key join inside view public.v_products_filtered, so not every fk_orders (ord_prod_id) value can be proven to have a matching v row.
+DETAIL:  Not every fk_orders (ord_prod_id) value can be proven to have a matching v row. Referenced relation v is filtered before this key join. The relevant operation occurs inside view "public.v_products_filtered".
 -- rejected, reason: subquery with LIMIT on referenced side (R violated)
 SELECT * FROM (SELECT prod_id FROM ref_products LIMIT 1) AS q
 JOIN fk_orders FOR KEY (ord_prod_id) -> q (prod_id);
 ERROR:  key join from referencing relation fk_orders to referenced relation q cannot be proven
 LINE 2: JOIN fk_orders FOR KEY (ord_prod_id) -> q (prod_id);
                        ^
-DETAIL:  Referenced relation q may lose rows before this key join because of HAVING, LIMIT, OFFSET, FOR UPDATE or TABLESAMPLE, so not every fk_orders (ord_prod_id) value can be proven to have a matching q row.
+DETAIL:  Not every fk_orders (ord_prod_id) value can be proven to have a matching q row. Referenced relation q may lose rows before this key join because of HAVING, LIMIT, OFFSET, FOR UPDATE or TABLESAMPLE.
 -- rejected, reason: TABLESAMPLE on referenced side (R violated)
 SELECT * FROM ref_products rp TABLESAMPLE SYSTEM (0)
 JOIN fk_orders FOR KEY (ord_prod_id) -> rp (prod_id);
@@ -445,14 +445,14 @@ JOIN fk_orders FOR KEY (ord_prod_id) -> q (prod_id);
 ERROR:  key join from referencing relation fk_orders to referenced relation q cannot be proven
 LINE 2: JOIN fk_orders FOR KEY (ord_prod_id) -> q (prod_id);
                        ^
-DETAIL:  Referenced relation q may lose rows before this key join because of HAVING, LIMIT, OFFSET, FOR UPDATE or TABLESAMPLE, so not every fk_orders (ord_prod_id) value can be proven to have a matching q row.
+DETAIL:  Not every fk_orders (ord_prod_id) value can be proven to have a matching q row. Referenced relation q may lose rows before this key join because of HAVING, LIMIT, OFFSET, FOR UPDATE or TABLESAMPLE.
 -- rejected, reason: SKIP LOCKED on referenced side may remove rows at execution (R violated)
 SELECT * FROM (SELECT prod_id FROM ref_products FOR UPDATE SKIP LOCKED) AS q
 JOIN fk_orders FOR KEY (ord_prod_id) -> q (prod_id);
 ERROR:  key join from referencing relation fk_orders to referenced relation q cannot be proven
 LINE 2: JOIN fk_orders FOR KEY (ord_prod_id) -> q (prod_id);
                        ^
-DETAIL:  Referenced relation q may lose rows before this key join because of HAVING, LIMIT, OFFSET, FOR UPDATE or TABLESAMPLE, so not every fk_orders (ord_prod_id) value can be proven to have a matching q row.
+DETAIL:  Not every fk_orders (ord_prod_id) value can be proven to have a matching q row. Referenced relation q may lose rows before this key join because of HAVING, LIMIT, OFFSET, FOR UPDATE or TABLESAMPLE.
 -- rejected, reason: recursive CTE
 WITH RECURSIVE rcte AS (
     SELECT prod_id FROM ref_products
@@ -539,7 +539,7 @@ JOIN fk_reviews FOR KEY (rev_prod_id) -> q (expr_result);
 ERROR:  key join from referencing relation fk_reviews to referenced relation q cannot be proven
 LINE 8: JOIN fk_reviews FOR KEY (rev_prod_id) -> q (expr_result);
                         ^
-DETAIL:  Referenced relation q is not proven to contain every referenced key row, so not every fk_reviews (rev_prod_id) value can be proven to have a matching q row.
+DETAIL:  Not every fk_reviews (rev_prod_id) value can be proven to have a matching q row. Referenced relation q is not proven to contain every referenced key row.
 -- rejected, reason: GROUP BY columns from different base tables
 SELECT * FROM
 (
@@ -552,7 +552,7 @@ JOIN fk_reviews FOR KEY (rev_prod_id) -> q (prod_id);
 ERROR:  key join from referencing relation fk_reviews to referenced relation q cannot be proven
 LINE 8: JOIN fk_reviews FOR KEY (rev_prod_id) -> q (prod_id);
                         ^
-DETAIL:  A preceding join may duplicate rows from referenced relation q, so referenced columns q (prod_id) are not proven unique at this point in the query.
+DETAIL:  Referenced columns q (prod_id) are not proven unique. A preceding join may duplicate rows from referenced relation q.
 -- rejected, reason: DISTINCT on partial composite PK
 SELECT * FROM
 (
@@ -575,7 +575,7 @@ JOIN fk_reviews FOR KEY (rev_prod_id) -> q (prod_id);
 ERROR:  key join from referencing relation fk_reviews to referenced relation q cannot be proven
 LINE 8: JOIN fk_reviews FOR KEY (rev_prod_id) -> q (prod_id);
                         ^
-DETAIL:  A preceding join may duplicate rows from referenced relation q, so referenced columns q (prod_id) are not proven unique at this point in the query.
+DETAIL:  Referenced columns q (prod_id) are not proven unique. A preceding join may duplicate rows from referenced relation q.
 -- ============================================================
 -- 6. Outer join null semantics
 -- ============================================================
@@ -620,7 +620,7 @@ JOIN fko_clear_c FOR KEY (id) <- fko_clear_b (c_id);
 ERROR:  key join from referencing relation fko_clear_b to referenced relation fko_clear_c cannot be proven
 LINE 4: JOIN fko_clear_c FOR KEY (id) <- fko_clear_b (c_id);
                          ^
-DETAIL:  Referencing columns fko_clear_b (c_id) can be null because of a preceding outer join that can null-extend it, so this inner join could filter rows from fko_clear_b.
+DETAIL:  This inner join could filter rows from fko_clear_b. Referencing columns fko_clear_b (c_id) can be null because a preceding outer join can null-extend the referencing side.
 -- rejected, symmetric form: referencing on LEFT
 SELECT *
 FROM fko_clear_b
@@ -629,7 +629,7 @@ JOIN fko_clear_c FOR KEY (id) <- fko_clear_b (c_id);
 ERROR:  key join from referencing relation fko_clear_b to referenced relation fko_clear_c cannot be proven
 LINE 4: JOIN fko_clear_c FOR KEY (id) <- fko_clear_b (c_id);
                          ^
-DETAIL:  Referencing columns fko_clear_b (c_id) can be null because of a preceding outer join that can null-extend it, so this inner join could filter rows from fko_clear_b.
+DETAIL:  This inner join could filter rows from fko_clear_b. Referencing columns fko_clear_b (c_id) can be null because a preceding outer join can null-extend the referencing side.
 -- accepted, sanity: INNER preserved-side JOIN does not null-extend, so the
 -- chained INNER key join on c_id is still provable.
 SELECT *
@@ -655,7 +655,7 @@ JOIN fk_reviews FOR KEY (rev_prod_id) -> q (prod_id);
 ERROR:  key join from referencing relation fk_reviews to referenced relation q cannot be proven
 LINE 7: JOIN fk_reviews FOR KEY (rev_prod_id) -> q (prod_id);
                         ^
-DETAIL:  A preceding join may duplicate rows from referenced relation q, so referenced columns q (prod_id) are not proven unique at this point in the query.
+DETAIL:  Referenced columns q (prod_id) are not proven unique. A preceding join may duplicate rows from referenced relation q.
 -- rejected, reason: INNER JOIN inside subquery removes rows (R violated)
 SELECT * FROM
 (
@@ -668,7 +668,7 @@ JOIN fk_reviews FOR KEY (rev_prod_id) -> q (prod_id);
 ERROR:  key join from referencing relation fk_reviews to referenced relation q cannot be proven
 LINE 8: JOIN fk_reviews FOR KEY (rev_prod_id) -> q (prod_id);
                         ^
-DETAIL:  Referenced relation q may lose rows before this key join because of a preceding join, so not every fk_reviews (rev_prod_id) value can be proven to have a matching q row.
+DETAIL:  Not every fk_reviews (rev_prod_id) value can be proven to have a matching q row. Referenced relation q may lose rows before this key join because of a preceding join.
 -- ============================================================
 -- 8. Constraint enforcement and timing
 -- ============================================================
@@ -694,7 +694,7 @@ JOIN fk_notvalid_notnull_child FOR KEY (nvn_p_id) -> ref_products (prod_id);
 ERROR:  key join from referencing relation fk_notvalid_notnull_child to referenced relation ref_products cannot be proven
 LINE 2: JOIN fk_notvalid_notnull_child FOR KEY (nvn_p_id) -> ref_pro...
                                        ^
-DETAIL:  Referencing columns fk_notvalid_notnull_child (nvn_p_id) can be null, so this inner join could filter rows from fk_notvalid_notnull_child.
+DETAIL:  This inner join could filter rows from fk_notvalid_notnull_child. Referencing columns fk_notvalid_notnull_child (nvn_p_id) can be null.
 -- accepted, reason: NOT DEFERRABLE key join works even after SET CONSTRAINTS ALL DEFERRED
 BEGIN;
 SET CONSTRAINTS ALL DEFERRED;
@@ -827,7 +827,7 @@ JOIN fk_reviews FOR KEY (rev_prod_id) -> q (prod_id);
 ERROR:  key join from referencing relation fk_reviews to referenced relation q cannot be proven
 LINE 8: JOIN fk_reviews FOR KEY (rev_prod_id) -> q (prod_id);
                         ^
-DETAIL:  A preceding join may duplicate rows from referenced relation q, so referenced columns q (prod_id) are not proven unique at this point in the query.
+DETAIL:  Referenced columns q (prod_id) are not proven unique. A preceding join may duplicate rows from referenced relation q.
 -- ============================================================
 -- 9. Unsupported relation kinds
 -- ============================================================
@@ -946,7 +946,7 @@ ORDER BY rev.rev_id;
 ERROR:  key join from referencing relation rev to referenced relation deep cannot be proven
 LINE 13: JOIN fk_reviews rev FOR KEY (rev_prod_id) -> deep (p_id)
                              ^
-DETAIL:  Referenced relation deep is filtered before this key join, so not every rev (rev_prod_id) value can be proven to have a matching deep row.
+DETAIL:  Not every rev (rev_prod_id) value can be proven to have a matching deep row. Referenced relation deep is filtered before this key join.
 -- ============================================================
 -- Cleanup
 -- ============================================================

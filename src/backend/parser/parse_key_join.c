@@ -5155,6 +5155,10 @@ key_join_failure_detail(KeyJoinReq req, bool inactivated,
 						const char *join_name)
 {
 	char	   *origin_view_name = NULL;
+	char	   *origin_sentence = NULL;
+	char	   *reason_sentence = NULL;
+	char	   *requirement_sentence;
+	StringInfoData detail;
 
 	if (OidIsValid(origin_view))
 	{
@@ -5164,106 +5168,137 @@ key_join_failure_detail(KeyJoinReq req, bool inactivated,
 		Assert(relname != NULL);
 		Assert(nspname != NULL);
 		origin_view_name = psprintf("%s.%s", nspname, relname);
+		origin_sentence =
+			psprintf("The relevant operation occurs inside view \"%s\".",
+					 origin_view_name);
 	}
 
 	if (req == REQ_FKPAIR)
-		return psprintf("The matching foreign key for %s references different columns than %s.",
-						referencing_relcols, referenced_relcols);
+		requirement_sentence =
+			psprintf("The matching foreign key for %s references different columns than %s.",
+					 referencing_relcols, referenced_relcols);
 	else if (req == REQ_FILTER)
-		return psprintf("Referenced relation %s has a filter that is not matched by referencing relation %s, so not every %s value can be proven to have a matching %s row.",
-						referenced_relation, referencing_relation,
-						referencing_relcols, referenced_relation);
+	{
+		requirement_sentence =
+			psprintf("Not every %s value can be proven to have a matching %s row.",
+					 referencing_relcols, referenced_relation);
+		reason_sentence =
+			psprintf("Referenced relation %s has a filter that is not matched by referencing relation %s.",
+					 referenced_relation, referencing_relation);
+	}
 	else if (req == REQ_UNIQUE && inactivated)
 	{
 		/* KJI_JOIN_FANOUT is unique-specific. */
 		Assert(reason == KJI_JOIN_FANOUT);
 
-		if (origin_view_name != NULL)
-			return psprintf("A preceding join inside view %s may duplicate rows from referenced relation %s, so referenced columns %s are not proven unique at this point in the query.",
-							origin_view_name, referenced_relation,
-							referenced_relcols);
-		return psprintf("A preceding join may duplicate rows from referenced relation %s, so referenced columns %s are not proven unique at this point in the query.",
-						referenced_relation, referenced_relcols);
+		requirement_sentence =
+			psprintf("Referenced columns %s are not proven unique.",
+					 referenced_relcols);
+		reason_sentence =
+			psprintf("A preceding join may duplicate rows from referenced relation %s.",
+					 referenced_relation);
 	}
 	else if (req == REQ_UNIQUE)
-		return psprintf("Referenced columns %s are not proven unique.",
-						referenced_relcols);
+		requirement_sentence =
+			psprintf("Referenced columns %s are not proven unique.",
+					 referenced_relcols);
 	else if (req == REQ_COVERAGE && inactivated &&
 			 reason == KJI_UNACCOUNTED_FILTER)
 	{
-		if (origin_view_name != NULL)
-			return psprintf("Referenced relation %s is filtered before this key join inside view %s, so not every %s value can be proven to have a matching %s row.",
-							referenced_relation, origin_view_name,
-							referencing_relcols, referenced_relation);
-		return psprintf("Referenced relation %s is filtered before this key join, so not every %s value can be proven to have a matching %s row.",
-						referenced_relation, referencing_relcols,
-						referenced_relation);
+		requirement_sentence =
+			psprintf("Not every %s value can be proven to have a matching %s row.",
+					 referencing_relcols, referenced_relation);
+		reason_sentence =
+			psprintf("Referenced relation %s is filtered before this key join.",
+					 referenced_relation);
 	}
 	else if (req == REQ_COVERAGE && inactivated &&
 			 reason == KJI_JOIN_NOT_PRESERVED)
 	{
-		if (origin_view_name != NULL)
-			return psprintf("Referenced relation %s may lose rows before this key join because of a preceding join inside view %s, so not every %s value can be proven to have a matching %s row.",
-							referenced_relation, origin_view_name,
-							referencing_relcols, referenced_relation);
-		return psprintf("Referenced relation %s may lose rows before this key join because of a preceding join, so not every %s value can be proven to have a matching %s row.",
-						referenced_relation, referencing_relcols,
-						referenced_relation);
+		requirement_sentence =
+			psprintf("Not every %s value can be proven to have a matching %s row.",
+					 referencing_relcols, referenced_relation);
+		reason_sentence =
+			psprintf("Referenced relation %s may lose rows before this key join because of a preceding join.",
+					 referenced_relation);
 	}
 	else if (req == REQ_COVERAGE && inactivated &&
 			 reason == KJI_ROW_REMOVING_CLAUSE)
 	{
-		if (origin_view_name != NULL)
-			return psprintf("Referenced relation %s may lose rows before this key join because of HAVING, LIMIT, OFFSET, FOR UPDATE or TABLESAMPLE inside view %s, so not every %s value can be proven to have a matching %s row.",
-							referenced_relation, origin_view_name,
-							referencing_relcols, referenced_relation);
-		return psprintf("Referenced relation %s may lose rows before this key join because of HAVING, LIMIT, OFFSET, FOR UPDATE or TABLESAMPLE, so not every %s value can be proven to have a matching %s row.",
-						referenced_relation, referencing_relcols,
-						referenced_relation);
+		requirement_sentence =
+			psprintf("Not every %s value can be proven to have a matching %s row.",
+					 referencing_relcols, referenced_relation);
+		reason_sentence =
+			psprintf("Referenced relation %s may lose rows before this key join because of HAVING, LIMIT, OFFSET, FOR UPDATE or TABLESAMPLE.",
+					 referenced_relation);
 	}
 	else if (req == REQ_COVERAGE && inactivated && reason == KJI_GROUP_BY)
 	{
-		if (origin_view_name != NULL)
-			return psprintf("Referenced relation %s may lose rows before this key join because of GROUP BY inside view %s, so not every %s value can be proven to have a matching %s row.",
-							referenced_relation, origin_view_name,
-							referencing_relcols, referenced_relation);
-		return psprintf("Referenced relation %s may lose rows before this key join because of GROUP BY, so not every %s value can be proven to have a matching %s row.",
-						referenced_relation, referencing_relcols,
-						referenced_relation);
+		requirement_sentence =
+			psprintf("Not every %s value can be proven to have a matching %s row.",
+					 referencing_relcols, referenced_relation);
+		reason_sentence =
+			psprintf("Referenced relation %s may lose rows before this key join because of GROUP BY.",
+					 referenced_relation);
 	}
 	else if (req == REQ_COVERAGE && inactivated)
 	{
 		Assert(reason == KJI_DISTINCT);
 
-		if (origin_view_name != NULL)
-			return psprintf("Referenced relation %s may lose rows before this key join because of DISTINCT inside view %s, so not every %s value can be proven to have a matching %s row.",
-							referenced_relation, origin_view_name,
-							referencing_relcols, referenced_relation);
-		return psprintf("Referenced relation %s may lose rows before this key join because of DISTINCT, so not every %s value can be proven to have a matching %s row.",
-						referenced_relation, referencing_relcols,
-						referenced_relation);
+		requirement_sentence =
+			psprintf("Not every %s value can be proven to have a matching %s row.",
+					 referencing_relcols, referenced_relation);
+		reason_sentence =
+			psprintf("Referenced relation %s may lose rows before this key join because of DISTINCT.",
+					 referenced_relation);
 	}
 	else if (req == REQ_COVERAGE)
-		return psprintf("Referenced relation %s is not proven to contain every referenced key row, so not every %s value can be proven to have a matching %s row.",
-						referenced_relation, referencing_relcols,
-						referenced_relation);
+	{
+		requirement_sentence =
+			psprintf("Not every %s value can be proven to have a matching %s row.",
+					 referencing_relcols, referenced_relation);
+		reason_sentence =
+			psprintf("Referenced relation %s is not proven to contain every referenced key row.",
+					 referenced_relation);
+	}
 	else if (req == REQ_NOTNULL && inactivated)
 	{
 		Assert(reason == KJI_NULL_EXTENDING_JOIN);
 
-		if (origin_view_name != NULL)
-			return psprintf("Referencing columns %s can be null because of a preceding outer join that can null-extend it inside view %s, so this %s could filter rows from %s.",
-							referencing_relcols, origin_view_name,
-							join_name, referencing_relation);
-		return psprintf("Referencing columns %s can be null because of a preceding outer join that can null-extend it, so this %s could filter rows from %s.",
-						referencing_relcols, join_name, referencing_relation);
+		requirement_sentence =
+			psprintf("This %s could filter rows from %s.",
+					 join_name, referencing_relation);
+		reason_sentence =
+			psprintf("Referencing columns %s can be null because a preceding outer join can null-extend the referencing side.",
+					 referencing_relcols);
 	}
 	else if (req == REQ_NOTNULL)
-		return psprintf("Referencing columns %s can be null, so this %s could filter rows from %s.",
-						referencing_relcols, join_name, referencing_relation);
+	{
+		requirement_sentence =
+			psprintf("This %s could filter rows from %s.",
+					 join_name, referencing_relation);
+		reason_sentence =
+			psprintf("Referencing columns %s can be null.",
+					 referencing_relcols);
+	}
+	else
+		requirement_sentence =
+			psprintf("There is no matching foreign key constraint for %s referencing %s.",
+					 referencing_relcols, referenced_relcols);
 
-	return psprintf("There is no matching foreign key constraint for %s referencing %s.",
-					referencing_relcols, referenced_relcols);
+	initStringInfo(&detail);
+	appendStringInfoString(&detail, requirement_sentence);
+	if (reason_sentence != NULL)
+	{
+		appendStringInfoChar(&detail, ' ');
+		appendStringInfoString(&detail, reason_sentence);
+	}
+	if (origin_sentence != NULL)
+	{
+		appendStringInfoChar(&detail, ' ');
+		appendStringInfoString(&detail, origin_sentence);
+	}
+	return detail.data;
 }
 
 /*

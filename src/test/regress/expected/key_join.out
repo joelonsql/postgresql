@@ -318,7 +318,7 @@ JOIN LATERAL (
 ERROR:  key join from referencing relation c3 to referenced relation p cannot be proven
 LINE 9:         FOR KEY (c3) -> p (c1)
                 ^
-DETAIL:  Referenced relation p may lose rows before this key join because of a preceding join, so not every c3 (c3) value can be proven to have a matching p row.
+DETAIL:  Not every c3 (c3) value can be proven to have a matching p row. Referenced relation p may lose rows before this key join because of a preceding join.
 SELECT *
 FROM pg_catalog.pg_class pc
 -- rejected, reason: catalog NOT NULL columns do not provide proof facts
@@ -696,7 +696,7 @@ JOIN t3 FOR KEY (c5,c6) -> t1 (c1,c2);
 ERROR:  key join from referencing relation t3 to referenced relation t1 cannot be proven
 LINE 5: JOIN t3 FOR KEY (c5,c6) -> t1 (c1,c2);
                 ^
-DETAIL:  Referenced relation t1 may lose rows before this key join because of a preceding join, so not every t3 (c5, c6) value can be proven to have a matching t1 row.
+DETAIL:  Not every t3 (c5, c6) value can be proven to have a matching t1 row. Referenced relation t1 may lose rows before this key join because of a preceding join.
 SELECT *
 FROM t1
 -- rejected, reason: nullable referencing columns are on the non-preserved side
@@ -705,7 +705,7 @@ LEFT JOIN t3 FOR KEY (c5,c6) -> t1 (c1,c2);
 ERROR:  key join from referencing relation t3 to referenced relation t1 cannot be proven
 LINE 5: LEFT JOIN t3 FOR KEY (c5,c6) -> t1 (c1,c2);
                      ^
-DETAIL:  Referenced relation t1 may lose rows before this key join because of a preceding join, so not every t3 (c5, c6) value can be proven to have a matching t1 row.
+DETAIL:  Not every t3 (c5, c6) value can be proven to have a matching t1 row. Referenced relation t1 may lose rows before this key join because of a preceding join.
 SELECT *
 FROM t1
 -- rejected, reason: referenced t1 surface is unique but not row-covered after the preceding inner key join
@@ -714,7 +714,7 @@ RIGHT JOIN t3 FOR KEY (c5,c6) -> t1 (c1,c2);
 ERROR:  key join from referencing relation t3 to referenced relation t1 cannot be proven
 LINE 5: RIGHT JOIN t3 FOR KEY (c5,c6) -> t1 (c1,c2);
                       ^
-DETAIL:  Referenced relation t1 may lose rows before this key join because of a preceding join, so not every t3 (c5, c6) value can be proven to have a matching t1 row.
+DETAIL:  Not every t3 (c5, c6) value can be proven to have a matching t1 row. Referenced relation t1 may lose rows before this key join because of a preceding join.
 --
 -- Test composite key joins with swapped column orders
 --
@@ -726,7 +726,7 @@ JOIN t3 FOR KEY (c6,c5) -> t1 (c2,c1);
 ERROR:  key join from referencing relation t3 to referenced relation t1 cannot be proven
 LINE 5: JOIN t3 FOR KEY (c6,c5) -> t1 (c2,c1);
                 ^
-DETAIL:  Referenced relation t1 may lose rows before this key join because of a preceding join, so not every t3 (c6, c5) value can be proven to have a matching t1 row.
+DETAIL:  Not every t3 (c6, c5) value can be proven to have a matching t1 row. Referenced relation t1 may lose rows before this key join because of a preceding join.
 --
 -- Test mismatched column orders between referencing and referenced sides
 --
@@ -738,7 +738,7 @@ JOIN t3 FOR KEY (c6,c5) -> t1 (c1,c2); -- rejected, reason: referencing and refe
 ERROR:  key join from referencing relation t3 to referenced relation t1 cannot be proven
 LINE 5: JOIN t3 FOR KEY (c6,c5) -> t1 (c1,c2);
                 ^
-DETAIL:  Referenced relation t1 may lose rows before this key join because of a preceding join, so not every t3 (c6, c5) value can be proven to have a matching t1 row.
+DETAIL:  Not every t3 (c6, c5) value can be proven to have a matching t1 row. Referenced relation t1 may lose rows before this key join because of a preceding join.
 --
 -- Test defining foreign key constraints with MATCH FULL
 --
@@ -771,7 +771,7 @@ JOIN t4 FOR KEY (c7,c8) -> t1 (c1,c2);
 ERROR:  key join from referencing relation t4 to referenced relation t1 cannot be proven
 LINE 5: JOIN t4 FOR KEY (c7,c8) -> t1 (c1,c2);
                 ^
-DETAIL:  Referenced relation t1 may lose rows before this key join because of a preceding join, so not every t4 (c7, c8) value can be proven to have a matching t1 row.
+DETAIL:  Not every t4 (c7, c8) value can be proven to have a matching t1 row. Referenced relation t1 may lose rows before this key join because of a preceding join.
 SELECT *
 FROM t1
 -- rejected, reason: nullable referencing columns are on the non-preserved side
@@ -780,7 +780,7 @@ LEFT JOIN t4 FOR KEY (c7,c8) -> t1 (c1,c2);
 ERROR:  key join from referencing relation t4 to referenced relation t1 cannot be proven
 LINE 5: LEFT JOIN t4 FOR KEY (c7,c8) -> t1 (c1,c2);
                      ^
-DETAIL:  Referenced relation t1 may lose rows before this key join because of a preceding join, so not every t4 (c7, c8) value can be proven to have a matching t1 row.
+DETAIL:  Not every t4 (c7, c8) value can be proven to have a matching t1 row. Referenced relation t1 may lose rows before this key join because of a preceding join.
 SELECT *
 FROM t1
 -- rejected, reason: referenced t1 surface is unique but not row-covered after the preceding inner key join
@@ -789,7 +789,7 @@ RIGHT JOIN t4 FOR KEY (c7,c8) -> t1 (c1,c2);
 ERROR:  key join from referencing relation t4 to referenced relation t1 cannot be proven
 LINE 5: RIGHT JOIN t4 FOR KEY (c7,c8) -> t1 (c1,c2);
                       ^
-DETAIL:  Referenced relation t1 may lose rows before this key join because of a preceding join, so not every t4 (c7, c8) value can be proven to have a matching t1 row.
+DETAIL:  Not every t4 (c7, c8) value can be proven to have a matching t1 row. Referenced relation t1 may lose rows before this key join because of a preceding join.
 -- Recreate stuff for pg_dump tests
 ALTER TABLE t2
     ADD CONSTRAINT t2_c3_fkey FOREIGN KEY (c3) REFERENCES t1 (c1);
@@ -1259,7 +1259,7 @@ SELECT * FROM v1 JOIN t2 FOR KEY (c3) -> v1 (c1);
 ERROR:  key join from referencing relation t2 to referenced relation v1 cannot be proven
 LINE 1: SELECT * FROM v1 JOIN t2 FOR KEY (c3) -> v1 (c1);
                                  ^
-DETAIL:  Referenced relation v1 is filtered before this key join inside view public.v1, so not every t2 (c3) value can be proven to have a matching v1 row.
+DETAIL:  Not every t2 (c3) value can be proven to have a matching v1 row. Referenced relation v1 is filtered before this key join. The relevant operation occurs inside view "public.v1".
 -- accepted, filtering allowed since v2 is the referencing table
 SELECT * FROM t1 JOIN v2 FOR KEY (c3) -> t1 (c1);
  c1 | c2 | c3 | c4 
@@ -1275,7 +1275,7 @@ SELECT * FROM v1 JOIN v2 FOR KEY (c3) -> v1 (c1);
 ERROR:  key join from referencing relation v2 to referenced relation v1 cannot be proven
 LINE 1: SELECT * FROM v1 JOIN v2 FOR KEY (c3) -> v1 (c1);
                                  ^
-DETAIL:  Referenced relation v1 is filtered before this key join inside view public.v1, so not every v2 (c3) value can be proven to have a matching v1 row.
+DETAIL:  Not every v2 (c3) value can be proven to have a matching v1 row. Referenced relation v1 is filtered before this key join. The relevant operation occurs inside view "public.v1".
 -- rejected, reason: referenced-side HAVING filter is not a matched key filter
 SELECT * FROM
 (
@@ -1285,21 +1285,21 @@ JOIN t2 FOR KEY (c3) -> u (c1);
 ERROR:  key join from referencing relation t2 to referenced relation u cannot be proven
 LINE 5: JOIN t2 FOR KEY (c3) -> u (c1);
                 ^
-DETAIL:  Referenced relation u may lose rows before this key join because of HAVING, LIMIT, OFFSET, FOR UPDATE or TABLESAMPLE, so not every t2 (c3) value can be proven to have a matching u row.
+DETAIL:  Not every t2 (c3) value can be proven to have a matching u row. Referenced relation u may lose rows before this key join because of HAVING, LIMIT, OFFSET, FOR UPDATE or TABLESAMPLE.
 -- rejected, reason: u is filtered and is the referenced table
 SELECT * FROM (SELECT c1 FROM t1 LIMIT 1) AS u
 JOIN t2 FOR KEY (c3) -> u (c1);
 ERROR:  key join from referencing relation t2 to referenced relation u cannot be proven
 LINE 2: JOIN t2 FOR KEY (c3) -> u (c1);
                 ^
-DETAIL:  Referenced relation u may lose rows before this key join because of HAVING, LIMIT, OFFSET, FOR UPDATE or TABLESAMPLE, so not every t2 (c3) value can be proven to have a matching u row.
+DETAIL:  Not every t2 (c3) value can be proven to have a matching u row. Referenced relation u may lose rows before this key join because of HAVING, LIMIT, OFFSET, FOR UPDATE or TABLESAMPLE.
 -- rejected, reason: u is filtered and is the referenced table
 SELECT * FROM (SELECT c1 FROM t1 OFFSET 1) AS u
 JOIN t2 FOR KEY (c3) -> u (c1);
 ERROR:  key join from referencing relation t2 to referenced relation u cannot be proven
 LINE 2: JOIN t2 FOR KEY (c3) -> u (c1);
                 ^
-DETAIL:  Referenced relation u may lose rows before this key join because of HAVING, LIMIT, OFFSET, FOR UPDATE or TABLESAMPLE, so not every t2 (c3) value can be proven to have a matching u row.
+DETAIL:  Not every t2 (c3) value can be proven to have a matching u row. Referenced relation u may lose rows before this key join because of HAVING, LIMIT, OFFSET, FOR UPDATE or TABLESAMPLE.
 WITH q2 AS
 (
     SELECT * FROM t5 WHERE t5.c11 > 0
@@ -1324,7 +1324,7 @@ JOIN t7 FOR KEY (c15, c16) -> q1 (c9, c10);
 ERROR:  key join from referencing relation t7 to referenced relation q1 cannot be proven
 LINE 21: JOIN t7 FOR KEY (c15, c16) -> q1 (c9, c10);
                  ^
-DETAIL:  Referenced relation q1 is filtered before this key join, so not every t7 (c15, c16) value can be proven to have a matching q1 row.
+DETAIL:  Not every t7 (c15, c16) value can be proven to have a matching q1 row. Referenced relation q1 is filtered before this key join.
 --
 -- Test allowed joins not affecting uniqueness
 --
@@ -1377,7 +1377,7 @@ JOIN t7 FOR KEY (c15, c16) -> q1 (c9, c10);
 ERROR:  key join from referencing relation t7 to referenced relation q1 cannot be proven
 LINE 19: JOIN t7 FOR KEY (c15, c16) -> q1 (c9, c10);
                  ^
-DETAIL:  A preceding join may duplicate rows from referenced relation q1, so referenced columns q1 (c9, c10) are not proven unique at this point in the query.
+DETAIL:  Referenced columns q1 (c9, c10) are not proven unique. A preceding join may duplicate rows from referenced relation q1.
 --
 -- Test revalidation of views
 --
@@ -1563,7 +1563,7 @@ FROM t1_nn JOIN v_notnull_producer p
 ERROR:  key join from referencing relation p to referenced relation t1_nn cannot be proven
 LINE 4:     FOR KEY (t2_t1_id_nn) -> t1_nn (t1_id);
             ^
-DETAIL:  Referencing columns p (t2_t1_id_nn) can be null, so this inner join could filter rows from p.
+DETAIL:  This inner join could filter rows from p. Referencing columns p (t2_t1_id_nn) can be null.
 ALTER TABLE t2_nn ALTER COLUMN t2_t1_id_nn SET NOT NULL;
 DROP VIEW v_notnull_producer;
 --
@@ -1576,7 +1576,7 @@ JOIN t1_nn FOR KEY (t1_id) <- t2_nn (t2_t1_id_nullable);
 ERROR:  key join from referencing relation t2_nn to referenced relation t1_nn cannot be proven
 LINE 3: JOIN t1_nn FOR KEY (t1_id) <- t2_nn (t2_t1_id_nullable);
                    ^
-DETAIL:  Referencing columns t2_nn (t2_t1_id_nullable) can be null, so this inner join could filter rows from t2_nn.
+DETAIL:  This inner join could filter rows from t2_nn. Referencing columns t2_nn (t2_t1_id_nullable) can be null.
 -- N3: Nullable FK, LEFT JOIN preserving referencing side → accepted
 SELECT * FROM t2_nn
 -- accepted
@@ -1616,7 +1616,7 @@ LEFT JOIN t2_nn FOR KEY (t2_t1_id_nullable) -> t1_nn (t1_id);
 ERROR:  key join from referencing relation t2_nn to referenced relation t1_nn cannot be proven
 LINE 3: LEFT JOIN t2_nn FOR KEY (t2_t1_id_nullable) -> t1_nn (t1_id)...
                         ^
-DETAIL:  Referencing columns t2_nn (t2_t1_id_nullable) can be null, so this join could filter rows from t2_nn.
+DETAIL:  This join could filter rows from t2_nn. Referencing columns t2_nn (t2_t1_id_nullable) can be null.
 -- NE1: NOT NULL FK col null-extended by prior FK LEFT JOIN → null-extended error
 -- t1_nn a LEFT JOIN t2_nn makes t2_t1_id_nn null-extended; the subsequent INNER key join
 -- on that column should fire the null-extended branch of the error.
@@ -1628,7 +1628,7 @@ SELECT * FROM
 ERROR:  key join from referencing relation t2_nn to referenced relation b cannot be proven
 LINE 5:     JOIN t1_nn b FOR KEY (t1_id) <- t2_nn (t2_t1_id_nn);
                          ^
-DETAIL:  Referencing columns t2_nn (t2_t1_id_nn) can be null because of a preceding outer join that can null-extend it, so this inner join could filter rows from t2_nn.
+DETAIL:  This inner join could filter rows from t2_nn. Referencing columns t2_nn (t2_t1_id_nn) can be null because a preceding outer join can null-extend the referencing side.
 -- NE2: NOT NULL FK col null-extended through prior outer key joins → error
 CREATE TABLE t1_nn_chain (t1_id INTEGER PRIMARY KEY);
 CREATE TABLE t2_nn_chain (
@@ -1652,7 +1652,7 @@ SELECT * FROM
 ERROR:  key join from referencing relation m2 to referenced relation r cannot be proven
 LINE 7:     JOIN t1_nn_chain r FOR KEY (t1_id) <- m2 (t2_t1_id);
                                ^
-DETAIL:  Referencing columns m2 (t2_t1_id) can be null because of a preceding outer join that can null-extend it, so this inner join could filter rows from m2.
+DETAIL:  This inner join could filter rows from m2. Referencing columns m2 (t2_t1_id) can be null because a preceding outer join can null-extend the referencing side.
 DROP TABLE t3_nn_chain, t2_nn_chain, t1_nn_chain;
 -- NE3: outer padding null-extends every base table in a nested subtree
 CREATE TABLE ne3_a (id INTEGER PRIMARY KEY);
@@ -1683,7 +1683,7 @@ JOIN ne3_e FOR KEY (id) <- q (c_e_id);
 ERROR:  key join from referencing relation q to referenced relation ne3_e cannot be proven
 LINE 10: JOIN ne3_e FOR KEY (id) <- q (c_e_id);
                     ^
-DETAIL:  Referencing columns q (c_e_id) can be null because of a preceding outer join that can null-extend it, so this inner join could filter rows from q.
+DETAIL:  This inner join could filter rows from q. Referencing columns q (c_e_id) can be null because a preceding outer join can null-extend the referencing side.
 CREATE VIEW ne3_right_nested_v AS
 SELECT ne3_a.id AS a_id, ne3_c.e_id AS c_e_id
 FROM ne3_a
@@ -1697,7 +1697,7 @@ JOIN ne3_e FOR KEY (id) <- q (c_e_id);
 ERROR:  key join from referencing relation q to referenced relation ne3_e cannot be proven
 LINE 4: JOIN ne3_e FOR KEY (id) <- q (c_e_id);
                    ^
-DETAIL:  Referencing columns q (c_e_id) can be null because of a preceding outer join that can null-extend it inside view public.ne3_right_nested_v, so this inner join could filter rows from q.
+DETAIL:  This inner join could filter rows from q. Referencing columns q (c_e_id) can be null because a preceding outer join can null-extend the referencing side. The relevant operation occurs inside view "public.ne3_right_nested_v".
 DROP VIEW ne3_right_nested_v;
 DROP TABLE ne3_b, ne3_c, ne3_e, ne3_a;
 DROP TABLE t2_nn, t1_nn;
@@ -1778,7 +1778,7 @@ FROM customers AS c
 JOIN customer_addresses AS ca FOR KEY (customer_id) -> c (id)
 JOIN addresses AS a FOR KEY (id) <- ca (address_id);
 ERROR:  key join from referencing relation o to referenced relation cd cannot be proven
-DETAIL:  A preceding join may duplicate rows from referenced relation cd, so referenced columns cd (customer_id) are not proven unique at this point in the query.
+DETAIL:  Referenced columns cd (customer_id) are not proven unique. A preceding join may duplicate rows from referenced relation cd.
 --
 -- Test various error conditions
 --
@@ -1991,7 +1991,7 @@ JOIN t2 FOR KEY (c3, c4) -> u (c1, c2);
 ERROR:  key join from referencing relation t2 to referenced relation u cannot be proven
 LINE 6: JOIN t2 FOR KEY (c3, c4) -> u (c1, c2);
                 ^
-DETAIL:  Referenced relation u is filtered before this key join, so not every t2 (c3, c4) value can be proven to have a matching u row.
+DETAIL:  Not every t2 (c3, c4) value can be proven to have a matching u row. Referenced relation u is filtered before this key join.
 SELECT *
 FROM t1
 JOIN
@@ -2249,7 +2249,7 @@ JOIN payments FOR KEY (order_id) -> orders (id);
 ERROR:  key join from referencing relation payments to referenced relation orders cannot be proven
 LINE 5: JOIN payments FOR KEY (order_id) -> orders (id);
                       ^
-DETAIL:  A preceding join may duplicate rows from referenced relation orders, so referenced columns orders (id) are not proven unique at this point in the query.
+DETAIL:  Referenced columns orders (id) are not proven unique. A preceding join may duplicate rows from referenced relation orders.
 --
 -- Cross-type FK equality semantics are intentionally not supported by
 -- key-join proof.  The text UNIQUE constraint distinguishes 'a' and 'a ',
@@ -2854,7 +2854,7 @@ JOIN refs_to_nodes r FOR KEY (ref_id) -> q (pid);
 ERROR:  key join from referencing relation r to referenced relation q cannot be proven
 LINE 10: JOIN refs_to_nodes r FOR KEY (ref_id) -> q (pid);
                               ^
-DETAIL:  A preceding join may duplicate rows from referenced relation q, so referenced columns q (pid) are not proven unique at this point in the query.
+DETAIL:  Referenced columns q (pid) are not proven unique. A preceding join may duplicate rows from referenced relation q.
 CREATE VIEW self_fk_nodes_v AS
 SELECT id, parent_id FROM self_fk_nodes;
 SELECT *
@@ -2869,7 +2869,7 @@ JOIN refs_to_nodes r FOR KEY (ref_id) -> q (pid);
 ERROR:  key join from referencing relation r to referenced relation q cannot be proven
 LINE 9: JOIN refs_to_nodes r FOR KEY (ref_id) -> q (pid);
                              ^
-DETAIL:  A preceding join may duplicate rows from referenced relation q, so referenced columns q (pid) are not proven unique at this point in the query.
+DETAIL:  Referenced columns q (pid) are not proven unique. A preceding join may duplicate rows from referenced relation q.
 SELECT *
 FROM (
     SELECT *
@@ -2885,7 +2885,7 @@ JOIN refs_to_nodes r FOR KEY (ref_id) -> q (pid);
 ERROR:  key join from referencing relation r to referenced relation q cannot be proven
 LINE 12: JOIN refs_to_nodes r FOR KEY (ref_id) -> q (pid);
                               ^
-DETAIL:  A preceding join may duplicate rows from referenced relation q, so referenced columns q (pid) are not proven unique at this point in the query.
+DETAIL:  Referenced columns q (pid) are not proven unique. A preceding join may duplicate rows from referenced relation q.
 DROP VIEW self_fk_nodes_v;
 DROP TABLE refs_to_nodes;
 DROP TABLE self_fk_nodes;
@@ -3164,7 +3164,7 @@ JOIN resupplies_gbu FOR KEY (product_id) -> v_sales_multi_group (id);
 ERROR:  key join from referencing relation resupplies_gbu to referenced relation v_sales_multi_group cannot be proven
 LINE 3: JOIN resupplies_gbu FOR KEY (product_id) -> v_sales_multi_gr...
                             ^
-DETAIL:  A preceding join inside view public.v_sales_multi_group may duplicate rows from referenced relation v_sales_multi_group, so referenced columns v_sales_multi_group (id) are not proven unique at this point in the query.
+DETAIL:  Referenced columns v_sales_multi_group (id) are not proven unique. A preceding join may duplicate rows from referenced relation v_sales_multi_group. The relevant operation occurs inside view "public.v_sales_multi_group".
 SELECT *
 FROM (
     SELECT DISTINCT abs(id) AS id
@@ -3292,7 +3292,7 @@ JOIN reviews_do r FOR KEY (product_id) -> q (id);
 ERROR:  key join from referencing relation r to referenced relation q cannot be proven
 LINE 4: JOIN reviews_do r FOR KEY (product_id) -> q (id);
                           ^
-DETAIL:  Referenced relation q may lose rows before this key join because of DISTINCT, so not every r (product_id) value can be proven to have a matching q row.
+DETAIL:  Not every r (product_id) value can be proven to have a matching q row. Referenced relation q may lose rows before this key join because of DISTINCT.
 DROP TABLE reviews_do, products_do;
 -- DISTINCT ON drops sibling rows for each distinct group, so a base
 -- rowCoverage on the wider key is no longer valid for the resulting
@@ -3317,7 +3317,7 @@ JOIN rowcov_fk FOR KEY (fk_a, fk_b) -> sub (a, b);
 ERROR:  key join from referencing relation rowcov_fk to referenced relation sub cannot be proven
 LINE 9: JOIN rowcov_fk FOR KEY (fk_a, fk_b) -> sub (a, b);
                        ^
-DETAIL:  Referenced relation sub may lose rows before this key join because of DISTINCT, so not every rowcov_fk (fk_a, fk_b) value can be proven to have a matching sub row.
+DETAIL:  Not every rowcov_fk (fk_a, fk_b) value can be proven to have a matching sub row. Referenced relation sub may lose rows before this key join because of DISTINCT.
 SELECT *
 FROM (
     SELECT DISTINCT a, b
@@ -3328,7 +3328,7 @@ JOIN rowcov_fk FOR KEY (fk_a, fk_b) -> sub (a, b);
 ERROR:  key join from referencing relation rowcov_fk to referenced relation sub cannot be proven
 LINE 7: JOIN rowcov_fk FOR KEY (fk_a, fk_b) -> sub (a, b);
                        ^
-DETAIL:  Referenced relation sub may lose rows before this key join because of DISTINCT, so not every rowcov_fk (fk_a, fk_b) value can be proven to have a matching sub row.
+DETAIL:  Not every rowcov_fk (fk_a, fk_b) value can be proven to have a matching sub row. Referenced relation sub may lose rows before this key join because of DISTINCT.
 DROP TABLE rowcov_fk, rowcov_pk;
 -- GROUP BY/DISTINCT preserve row coverage only when their equality identity
 -- exactly matches the key equality identity.
@@ -3406,7 +3406,7 @@ JOIN rowcov_nullable_child c FOR KEY (parent_code) -> p (code);
 ERROR:  key join from referencing relation c to referenced relation p cannot be proven
 LINE 4: JOIN rowcov_nullable_child c FOR KEY (parent_code) -> p (cod...
                                      ^
-DETAIL:  Referenced relation p may lose rows before this key join because of HAVING, LIMIT, OFFSET, FOR UPDATE or TABLESAMPLE, so not every c (parent_code) value can be proven to have a matching p row.
+DETAIL:  Not every c (parent_code) value can be proven to have a matching p row. Referenced relation p may lose rows before this key join because of HAVING, LIMIT, OFFSET, FOR UPDATE or TABLESAMPLE.
 DROP TABLE rowcov_nullable_child, rowcov_nullable_parent;
 -- Extra row-collapse columns may have different identity from the key.
 -- Row coverage is preserved as long as the grouped key column itself has
@@ -3538,7 +3538,7 @@ JOIN rowcov_numeric_child c FOR KEY (parent_id) -> p (id);
 ERROR:  key join from referencing relation c to referenced relation p cannot be proven
 LINE 4: JOIN rowcov_numeric_child c FOR KEY (parent_id) -> p (id);
                                     ^
-DETAIL:  Referenced relation p may lose rows before this key join because of GROUP BY, so not every c (parent_id) value can be proven to have a matching p row.
+DETAIL:  Not every c (parent_id) value can be proven to have a matching p row. Referenced relation p may lose rows before this key join because of GROUP BY.
 SELECT *
 FROM (SELECT DISTINCT id FROM rowcov_numeric_parent) p
 -- rejected, reason: DISTINCT equality collapses keys distinct under FK equality
@@ -3546,7 +3546,7 @@ JOIN rowcov_numeric_child c FOR KEY (parent_id) -> p (id);
 ERROR:  key join from referencing relation c to referenced relation p cannot be proven
 LINE 4: JOIN rowcov_numeric_child c FOR KEY (parent_id) -> p (id);
                                     ^
-DETAIL:  Referenced relation p may lose rows before this key join because of DISTINCT, so not every c (parent_id) value can be proven to have a matching p row.
+DETAIL:  Not every c (parent_id) value can be proven to have a matching p row. Referenced relation p may lose rows before this key join because of DISTINCT.
 SELECT *
 FROM (
     SELECT DISTINCT ON (id) id
@@ -3558,7 +3558,7 @@ JOIN rowcov_numeric_child c FOR KEY (parent_id) -> p (id);
 ERROR:  key join from referencing relation c to referenced relation p cannot be proven
 LINE 8: JOIN rowcov_numeric_child c FOR KEY (parent_id) -> p (id);
                                     ^
-DETAIL:  Referenced relation p may lose rows before this key join because of DISTINCT, so not every c (parent_id) value can be proven to have a matching p row.
+DETAIL:  Not every c (parent_id) value can be proven to have a matching p row. Referenced relation p may lose rows before this key join because of DISTINCT.
 CREATE VIEW rowcov_numeric_group_v AS
 SELECT id FROM rowcov_numeric_parent GROUP BY id;
 SELECT *
@@ -3568,7 +3568,7 @@ JOIN rowcov_numeric_child c FOR KEY (parent_id) -> p (id);
 ERROR:  key join from referencing relation c to referenced relation p cannot be proven
 LINE 4: JOIN rowcov_numeric_child c FOR KEY (parent_id) -> p (id);
                                     ^
-DETAIL:  Referenced relation p may lose rows before this key join because of GROUP BY inside view public.rowcov_numeric_group_v, so not every c (parent_id) value can be proven to have a matching p row.
+DETAIL:  Not every c (parent_id) value can be proven to have a matching p row. Referenced relation p may lose rows before this key join because of GROUP BY. The relevant operation occurs inside view "public.rowcov_numeric_group_v".
 DROP VIEW rowcov_numeric_group_v;
 CREATE VIEW rowcov_numeric_distinct_v AS
 SELECT DISTINCT id FROM rowcov_numeric_parent;
@@ -3579,7 +3579,7 @@ JOIN rowcov_numeric_child c FOR KEY (parent_id) -> p (id);
 ERROR:  key join from referencing relation c to referenced relation p cannot be proven
 LINE 4: JOIN rowcov_numeric_child c FOR KEY (parent_id) -> p (id);
                                     ^
-DETAIL:  Referenced relation p may lose rows before this key join because of DISTINCT inside view public.rowcov_numeric_distinct_v, so not every c (parent_id) value can be proven to have a matching p row.
+DETAIL:  Not every c (parent_id) value can be proven to have a matching p row. Referenced relation p may lose rows before this key join because of DISTINCT. The relevant operation occurs inside view "public.rowcov_numeric_distinct_v".
 DROP VIEW rowcov_numeric_distinct_v;
 DROP TABLE rowcov_numeric_child, rowcov_numeric_parent;
 DROP OPERATOR CLASS rowcov_numeric_scale_ops USING btree;
@@ -3658,7 +3658,7 @@ JOIN scalar_array_filter_child_v c FOR KEY (parent_id) -> p (id);
 ERROR:  key join from referencing relation c to referenced relation p cannot be proven
 LINE 4: JOIN scalar_array_filter_child_v c FOR KEY (parent_id) -> p ...
                                            ^
-DETAIL:  Referenced relation p is filtered before this key join inside view public.scalar_array_filter_parent_v, so not every c (parent_id) value can be proven to have a matching p row.
+DETAIL:  Not every c (parent_id) value can be proven to have a matching p row. Referenced relation p is filtered before this key join. The relevant operation occurs inside view "public.scalar_array_filter_parent_v".
 DROP VIEW scalar_array_filter_child_v, scalar_array_filter_parent_v;
 DROP TABLE scalar_array_filter_child, scalar_array_filter_parent;
 -- FILTER1b: strict proof-filter value allowlist accepts constants
@@ -3749,7 +3749,7 @@ JOIN filter_varchar_tenant_customers_v c FOR KEY (tenant_id, id) <- o (tenant_id
 ERROR:  key join from referencing relation o to referenced relation c cannot be proven
 LINE 4: JOIN filter_varchar_tenant_customers_v c FOR KEY (tenant_id,...
                                                  ^
-DETAIL:  Referenced relation c has a filter that is not matched by referencing relation o, so not every o (tenant_id, customer_id) value can be proven to have a matching c row.
+DETAIL:  Not every o (tenant_id, customer_id) value can be proven to have a matching c row. Referenced relation c has a filter that is not matched by referencing relation o.
 DROP VIEW filter_varchar_tenant_orders_v, filter_varchar_tenant_customers_v;
 DROP TABLE filter_varchar_tenant_orders, filter_varchar_tenant_customers;
 -- FILTER1d: strict proof-filter value allowlist accepts relabel casts
@@ -3812,7 +3812,7 @@ JOIN filter_func_arg_child_v c FOR KEY (parent_id) -> p (id);
 ERROR:  key join from referencing relation c to referenced relation p cannot be proven
 LINE 4: JOIN filter_func_arg_child_v c FOR KEY (parent_id) -> p (id)...
                                        ^
-DETAIL:  Referenced relation p is filtered before this key join inside view public.filter_func_arg_parent_v, so not every c (parent_id) value can be proven to have a matching p row.
+DETAIL:  Not every c (parent_id) value can be proven to have a matching p row. Referenced relation p is filtered before this key join. The relevant operation occurs inside view "public.filter_func_arg_parent_v".
 DROP VIEW filter_func_arg_child_v, filter_func_arg_parent_v;
 DROP TABLE filter_func_child, filter_func_parent;
 DROP FUNCTION filter_stable_identity(int);
@@ -3837,7 +3837,7 @@ JOIN filter_volatile_child_v c FOR KEY (parent_id) -> p (id);
 ERROR:  key join from referencing relation c to referenced relation p cannot be proven
 LINE 4: JOIN filter_volatile_child_v c FOR KEY (parent_id) -> p (id)...
                                        ^
-DETAIL:  Referenced relation p is filtered before this key join inside view public.filter_volatile_parent_v, so not every c (parent_id) value can be proven to have a matching p row.
+DETAIL:  Not every c (parent_id) value can be proven to have a matching p row. Referenced relation p is filtered before this key join. The relevant operation occurs inside view "public.filter_volatile_parent_v".
 DROP VIEW filter_volatile_child_v, filter_volatile_parent_v;
 DROP TABLE filter_volatile_child, filter_volatile_parent;
 DROP FUNCTION filter_volatile_identity(int);
@@ -3912,7 +3912,7 @@ JOIN filter_coerce_io_grandchild g FOR KEY (id) -> c (id);
 ERROR:  key join from referencing relation g to referenced relation c cannot be proven
 LINE 8: JOIN filter_coerce_io_grandchild g FOR KEY (id) -> c (id);
                                            ^
-DETAIL:  Referenced relation c is filtered before this key join, so not every g (id) value can be proven to have a matching c row.
+DETAIL:  Not every g (id) value can be proven to have a matching c row. Referenced relation c is filtered before this key join.
 DROP TABLE filter_coerce_io_grandchild, filter_coerce_io_child,
            filter_coerce_io_parent;
 DROP CAST (filter_coerce_io_type AS integer);
@@ -4083,7 +4083,7 @@ JOIN (
 ERROR:  key join from referencing relation d to referenced relation q cannot be proven
 LINE 8: ) q FOR KEY (bridge_id) <- d (bridge_id);
             ^
-DETAIL:  Referenced relation q is filtered before this key join, so not every d (bridge_id) value can be proven to have a matching q row.
+DETAIL:  Not every d (bridge_id) value can be proven to have a matching q row. Referenced relation q is filtered before this key join.
 SELECT d.id AS detail_id, q.bridge_id
 FROM filter_detail d
 JOIN (
@@ -4095,7 +4095,7 @@ JOIN (
 ERROR:  key join from referencing relation d to referenced relation q cannot be proven
 LINE 8: ) q FOR KEY (bridge_id) <- d (bridge_id);
             ^
-DETAIL:  Referenced relation q has a filter that is not matched by referencing relation d, so not every d (bridge_id) value can be proven to have a matching q row.
+DETAIL:  Not every d (bridge_id) value can be proven to have a matching q row. Referenced relation q has a filter that is not matched by referencing relation d.
 DROP TABLE filter_detail, filter_bridge, filter_parent;
 -- FILTER5a: referencing-side uniqueness must exactly match the FK key.
 CREATE TABLE filter_unique_len_parent (id int PRIMARY KEY);
@@ -4248,7 +4248,7 @@ LEFT JOIN filter_crossprop_c_filtered cf FOR KEY (cid) <- q (c_id);
 ERROR:  key join from referencing relation q to referenced relation cf cannot be proven
 LINE 12: LEFT JOIN filter_crossprop_c_filtered cf FOR KEY (cid) <- q ...
                                                   ^
-DETAIL:  Referenced relation cf has a filter that is not matched by referencing relation q, so not every q (c_id) value can be proven to have a matching cf row.
+DETAIL:  Not every q (c_id) value can be proven to have a matching cf row. Referenced relation cf has a filter that is not matched by referencing relation q.
 DROP VIEW filter_crossprop_c_filtered, filter_crossprop_r_filtered;
 DROP TABLE filter_crossprop_r, filter_crossprop_b,
            filter_crossprop_c, filter_crossprop_a;
@@ -4271,7 +4271,7 @@ JOIN filter_bool_child_or c FOR KEY (parent_id) -> p (id);
 ERROR:  key join from referencing relation c to referenced relation p cannot be proven
 LINE 4: JOIN filter_bool_child_or c FOR KEY (parent_id) -> p (id);
                                     ^
-DETAIL:  Referenced relation p is filtered before this key join inside view public.filter_bool_parent_or, so not every c (parent_id) value can be proven to have a matching p row.
+DETAIL:  Not every c (parent_id) value can be proven to have a matching p row. Referenced relation p is filtered before this key join. The relevant operation occurs inside view "public.filter_bool_parent_or".
 CREATE VIEW filter_bool_parent_test AS
 SELECT id FROM filter_bool_parent WHERE id = (true IS TRUE);
 CREATE VIEW filter_bool_child_test AS
@@ -4283,7 +4283,7 @@ JOIN filter_bool_child_test c FOR KEY (parent_id) -> p (id);
 ERROR:  key join from referencing relation c to referenced relation p cannot be proven
 LINE 4: JOIN filter_bool_child_test c FOR KEY (parent_id) -> p (id);
                                       ^
-DETAIL:  Referenced relation p is filtered before this key join inside view public.filter_bool_parent_test, so not every c (parent_id) value can be proven to have a matching p row.
+DETAIL:  Not every c (parent_id) value can be proven to have a matching p row. Referenced relation p is filtered before this key join. The relevant operation occurs inside view "public.filter_bool_parent_test".
 DROP VIEW filter_bool_child_test, filter_bool_parent_test,
           filter_bool_child_or, filter_bool_parent_or;
 DROP TABLE filter_bool_child, filter_bool_parent;
@@ -4309,7 +4309,7 @@ ORDER BY p.id;
 ERROR:  key join from referencing relation c to referenced relation p cannot be proven
 LINE 4: JOIN filter_case_child_v c FOR KEY (parent_id) -> p (id)
                                    ^
-DETAIL:  Referenced relation p is filtered before this key join inside view public.filter_case_parent_v, so not every c (parent_id) value can be proven to have a matching p row.
+DETAIL:  Not every c (parent_id) value can be proven to have a matching p row. Referenced relation p is filtered before this key join. The relevant operation occurs inside view "public.filter_case_parent_v".
 DROP VIEW filter_case_child_v, filter_case_parent_v;
 CREATE VIEW filter_minmax_parent_v AS
 SELECT id FROM filter_pseudo_parent WHERE id = LEAST(1, 2);
@@ -4322,7 +4322,7 @@ JOIN filter_minmax_child_v c FOR KEY (parent_id) -> p (id);
 ERROR:  key join from referencing relation c to referenced relation p cannot be proven
 LINE 4: JOIN filter_minmax_child_v c FOR KEY (parent_id) -> p (id);
                                      ^
-DETAIL:  Referenced relation p is filtered before this key join inside view public.filter_minmax_parent_v, so not every c (parent_id) value can be proven to have a matching p row.
+DETAIL:  Not every c (parent_id) value can be proven to have a matching p row. Referenced relation p is filtered before this key join. The relevant operation occurs inside view "public.filter_minmax_parent_v".
 DROP VIEW filter_minmax_child_v, filter_minmax_parent_v;
 CREATE VIEW filter_coalesce_parent_v AS
 SELECT id FROM filter_pseudo_parent WHERE id = COALESCE(1, 2);
@@ -4335,7 +4335,7 @@ JOIN filter_coalesce_child_v c FOR KEY (parent_id) -> p (id);
 ERROR:  key join from referencing relation c to referenced relation p cannot be proven
 LINE 4: JOIN filter_coalesce_child_v c FOR KEY (parent_id) -> p (id)...
                                        ^
-DETAIL:  Referenced relation p is filtered before this key join inside view public.filter_coalesce_parent_v, so not every c (parent_id) value can be proven to have a matching p row.
+DETAIL:  Not every c (parent_id) value can be proven to have a matching p row. Referenced relation p is filtered before this key join. The relevant operation occurs inside view "public.filter_coalesce_parent_v".
 DROP VIEW filter_coalesce_child_v, filter_coalesce_parent_v;
 CREATE VIEW filter_nullif_parent_v AS
 SELECT id FROM filter_pseudo_parent WHERE id = NULLIF(1, 2);
@@ -4348,7 +4348,7 @@ JOIN filter_nullif_child_v c FOR KEY (parent_id) -> p (id);
 ERROR:  key join from referencing relation c to referenced relation p cannot be proven
 LINE 4: JOIN filter_nullif_child_v c FOR KEY (parent_id) -> p (id);
                                      ^
-DETAIL:  Referenced relation p is filtered before this key join inside view public.filter_nullif_parent_v, so not every c (parent_id) value can be proven to have a matching p row.
+DETAIL:  Not every c (parent_id) value can be proven to have a matching p row. Referenced relation p is filtered before this key join. The relevant operation occurs inside view "public.filter_nullif_parent_v".
 DROP VIEW filter_nullif_child_v, filter_nullif_parent_v;
 DROP TABLE filter_pseudo_child, filter_pseudo_parent;
 -- FILTER5e: matched-filter propagation skips other same-relation keys
@@ -4523,7 +4523,7 @@ JOIN shadow_child_filter c FOR KEY (parent_id) -> p (id);
 ERROR:  key join from referencing relation c to referenced relation p cannot be proven
 LINE 3: JOIN shadow_child_filter c FOR KEY (parent_id) -> p (id);
                                    ^
-DETAIL:  Referenced relation p is filtered before this key join inside view key_join_shadow.shadow_parent_filter, so not every c (parent_id) value can be proven to have a matching p row.
+DETAIL:  Not every c (parent_id) value can be proven to have a matching p row. Referenced relation p is filtered before this key join. The relevant operation occurs inside view "key_join_shadow.shadow_parent_filter".
 DROP VIEW shadow_child_filter, shadow_parent_filter;
 DROP TABLE shadow_child, shadow_parent;
 DROP OPERATOR = (int4, int4);
@@ -4601,7 +4601,7 @@ JOIN filter_opfamily_child_big c FOR KEY (tenant_id, parent_id) -> p (tenant_id,
 ERROR:  key join from referencing relation c to referenced relation p cannot be proven
 LINE 3: JOIN filter_opfamily_child_big c FOR KEY (tenant_id, parent_...
                                          ^
-DETAIL:  Referenced relation p has a filter that is not matched by referencing relation c, so not every c (tenant_id, parent_id) value can be proven to have a matching p row.
+DETAIL:  Not every c (tenant_id, parent_id) value can be proven to have a matching p row. Referenced relation p has a filter that is not matched by referencing relation c.
 -- accepted, reason: both filters use the same compatible bigint = integer equality
 SELECT *
 FROM filter_opfamily_parent_int p
@@ -4619,7 +4619,7 @@ ORDER BY p.tenant_id, p.id;
 ERROR:  key join from referencing relation c to referenced relation p cannot be proven
 LINE 3: JOIN filter_opfamily_child_big c FOR KEY (tenant_id, parent_...
                                          ^
-DETAIL:  Referenced relation p is filtered before this key join inside view public.filter_opfamily_parent_right_big, so not every c (tenant_id, parent_id) value can be proven to have a matching p row.
+DETAIL:  Not every c (tenant_id, parent_id) value can be proven to have a matching p row. Referenced relation p is filtered before this key join. The relevant operation occurs inside view "public.filter_opfamily_parent_right_big".
 DROP VIEW filter_opfamily_parent_right_big, filter_opfamily_child_int,
           filter_opfamily_parent_int, filter_opfamily_parent_big,
           filter_opfamily_child_big,
@@ -4763,7 +4763,7 @@ JOIN filter_collation_child_nondet c FOR KEY (code) -> p (code);
 ERROR:  key join from referencing relation c to referenced relation p cannot be proven
 LINE 3: JOIN filter_collation_child_nondet c FOR KEY (code) -> p (co...
                                              ^
-DETAIL:  Referenced relation p is filtered before this key join inside view public.filter_collation_parent_nondet, so not every c (code) value can be proven to have a matching p row.
+DETAIL:  Not every c (code) value can be proven to have a matching p row. Referenced relation p is filtered before this key join. The relevant operation occurs inside view "public.filter_collation_parent_nondet".
 DROP VIEW filter_collation_child_nondet, filter_collation_parent_nondet;
 DROP COLLATION filter_collation_nondet;
 DROP VIEW filter_collation_child_exact, filter_collation_parent_exact,
@@ -4787,7 +4787,7 @@ CREATE VIEW rv_dep AS
 -- rejected, reason: replacement would invalidate dependent key-join view
 CREATE OR REPLACE VIEW rv_parent AS SELECT id FROM rv_base WHERE v > 0;
 ERROR:  key join from referencing relation rv_child to referenced relation rv_parent cannot be proven
-DETAIL:  Referenced relation rv_parent is filtered before this key join, so not every rv_child (ref) value can be proven to have a matching rv_parent row.
+DETAIL:  Not every rv_child (ref) value can be proven to have a matching rv_parent row. Referenced relation rv_parent is filtered before this key join.
 -- Replace rv_parent back to unfiltered — rv_dep becomes valid again
 CREATE OR REPLACE VIEW rv_parent AS SELECT id FROM rv_base;
 DROP VIEW rv_dep, rv_parent;
@@ -4820,7 +4820,7 @@ CREATE VIEW rv_multi_dep AS
 CREATE OR REPLACE VIEW rv_multi_parent_v AS
 SELECT tenant_id, id FROM rv_multi_parent WHERE v > 0;
 ERROR:  key join from referencing relation c to referenced relation p cannot be proven
-DETAIL:  Referenced relation p is filtered before this key join, so not every c (tenant_id, ref) value can be proven to have a matching p row.
+DETAIL:  Not every c (tenant_id, ref) value can be proven to have a matching p row. Referenced relation p is filtered before this key join.
 DROP VIEW rv_multi_dep, rv_multi_parent_v;
 DROP TABLE rv_multi_child, rv_multi_parent;
 -- Regression: no false positive when view has WHERE on referenced base table.
@@ -4931,7 +4931,7 @@ JOIN stored_cte_child c FOR KEY (pid) -> v (id);
 ERROR:  key join from referencing relation c to referenced relation v cannot be proven
 LINE 4: JOIN stored_cte_child c FOR KEY (pid) -> v (id);
                                 ^
-DETAIL:  Referenced relation v has a filter that is not matched by referencing relation c, so not every c (pid) value can be proven to have a matching v row.
+DETAIL:  Not every c (pid) value can be proven to have a matching v row. Referenced relation v has a filter that is not matched by referencing relation c.
 DROP VIEW stored_cte_shadow_v, stored_cte_parent_v;
 DROP TABLE stored_cte_child, stored_cte_one_child, stored_cte_parent;
 -- Revalidation must not re-store dependent _RETURN rules.  A replacement that
@@ -5103,7 +5103,7 @@ JOIN rv_refresh_dep d FOR KEY (tenant_id, id) <- r (tenant_id, parent_id);
 ERROR:  key join from referencing relation r to referenced relation d cannot be proven
 LINE 3: JOIN rv_refresh_dep d FOR KEY (tenant_id, id) <- r (tenant_i...
                               ^
-DETAIL:  Referenced relation d has a filter that is not matched by referencing relation r, so not every r (tenant_id, parent_id) value can be proven to have a matching d row.
+DETAIL:  Not every r (tenant_id, parent_id) value can be proven to have a matching d row. Referenced relation d has a filter that is not matched by referencing relation r.
 -- accepted, reason: referencing-side tenant filter matches the recomputed fact
 SELECT *
 FROM (SELECT * FROM rv_refresh_reader WHERE tenant_id = 1) r
@@ -5747,7 +5747,7 @@ END;
 CREATE OR REPLACE VIEW sqlbody_kj_view_parent_v AS
 SELECT id FROM sqlbody_kj_view_parent WHERE id = 1;
 ERROR:  key join from referencing relation c to referenced relation p cannot be proven
-DETAIL:  Referenced relation p has a filter that is not matched by referencing relation c, so not every c (parent_id) value can be proven to have a matching p row.
+DETAIL:  Not every c (parent_id) value can be proven to have a matching p row. Referenced relation p has a filter that is not matched by referencing relation c.
 SELECT * FROM sqlbody_kj_view_dep();
  child_id 
 ----------
@@ -5957,7 +5957,7 @@ JOIN output_unique_kj_grandchild gc
 ERROR:  key join from referencing relation gc to referenced relation q cannot be proven
 LINE 8:     FOR KEY (parent_id) -> q (parent_id);
             ^
-DETAIL:  A preceding join may duplicate rows from referenced relation q, so referenced columns q (parent_id) are not proven unique at this point in the query.
+DETAIL:  Referenced columns q (parent_id) are not proven unique. A preceding join may duplicate rows from referenced relation q.
 DROP TABLE output_unique_kj_grandchild,
            output_unique_kj_child,
            output_unique_kj_parent;
@@ -6019,7 +6019,7 @@ JOIN output_fk_null_ext_gp g FOR KEY (id) <- q (gp_id);
 ERROR:  key join from referencing relation q to referenced relation g cannot be proven
 LINE 7: JOIN output_fk_null_ext_gp g FOR KEY (id) <- q (gp_id);
                                      ^
-DETAIL:  Referencing columns q (gp_id) can be null because of a preceding outer join that can null-extend it, so this inner join could filter rows from q.
+DETAIL:  This inner join could filter rows from q. Referencing columns q (gp_id) can be null because a preceding outer join can null-extend the referencing side.
 DROP TABLE output_fk_null_ext_child,
            output_fk_null_ext_parent,
            output_fk_null_ext_gp;
@@ -6112,7 +6112,7 @@ JOIN output_unique_sqlbody_grandchild gc
 ERROR:  key join from referencing relation gc to referenced relation q cannot be proven
 LINE 8:     FOR KEY (parent_id) -> q (parent_id);
             ^
-DETAIL:  A preceding join may duplicate rows from referenced relation q, so referenced columns q (parent_id) are not proven unique at this point in the query.
+DETAIL:  Referenced columns q (parent_id) are not proven unique. A preceding join may duplicate rows from referenced relation q.
 DROP TABLE output_unique_sqlbody_grandchild,
            output_unique_sqlbody_child,
            output_unique_sqlbody_parent;
@@ -6227,7 +6227,7 @@ SELECT * FROM sqlbody_kj_old_dep();
 ERROR:  key join from referencing relation c to referenced relation p cannot be proven
 LINE 4:     JOIN sqlbody_kj_old_child c FOR KEY (parent_id) -> p (id...
                                         ^
-DETAIL:  Referenced relation p has a filter that is not matched by referencing relation c, so not every c (parent_id) value can be proven to have a matching p row.
+DETAIL:  Not every c (parent_id) value can be proven to have a matching p row. Referenced relation p has a filter that is not matched by referencing relation c.
 QUERY:  
     SELECT c.id AS child_id
     FROM sqlbody_kj_old_parent_v p
@@ -6265,7 +6265,7 @@ JOIN (SELECT id FROM key_join_wrong_coverage_other GROUP BY id) o
 ERROR:  key join from referencing relation c to referenced relation o cannot be proven
 LINE 5:     FOR KEY (id) <- c (parent_id);
             ^
-DETAIL:  Referenced relation o is not proven to contain every referenced key row, so not every c (parent_id) value can be proven to have a matching o row.
+DETAIL:  Not every c (parent_id) value can be proven to have a matching o row. Referenced relation o is not proven to contain every referenced key row.
 DROP TABLE key_join_wrong_coverage_child,
            key_join_wrong_coverage_other,
            key_join_wrong_coverage_parent;
@@ -6415,7 +6415,7 @@ ORDER BY q.parent_key, q.child_id, g.id;
 ERROR:  key join from referencing relation g to referenced relation q cannot be proven
 LINE 7: JOIN key_join_refuniq_grandchild g FOR KEY (parent_id) -> q ...
                                            ^
-DETAIL:  A preceding join may duplicate rows from referenced relation q, so referenced columns q (parent_key) are not proven unique at this point in the query.
+DETAIL:  Referenced columns q (parent_key) are not proven unique. A preceding join may duplicate rows from referenced relation q.
 DROP TABLE key_join_refuniq_grandchild,
            key_join_refuniq_child,
            key_join_refuniq_parent;
@@ -6598,7 +6598,7 @@ JOIN kd_child c FOR KEY (parent_id) -> p (id);
 ERROR:  key join from referencing relation c to referenced relation p cannot be proven
 LINE 3: JOIN kd_child c FOR KEY (parent_id) -> p (id);
                         ^
-DETAIL:  Referenced relation p may lose rows before this key join because of HAVING, LIMIT, OFFSET, FOR UPDATE or TABLESAMPLE, so not every c (parent_id) value can be proven to have a matching p row.
+DETAIL:  Not every c (parent_id) value can be proven to have a matching p row. Referenced relation p may lose rows before this key join because of HAVING, LIMIT, OFFSET, FOR UPDATE or TABLESAMPLE.
 -- Inactivated by HAVING: the row-removing clause is named.
 SELECT *
 FROM (SELECT id FROM kd_parent GROUP BY id HAVING count(*) > 0) p
@@ -6606,7 +6606,7 @@ JOIN kd_child c FOR KEY (parent_id) -> p (id);
 ERROR:  key join from referencing relation c to referenced relation p cannot be proven
 LINE 3: JOIN kd_child c FOR KEY (parent_id) -> p (id);
                         ^
-DETAIL:  Referenced relation p may lose rows before this key join because of HAVING, LIMIT, OFFSET, FOR UPDATE or TABLESAMPLE, so not every c (parent_id) value can be proven to have a matching p row.
+DETAIL:  Not every c (parent_id) value can be proven to have a matching p row. Referenced relation p may lose rows before this key join because of HAVING, LIMIT, OFFSET, FOR UPDATE or TABLESAMPLE.
 -- Inactivated uniqueness: the referenced surface may fan out.
 SELECT *
 FROM (
@@ -6618,7 +6618,7 @@ JOIN kd_child c FOR KEY (parent_id) -> q (id);
 ERROR:  key join from referencing relation c to referenced relation q cannot be proven
 LINE 7: JOIN kd_child c FOR KEY (parent_id) -> q (id);
                         ^
-DETAIL:  A preceding join may duplicate rows from referenced relation q, so referenced columns q (id) are not proven unique at this point in the query.
+DETAIL:  Referenced columns q (id) are not proven unique. A preceding join may duplicate rows from referenced relation q.
 -- Inactivated row coverage: the referenced surface may lose rows.
 SELECT *
 FROM (
@@ -6630,7 +6630,7 @@ JOIN kd_child c FOR KEY (parent_id) -> q (id);
 ERROR:  key join from referencing relation c to referenced relation q cannot be proven
 LINE 7: JOIN kd_child c FOR KEY (parent_id) -> q (id);
                         ^
-DETAIL:  Referenced relation q may lose rows before this key join because of a preceding join, so not every c (parent_id) value can be proven to have a matching q row.
+DETAIL:  Not every c (parent_id) value can be proven to have a matching q row. Referenced relation q may lose rows before this key join because of a preceding join.
 -- Inactivated row coverage inside a view: name the view with the preceding join.
 CREATE VIEW kd_parent_joined AS
 SELECT p.id
@@ -6642,7 +6642,7 @@ JOIN kd_child c FOR KEY (parent_id) -> p (id);
 ERROR:  key join from referencing relation c to referenced relation p cannot be proven
 LINE 3: JOIN kd_child c FOR KEY (parent_id) -> p (id);
                         ^
-DETAIL:  Referenced relation p may lose rows before this key join because of a preceding join inside view key_join_diag.kd_parent_joined, so not every c (parent_id) value can be proven to have a matching p row.
+DETAIL:  Not every c (parent_id) value can be proven to have a matching p row. Referenced relation p may lose rows before this key join because of a preceding join. The relevant operation occurs inside view "key_join_diag.kd_parent_joined".
 DROP VIEW kd_parent_joined;
 -- Inactivated inside a view: the message names the view to inspect.
 CREATE VIEW kd_parent_limited AS SELECT id FROM kd_parent LIMIT 1;
@@ -6652,7 +6652,7 @@ JOIN kd_child c FOR KEY (parent_id) -> p (id);
 ERROR:  key join from referencing relation c to referenced relation p cannot be proven
 LINE 3: JOIN kd_child c FOR KEY (parent_id) -> p (id);
                         ^
-DETAIL:  Referenced relation p may lose rows before this key join because of HAVING, LIMIT, OFFSET, FOR UPDATE or TABLESAMPLE inside view key_join_diag.kd_parent_limited, so not every c (parent_id) value can be proven to have a matching p row.
+DETAIL:  Not every c (parent_id) value can be proven to have a matching p row. Referenced relation p may lose rows before this key join because of HAVING, LIMIT, OFFSET, FOR UPDATE or TABLESAMPLE. The relevant operation occurs inside view "key_join_diag.kd_parent_limited".
 DROP VIEW kd_parent_limited;
 RESET search_path;
 DROP SCHEMA key_join_diag CASCADE;

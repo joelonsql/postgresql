@@ -151,7 +151,7 @@ JOIN tenant_customers c FOR KEY (tenant_id, id) <- o (tenant_id, customer_id);
 ERROR:  key join from referencing relation o to referenced relation c cannot be proven
 LINE 3: JOIN tenant_customers c FOR KEY (tenant_id, id) <- o (tenant...
                                 ^
-DETAIL:  Referenced relation c has a filter that is not matched by referencing relation o, so not every o (tenant_id, customer_id) value can be proven to have a matching c row.
+DETAIL:  Not every o (tenant_id, customer_id) value can be proven to have a matching c row. Referenced relation c has a filter that is not matched by referencing relation o.
 -- M2b: Join-local FILTER on the referencing key does not supply operand
 -- matched-filter evidence -- rejected.
 SELECT o.id, c.name
@@ -161,7 +161,7 @@ FILTER (WHERE o.tenant_id = current_setting('mf.tenant')::int);
 ERROR:  key join from referencing relation o to referenced relation c cannot be proven
 LINE 3: JOIN tenant_customers c FOR KEY (tenant_id, id) <- o (tenant...
                                 ^
-DETAIL:  Referenced relation c has a filter that is not matched by referencing relation o, so not every o (tenant_id, customer_id) value can be proven to have a matching c row.
+DETAIL:  Not every o (tenant_id, customer_id) value can be proven to have a matching c row. Referenced relation c has a filter that is not matched by referencing relation o.
 -- M2c: Join-local FILTER on the referenced key also does not supply operand
 -- matched-filter evidence -- rejected.
 SELECT o.id, c.name
@@ -171,7 +171,7 @@ FILTER (WHERE c.tenant_id = current_setting('mf.tenant')::int);
 ERROR:  key join from referencing relation o to referenced relation c cannot be proven
 LINE 3: JOIN tenant_customers c FOR KEY (tenant_id, id) <- o (tenant...
                                 ^
-DETAIL:  Referenced relation c has a filter that is not matched by referencing relation o, so not every o (tenant_id, customer_id) value can be proven to have a matching c row.
+DETAIL:  Not every o (tenant_id, customer_id) value can be proven to have a matching c row. Referenced relation c has a filter that is not matched by referencing relation o.
 -- M3: Different filter expressions (different constants) -- rejected, reason: referenced and referencing filters are not equivalent
 CREATE VIEW tenant_customers_2 AS
     SELECT * FROM customers WHERE tenant_id = 2;
@@ -184,7 +184,7 @@ JOIN tenant_customers_2 c FOR KEY (tenant_id, id) <- o (tenant_id, customer_id);
 ERROR:  key join from referencing relation o to referenced relation c cannot be proven
 LINE 4: JOIN tenant_customers_2 c FOR KEY (tenant_id, id) <- o (tena...
                                   ^
-DETAIL:  Referenced relation c has a filter that is not matched by referencing relation o, so not every o (tenant_id, customer_id) value can be proven to have a matching c row.
+DETAIL:  Not every o (tenant_id, customer_id) value can be proven to have a matching c row. Referenced relation c has a filter that is not matched by referencing relation o.
 DROP VIEW tenant_customers_2, tenant_orders_1;
 -- M4: Composite filter on both sides matching FK composite columns -- accepted
 CREATE VIEW c_pinpoint AS
@@ -230,7 +230,7 @@ JOIN active_customers c FOR KEY (tenant_id, id) <- o (tenant_id, customer_id);
 ERROR:  key join from referencing relation o to referenced relation c cannot be proven
 LINE 4: JOIN active_customers c FOR KEY (tenant_id, id) <- o (tenant...
                                 ^
-DETAIL:  Referenced relation c is filtered before this key join inside view mf.active_customers, so not every o (tenant_id, customer_id) value can be proven to have a matching c row.
+DETAIL:  Not every o (tenant_id, customer_id) value can be proven to have a matching c row. Referenced relation c is filtered before this key join. The relevant operation occurs inside view "mf.active_customers".
 DROP VIEW active_customers, any_orders;
 -- M6b: OR on the referenced side -- rejected, reason: OR is not a safe
 -- key-filter conjunct for referenced-side rowCoverage.
@@ -244,7 +244,7 @@ JOIN c_or_referenced c FOR KEY (tenant_id, id) <- o (tenant_id, customer_id);
 ERROR:  key join from referencing relation o to referenced relation c cannot be proven
 LINE 4: JOIN c_or_referenced c FOR KEY (tenant_id, id) <- o (tenant_...
                                ^
-DETAIL:  Referenced relation c is filtered before this key join inside view mf.c_or_referenced, so not every o (tenant_id, customer_id) value can be proven to have a matching c row.
+DETAIL:  Not every o (tenant_id, customer_id) value can be proven to have a matching c row. Referenced relation c is filtered before this key join. The relevant operation occurs inside view "mf.c_or_referenced".
 DROP VIEW c_or_referenced;
 -- M6c: OR on the referencing side -- rejected, reason: the referencing
 -- FK fact must not retain tenant_id evidence from inside an OR.
@@ -258,7 +258,7 @@ JOIN tenant_customers c FOR KEY (tenant_id, id) <- o (tenant_id, customer_id);
 ERROR:  key join from referencing relation o to referenced relation c cannot be proven
 LINE 4: JOIN tenant_customers c FOR KEY (tenant_id, id) <- o (tenant...
                                 ^
-DETAIL:  Referenced relation c has a filter that is not matched by referencing relation o, so not every o (tenant_id, customer_id) value can be proven to have a matching c row.
+DETAIL:  Not every o (tenant_id, customer_id) value can be proven to have a matching c row. Referenced relation c has a filter that is not matched by referencing relation o.
 DROP VIEW o_or_referencing;
 -- M6d: Matching-looking OR on both sides -- rejected, reason: OR is not a
 -- safe matched-filter conjunct even when the same shape appears on both sides.
@@ -275,7 +275,7 @@ JOIN c_or_both c FOR KEY (tenant_id, id) <- o (tenant_id, customer_id);
 ERROR:  key join from referencing relation o to referenced relation c cannot be proven
 LINE 4: JOIN c_or_both c FOR KEY (tenant_id, id) <- o (tenant_id, cu...
                          ^
-DETAIL:  Referenced relation c is filtered before this key join inside view mf.c_or_both, so not every o (tenant_id, customer_id) value can be proven to have a matching c row.
+DETAIL:  Not every o (tenant_id, customer_id) value can be proven to have a matching c row. Referenced relation c is filtered before this key join. The relevant operation occurs inside view "mf.c_or_both".
 DROP VIEW o_or_both, c_or_both;
 -- M6e: A disjunction nested under a top-level AND is still not a
 -- conjunct the proof system can retain, even when both sides have the
@@ -295,7 +295,7 @@ JOIN c_or_nested c FOR KEY (tenant_id, id) <- o (tenant_id, customer_id);
 ERROR:  key join from referencing relation o to referenced relation c cannot be proven
 LINE 4: JOIN c_or_nested c FOR KEY (tenant_id, id) <- o (tenant_id, ...
                            ^
-DETAIL:  Referenced relation c is filtered before this key join inside view mf.c_or_nested, so not every o (tenant_id, customer_id) value can be proven to have a matching c row.
+DETAIL:  Not every o (tenant_id, customer_id) value can be proven to have a matching c row. Referenced relation c is filtered before this key join. The relevant operation occurs inside view "mf.c_or_nested".
 DROP VIEW o_or_nested, c_or_nested;
 -- M7: Two-layer view, filter in the inner layer -- accepted
 CREATE VIEW c_inner AS
@@ -366,7 +366,7 @@ JOIN strict_customers c FOR KEY (tenant_id, id) <- o (tenant_id, customer_id);
 ERROR:  key join from referencing relation o to referenced relation c cannot be proven
 LINE 4: JOIN strict_customers c FOR KEY (tenant_id, id) <- o (tenant...
                                 ^
-DETAIL:  Referenced relation c is filtered before this key join inside view mf.strict_customers, so not every o (tenant_id, customer_id) value can be proven to have a matching c row.
+DETAIL:  Not every o (tenant_id, customer_id) value can be proven to have a matching c row. Referenced relation c is filtered before this key join. The relevant operation occurs inside view "mf.strict_customers".
 DROP VIEW strict_customers;
 -- M11: System column on referenced side -- rejected, reason: system-column filters are not matched key filters (would have
 -- crashed before the varattno > 0 guard, since bms_is_member errors on
@@ -382,7 +382,7 @@ JOIN c_sys c FOR KEY (tenant_id, id) <- o (tenant_id, customer_id);
 ERROR:  key join from referencing relation o to referenced relation c cannot be proven
 LINE 4: JOIN c_sys c FOR KEY (tenant_id, id) <- o (tenant_id, custom...
                      ^
-DETAIL:  Referenced relation c is filtered before this key join inside view mf.c_sys, so not every o (tenant_id, customer_id) value can be proven to have a matching c row.
+DETAIL:  Not every o (tenant_id, customer_id) value can be proven to have a matching c row. Referenced relation c is filtered before this key join. The relevant operation occurs inside view "mf.c_sys".
 DROP VIEW c_sys, o_sys;
 -- M12: Parameterised filters are not retained as matched-filter evidence.
 PREPARE mf_p AS
@@ -395,7 +395,7 @@ PREPARE mf_p AS
 ERROR:  key join from referencing relation o to referenced relation c cannot be proven
 LINE 6:         FOR KEY (tenant_id, id) <- o (tenant_id, customer_id...
                 ^
-DETAIL:  Referenced relation c is filtered before this key join, so not every o (tenant_id, customer_id) value can be proven to have a matching c row.
+DETAIL:  Not every o (tenant_id, customer_id) value can be proven to have a matching c row. Referenced relation c is filtered before this key join.
 -- M12b: Asymmetric parameterised filter — referenced side has $1, the
 -- referencing side has a constant value → rejected for the same reason.
 PREPARE mf_p_bad AS
@@ -407,7 +407,7 @@ PREPARE mf_p_bad AS
 ERROR:  key join from referencing relation o to referenced relation c cannot be proven
 LINE 6:         FOR KEY (tenant_id, id) <- o (tenant_id, customer_id...
                 ^
-DETAIL:  Referenced relation c is filtered before this key join, so not every o (tenant_id, customer_id) value can be proven to have a matching c row.
+DETAIL:  Not every o (tenant_id, customer_id) value can be proven to have a matching c row. Referenced relation c is filtered before this key join.
 -- M12c: Proof placeholders must not collide with real SQL parameters.
 -- The referenced-side $1 used to be remapped as if it were the tenant_id
 -- key placeholder, making customer_id = tenant_id look like it matched
@@ -436,7 +436,7 @@ PREPARE mf_p_collision(int, int) AS
 ERROR:  key join from referencing relation o to referenced relation c cannot be proven
 LINE 6:         FOR KEY (tenant_id, id) <- o (tenant_id, customer_id...
                 ^
-DETAIL:  Referenced relation c is filtered before this key join, so not every o (tenant_id, customer_id) value can be proven to have a matching c row.
+DETAIL:  Not every o (tenant_id, customer_id) value can be proven to have a matching c row. Referenced relation c is filtered before this key join.
 DROP TABLE param_orders, param_customers;
 -- M13: current_user inside a STABLE-driven filter on a column that IS
 -- in the FK -- accepted. Adds a tenant_role column to both sides that
@@ -497,7 +497,7 @@ ORDER BY o.id;
 ERROR:  key join from referencing relation o to referenced relation c cannot be proven
 LINE 4: JOIN c_ineq c FOR KEY (tenant_id, id) <- o (tenant_id, custo...
                       ^
-DETAIL:  Referenced relation c is filtered before this key join inside view mf.c_ineq, so not every o (tenant_id, customer_id) value can be proven to have a matching c row.
+DETAIL:  Not every o (tenant_id, customer_id) value can be proven to have a matching c row. Referenced relation c is filtered before this key join. The relevant operation occurs inside view "mf.c_ineq".
 DROP VIEW c_ineq, o_ineq;
 -- M15: Nested key join through conditionally row-preserved derived tables.
 -- The inner key join (payments → orders) accepts under the
@@ -608,7 +608,7 @@ JOIN c_outer_id c FOR KEY (tenant_id, id) <- o (tenant_id, customer_id);
 ERROR:  key join from referencing relation o to referenced relation c cannot be proven
 LINE 4: JOIN c_outer_id c FOR KEY (tenant_id, id) <- o (tenant_id, c...
                           ^
-DETAIL:  Referenced relation c has a filter that is not matched by referencing relation o, so not every o (tenant_id, customer_id) value can be proven to have a matching c row.
+DETAIL:  Not every o (tenant_id, customer_id) value can be proven to have a matching c row. Referenced relation c has a filter that is not matched by referencing relation o.
 DROP VIEW o_mismatch, c_outer_id, c_inner_tenant;
 -- M19: Multi-layer view with LIMIT at the outer layer — hard disqualifier
 -- at the absorbing layer, drops referenced-side rowCoverage entirely.
@@ -623,7 +623,7 @@ JOIN c_outer_lim c FOR KEY (tenant_id, id) <- o (tenant_id, customer_id);
 ERROR:  key join from referencing relation o to referenced relation c cannot be proven
 LINE 4: JOIN c_outer_lim c FOR KEY (tenant_id, id) <- o (tenant_id, ...
                            ^
-DETAIL:  Referenced relation c may lose rows before this key join because of HAVING, LIMIT, OFFSET, FOR UPDATE or TABLESAMPLE inside view mf.c_outer_lim, so not every o (tenant_id, customer_id) value can be proven to have a matching c row.
+DETAIL:  Not every o (tenant_id, customer_id) value can be proven to have a matching c row. Referenced relation c may lose rows before this key join because of HAVING, LIMIT, OFFSET, FOR UPDATE or TABLESAMPLE. The relevant operation occurs inside view "mf.c_outer_lim".
 DROP VIEW c_outer_lim, c_inner_for_lim;
 -- M20: Multi-layer view with a SubLink in the outer WHERE — the conjunct
 -- cannot be represented as a safe key conjunct after Var translation, so the
@@ -639,7 +639,7 @@ JOIN c_outer_sub c FOR KEY (tenant_id, id) <- o (tenant_id, customer_id);
 ERROR:  key join from referencing relation o to referenced relation c cannot be proven
 LINE 4: JOIN c_outer_sub c FOR KEY (tenant_id, id) <- o (tenant_id, ...
                            ^
-DETAIL:  Referenced relation c is filtered before this key join inside view mf.c_outer_sub, so not every o (tenant_id, customer_id) value can be proven to have a matching c row.
+DETAIL:  Not every o (tenant_id, customer_id) value can be proven to have a matching c row. Referenced relation c is filtered before this key join. The relevant operation occurs inside view "mf.c_outer_sub".
 DROP VIEW c_outer_sub, c_inner_for_sub;
 -- M21: NextValueExpr (volatile, sequence-accessing) in a referenced-side
 -- WHERE.  The capture-time contain_volatile_functions check flags this and
@@ -683,7 +683,7 @@ JOIN op_customers c FOR KEY (tenant_id, id) <- o (tenant_id, customer_id);
 ERROR:  key join from referencing relation o to referenced relation c cannot be proven
 LINE 4: JOIN op_customers c FOR KEY (tenant_id, id) <- o (tenant_id,...
                             ^
-DETAIL:  Referenced relation c is filtered before this key join inside view mf.op_customers, so not every o (tenant_id, customer_id) value can be proven to have a matching c row.
+DETAIL:  Not every o (tenant_id, customer_id) value can be proven to have a matching c row. Referenced relation c is filtered before this key join. The relevant operation occurs inside view "mf.op_customers".
 -- M21c: Propagated user-defined equality evidence is still rejected at the
 -- consuming key join.
 CREATE TABLE op_payments (
@@ -704,7 +704,7 @@ JOIN op_customers c FOR KEY (tenant_id, id) <- o (tenant_id, customer_id);
 ERROR:  key join from referencing relation o to referenced relation c cannot be proven
 LINE 5: JOIN op_customers c FOR KEY (tenant_id, id) <- o (tenant_id,...
                             ^
-DETAIL:  Referenced relation c is filtered before this key join inside view mf.op_customers, so not every o (tenant_id, customer_id) value can be proven to have a matching c row.
+DETAIL:  Not every o (tenant_id, customer_id) value can be proven to have a matching c row. Referenced relation c is filtered before this key join. The relevant operation occurs inside view "mf.op_customers".
 DROP VIEW op_payments_v, op_orders, op_customers;
 DROP TABLE op_payments;
 DROP OPERATOR mf.= (integer, integer);
@@ -789,7 +789,7 @@ ORDER BY o.id;
 ERROR:  key join from referencing relation o to referenced relation c cannot be proven
 LINE 4: JOIN c_types c FOR KEY (tenant_id, id) <- o (tenant_id, cust...
                        ^
-DETAIL:  Referenced relation c is filtered before this key join inside view mf.c_types, so not every o (tenant_id, customer_id) value can be proven to have a matching c row.
+DETAIL:  Not every o (tenant_id, customer_id) value can be proven to have a matching c row. Referenced relation c is filtered before this key join. The relevant operation occurs inside view "mf.c_types".
 DROP VIEW o_types, c_types;
 -- M25: Key-column transformations -- rejected, reason: immutable functions can
 -- distinguish values that the FK equality operator treats as equal, so a
@@ -807,7 +807,7 @@ JOIN c_transformed c FOR KEY (tenant_id, id) <- o (tenant_id, customer_id);
 ERROR:  key join from referencing relation o to referenced relation c cannot be proven
 LINE 4: JOIN c_transformed c FOR KEY (tenant_id, id) <- o (tenant_id...
                              ^
-DETAIL:  Referenced relation c is filtered before this key join inside view mf.c_transformed, so not every o (tenant_id, customer_id) value can be proven to have a matching c row.
+DETAIL:  Not every o (tenant_id, customer_id) value can be proven to have a matching c row. Referenced relation c is filtered before this key join. The relevant operation occurs inside view "mf.c_transformed".
 DROP VIEW o_transformed, c_transformed;
 -- M26: Numeric transformed-key counterexample -- rejected, reason: PostgreSQL
 -- numeric equality treats 1.0 and 1.00 as equal, but scale(numeric) sees
@@ -833,7 +833,7 @@ JOIN numeric_parent_scale2 p FOR KEY (id) <- c (parent_id);
 ERROR:  key join from referencing relation c to referenced relation p cannot be proven
 LINE 4: JOIN numeric_parent_scale2 p FOR KEY (id) <- c (parent_id);
                                      ^
-DETAIL:  Referenced relation p is filtered before this key join inside view mf.numeric_parent_scale2, so not every c (parent_id) value can be proven to have a matching p row.
+DETAIL:  Not every c (parent_id) value can be proven to have a matching p row. Referenced relation p is filtered before this key join. The relevant operation occurs inside view "mf.numeric_parent_scale2".
 SELECT id, parent_id FROM numeric_child_scale2;
  id | parent_id 
 ----+-----------
@@ -857,7 +857,7 @@ JOIN numeric_parent_text p FOR KEY (id) <- c (parent_id);
 ERROR:  key join from referencing relation c to referenced relation p cannot be proven
 LINE 4: JOIN numeric_parent_text p FOR KEY (id) <- c (parent_id);
                                    ^
-DETAIL:  Referenced relation p is filtered before this key join inside view mf.numeric_parent_text, so not every c (parent_id) value can be proven to have a matching p row.
+DETAIL:  Not every c (parent_id) value can be proven to have a matching p row. Referenced relation p is filtered before this key join. The relevant operation occurs inside view "mf.numeric_parent_text".
 DROP VIEW numeric_child_text, numeric_parent_text;
 DROP VIEW numeric_child_scale2, numeric_parent_scale2;
 DROP TABLE numeric_child, numeric_parent;
@@ -902,7 +902,7 @@ JOIN numeric_op_parent_v p FOR KEY (id) <- c (parent_id);
 ERROR:  key join from referencing relation c to referenced relation p cannot be proven
 LINE 4: JOIN numeric_op_parent_v p FOR KEY (id) <- c (parent_id);
                                    ^
-DETAIL:  Referenced relation p is filtered before this key join inside view mf.numeric_op_parent_v, so not every c (parent_id) value can be proven to have a matching p row.
+DETAIL:  Not every c (parent_id) value can be proven to have a matching p row. Referenced relation p is filtered before this key join. The relevant operation occurs inside view "mf.numeric_op_parent_v".
 DROP VIEW numeric_op_child_v, numeric_op_parent_v;
 DROP TABLE numeric_op_child, numeric_op_parent;
 DROP OPERATOR mf.= (numeric, numeric);
@@ -926,7 +926,7 @@ JOIN c_unsupported c FOR KEY (tenant_id, id) <- o (tenant_id, customer_id);
 ERROR:  key join from referencing relation o to referenced relation c cannot be proven
 LINE 4: JOIN c_unsupported c FOR KEY (tenant_id, id) <- o (tenant_id...
                              ^
-DETAIL:  Referenced relation c is filtered before this key join inside view mf.c_unsupported, so not every o (tenant_id, customer_id) value can be proven to have a matching c row.
+DETAIL:  Not every o (tenant_id, customer_id) value can be proven to have a matching c row. Referenced relation c is filtered before this key join. The relevant operation occurs inside view "mf.c_unsupported".
 DROP VIEW o_unsupported, c_unsupported;
 -- M28: Filter canonicalization must be RTE-aware -- rejected, reason:
 -- the filter is on the child side's id column, not on the projected parent
@@ -961,7 +961,7 @@ JOIN rte_filter_review_10 r FOR KEY (parent_id) -> q (id);
 ERROR:  key join from referencing relation r to referenced relation q cannot be proven
 LINE 9: JOIN rte_filter_review_10 r FOR KEY (parent_id) -> q (id);
                                     ^
-DETAIL:  Referenced relation q is filtered before this key join, so not every r (parent_id) value can be proven to have a matching q row.
+DETAIL:  Not every r (parent_id) value can be proven to have a matching q row. Referenced relation q is filtered before this key join.
 DROP VIEW rte_filter_review_10;
 DROP TABLE rte_filter_review, rte_filter_child, rte_filter_parent;
 -- M29: Referencing-side filter evidence must not propagate to an
@@ -995,7 +995,7 @@ JOIN outer_filter_root_1 r FOR KEY (id) <- q (id);
 ERROR:  key join from referencing relation q to referenced relation r cannot be proven
 LINE 8: JOIN outer_filter_root_1 r FOR KEY (id) <- q (id);
                                    ^
-DETAIL:  Referenced relation r has a filter that is not matched by referencing relation q, so not every q (id) value can be proven to have a matching r row.
+DETAIL:  Not every q (id) value can be proven to have a matching r row. Referenced relation r has a filter that is not matched by referencing relation q.
 SELECT q.id
 FROM (
     SELECT p.id
@@ -1007,7 +1007,7 @@ JOIN outer_filter_root_1 r FOR KEY (id) <- q (id);
 ERROR:  key join from referencing relation q to referenced relation r cannot be proven
 LINE 8: JOIN outer_filter_root_1 r FOR KEY (id) <- q (id);
                                    ^
-DETAIL:  Referenced relation r has a filter that is not matched by referencing relation q, so not every q (id) value can be proven to have a matching r row.
+DETAIL:  Not every q (id) value can be proven to have a matching r row. Referenced relation r has a filter that is not matched by referencing relation q.
 SELECT q.id
 FROM (
     SELECT p.id
@@ -1038,7 +1038,7 @@ JOIN c_sublink c FOR KEY (tenant_id, id) <- o (tenant_id, customer_id);
 ERROR:  key join from referencing relation o to referenced relation c cannot be proven
 LINE 4: JOIN c_sublink c FOR KEY (tenant_id, id) <- o (tenant_id, cu...
                          ^
-DETAIL:  Referenced relation c is filtered before this key join inside view mf.c_sublink, so not every o (tenant_id, customer_id) value can be proven to have a matching c row.
+DETAIL:  Not every o (tenant_id, customer_id) value can be proven to have a matching c row. Referenced relation c is filtered before this key join. The relevant operation occurs inside view "mf.c_sublink".
 DROP VIEW o_sublink, c_sublink;
 -- M31: Cross-type FK key joins are rejected by key-join proof.  PostgreSQL
 -- accepts the FK, but key join does not compute proof facts from it.
