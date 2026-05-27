@@ -398,8 +398,8 @@ transformAndValidateKeyJoin(ParseState *pstate, JoinExpr *j,
 	List	   *ref_alias_attnums = NIL;
 	List	   *referencing_vars = NIL;
 	List	   *referenced_vars = NIL;
-	KeyJoinFactContext fk_context;
-	KeyJoinFactContext pk_context;
+	KeyJoinFactContext fk_context = {.pstate = pstate};
+	KeyJoinFactContext pk_context = {.pstate = pstate};
 	KeyJoinMatch match;
 	KeyJoinNode *key_join;
 	int			ncols = list_length(key_clause->localCols);
@@ -468,13 +468,8 @@ transformAndValidateKeyJoin(ParseState *pstate, JoinExpr *j,
 								  local_is_referencing ? refvar : localvar);
 	}
 
-	// XXX - Should we really use memset or C99 feature to zero init structs?
-	memset(&fk_context, 0, sizeof(fk_context));
-	fk_context.pstate = pstate;
 	ensure_key_join_surface_facts(&fk_context, fk_surface->p_rte);
 
-	memset(&pk_context, 0, sizeof(pk_context));
-	pk_context.pstate = pstate;
 	ensure_key_join_surface_facts(&pk_context, pk_surface->p_rte);
 
 	/*
@@ -535,8 +530,7 @@ transformAndValidateKeyJoin(ParseState *pstate, JoinExpr *j,
  * Called by:
  *		transformAndValidateKeyJoin
  */
-// XXX - Remove all "Called by:" in all comments
- static KeyJoinColumn *
+static KeyJoinColumn *
 resolve_columns_on_nsitem(ParseState *pstate,
 						  ParseNamespaceItem *lookup,
 						  ParseNamespaceItem *surface, List *names,
@@ -678,7 +672,7 @@ build_key_join_quals(List *referenced_args,
 	Assert(locations == NIL ||
 		   list_length(locations) == list_length(eqoperators));
 
-	lcloc = list_head(locations); // XXX - This looks suspicious
+	lcloc = list_head(locations);
 	forfive(lcrpk, referenced_args, lcrfk, referencing_args,
 			lcop, eqoperators, lctype, eqtypes, lctypmod, eqtypmods)
 	{
@@ -695,7 +689,7 @@ build_key_join_quals(List *referenced_args,
 #endif
 		OpExpr	   *result;
 
-		if (lcloc != NULL)
+		if (locations != NIL)
 		{
 			location = lfirst_int(lcloc);
 			lcloc = lnext(locations, lcloc);
@@ -812,6 +806,7 @@ find_key_join_match(RangeTblEntry *referencing_rte,
 
 		if (fkfact->kind != KJF_FOREIGN_KEY)
 			continue;
+		Assert(fkfact->active);
 
 		Assert(list_length(fkfact->keyPositions) ==
 			   list_length(fkfact->baseAttnums));
@@ -823,7 +818,6 @@ find_key_join_match(RangeTblEntry *referencing_rte,
 									   fkfact->baseAttnums,
 									   &referencing_base, NULL))
 			continue;
-		Assert(fkfact->active); // XXX - shouldn't this be before select_key_position_parts?
 		if (reached < REQ_FK)
 			reached = REQ_FK;
 
@@ -846,6 +840,7 @@ find_key_join_match(RangeTblEntry *referencing_rte,
 										   &unique_base,
 										   &unique_key_positions))
 				continue;
+			Assert(int_lists_same_members(uniqfact->baseAttnums, unique_base));
 			if (!uniqfact->active)
 			{
 				if (inactive_unique == NULL)
@@ -853,7 +848,6 @@ find_key_join_match(RangeTblEntry *referencing_rte,
 				continue;
 			}
 			catalog_unique = OidIsValid(uniqfact->relid);
-			Assert(int_lists_same_members(uniqfact->baseAttnums, unique_base)); // XXX - Should be moved earlier?
 
 			/*
 			 * A catalog-backed unique fact has to be on the same relation the
