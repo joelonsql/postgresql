@@ -1085,7 +1085,8 @@ typedef struct KeyJoinProofDependency
  * KeyJoinKeyPosition -
  *	  position of a key participating in a key-join proof
  *
- * XXX: Explain what a position is and why multiple attnums better
+ * A position may list multiple attnums when projection exposes the same
+ * key component through multiple direct aliases.
  *
  * (typeOid, typmod, collationOid) is the surface Var type the position
  * exposes; the prover asserts it matches the corresponding Var's vartype,
