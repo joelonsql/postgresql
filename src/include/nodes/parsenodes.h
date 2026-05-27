@@ -1066,41 +1066,34 @@ typedef struct GraphElementPattern
 
 /*
  * KeyJoinProofDependency -
- *	  one catalog object that a key-join proof depends on
+ *	  catalog object that a key-join proof depends on
  *
  * ObjectAddress-like, but a Node so it can be embedded in query trees and
  * walked by find_expr_references_walker() to record pg_depend entries for
- * stored parse trees.  ObjectAddress itself is not a Node.  Key-join proofs
- * depend only on whole objects (relations, constraints, operators, and
- * functions), so there is no objectSubId field.
+ * stored parse trees.  Key-join proofs depend only on whole objects
+ * (relations, constraints, operators, and functions), so there is no
+ * objectSubId field.
  */
 typedef struct KeyJoinProofDependency
 {
 	NodeTag		type;
-	Oid			classId;		/* OID of the system catalog */
-	Oid			objectId;		/* OID of the depended-upon object */
+	Oid			classId;
+	Oid			objectId;
 } KeyJoinProofDependency;
 
 /*
  * KeyJoinKeyPosition -
- *	  one position of a key participating in a key-join proof
+ *	  position of a key participating in a key-join proof
  *
- * A key may span multiple positions; each position records the attnums that
- * form it plus the type identities used by the prover.
+ * XXX: Explain what a position is and why multiple attnums better
  *
- * (typeOid, typmod) is the surface Var type the position exposes; the prover
- * asserts it matches the corresponding Var's vartype/vartypmod exactly.
+ * (typeOid, typmod, collationOid) is the surface Var type the position
+ * exposes; the prover asserts it matches the corresponding Var's vartype,
+ * vartypmod and collationOid exactly.
  *
  * (eqTypeOid, eqTypmod, eqOperator) describes the equality operator used at
  * this position and the type it takes as input; these may differ from the
- * surface type when equality is run on a binary-compatible type.
- *
- * collationOid is shared by both: the prover asserts it matches the Var's
- * varcollid and also uses it as the equality operator's input collation.
- *
- * KeyJoinKeyPosition appears only inside KeyJoinFact, which is transient
- * parser scratch attached to RangeTblEntry.keyJoinFacts; it is never
- * written into stored query trees.
+ * surface type when equality is run on a domain.
  */
 typedef struct KeyJoinKeyPosition
 {
@@ -1110,8 +1103,6 @@ typedef struct KeyJoinKeyPosition
 	/* Surface Var type the position exposes: */
 	Oid			typeOid;
 	int32		typmod;
-
-	/* Shared by surface type and equality operator inputs: */
 	Oid			collationOid;
 
 	/* Equality operator and its input type at this position: */
@@ -1162,7 +1153,7 @@ typedef enum KeyJoinInactiveReason
 
 /*
  * KeyJoinFact -
- *	  one transient key-join proof fact attached to an RTE surface
+ *	  transient key-join proof fact attached to an RTE surface
  *
  * The parser attaches these to RangeTblEntry.keyJoinFacts while proving FOR
  * KEY joins; stored KeyJoinNodes retain only the dependencies they actually
@@ -1191,11 +1182,10 @@ typedef struct KeyJoinFact
 	/* KJF_FOREIGN_KEY only: */
 	Oid			referencedRelid;
 	List	   *referencedAttnums;
-	Oid			constraint;		/* pg_constraint OID */
+	Oid			constraint;
 
 	/* KJF_FOREIGN_KEY and KJF_ROW_COVERAGE: */
-	/* transient canonical filters; may contain parser-private Params */
-	List	   *filterConjuncts;
+	List	   *filterConjuncts;	/* list of expression trees */
 
 	/* All kinds: */
 	List	   *dependencies;	/* list of KeyJoinProofDependency */
@@ -1203,15 +1193,11 @@ typedef struct KeyJoinFact
 	/*
 	 * Diagnostic carry-over of discarded facts.  A fact starts active; if a
 	 * propagation step would have discarded it, the fact is instead retained
-	 * with active=false so a later rejection can point at it.  Inactive
-	 * facts are skipped during proving, but inactiveReason and
-	 * inactiveOriginView are read only when producing the error message:
-	 * inactiveReason records why the fact died, and inactiveOriginView
-	 * names the view it died inside (InvalidOid otherwise).
+	 * with active=false so a later rejection can point at it.
 	 */
 	bool		active;
 	KeyJoinInactiveReason inactiveReason;
-	Oid			inactiveOriginView; /* InvalidOid if none */
+	Oid			inactiveOriginView;
 } KeyJoinFact;
 
 /*
@@ -2357,27 +2343,21 @@ typedef struct JsonArrayAgg
  * Transformed into a KeyJoinNode during parse analysis once the referencing
  * and referenced columns and the underlying foreign-key constraint have been
  * resolved.
- *
- * The grammar also stores the raw filter expression in JoinExpr.joinFilter.
- * During parse analysis JoinExpr.joinFilter is replaced by the transformed
- * FILTER expression (retained there for the deparser and for output fact
- * export), and a copy is merged into JoinExpr.quals so the executor evaluates
- * it as a join qual.
  */
 typedef struct KeyJoinClause
 {
 	NodeTag		type;
-	List	   *localCols;		/* column names resolved on JOIN-right */
+	List	   *localCols;		/* column names to resolve in right operand */
 	KeyJoinDirection direction; /* arrow direction; selects which side is FK */
-	char	   *refAlias;		/* alias visible inside JOIN-left */
-	List	   *refCols;		/* column names in refAlias */
+	char	   *refAlias;		/* table alias in left operand */
+	List	   *refCols;		/* column names to resolve with refAlias */
 	Node	   *filter;			/* raw FILTER (WHERE ...) expr, or NULL */
 	ParseLoc	location;		/* location of the FOR KEY token, or -1 */
 } KeyJoinClause;
 
 /*
  * KeyJoinNode -
- *	  analyzed representation of a FOR KEY join, retained in query trees
+ *	  analyzed representation of a FOR KEY join
  *
  * Produced by parse analysis from a KeyJoinClause once the referencing and
  * referenced columns and supporting catalog objects have been resolved.
