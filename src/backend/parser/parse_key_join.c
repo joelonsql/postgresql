@@ -5163,7 +5163,7 @@ key_join_failure_detail(KeyJoinReq req, bool inactivated,
 
 		Assert(relname != NULL);
 		Assert(nspname != NULL);
-		origin_view_name = psprintf("\"%s.%s\"", nspname, relname);
+		origin_view_name = psprintf("%s.%s", nspname, relname);
 	}
 
 	if (req == REQ_FKPAIR)

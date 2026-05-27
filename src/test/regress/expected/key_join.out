@@ -1259,7 +1259,7 @@ SELECT * FROM v1 JOIN t2 FOR KEY (c3) -> v1 (c1);
 ERROR:  key join from referencing relation t2 to referenced relation v1 cannot be proven
 LINE 1: SELECT * FROM v1 JOIN t2 FOR KEY (c3) -> v1 (c1);
                                  ^
-DETAIL:  Referenced relation v1 is filtered before this key join inside view "public.v1", so not every t2 (c3) value can be proven to have a matching v1 row.
+DETAIL:  Referenced relation v1 is filtered before this key join inside view public.v1, so not every t2 (c3) value can be proven to have a matching v1 row.
 -- accepted, filtering allowed since v2 is the referencing table
 SELECT * FROM t1 JOIN v2 FOR KEY (c3) -> t1 (c1);
  c1 | c2 | c3 | c4 
@@ -1275,7 +1275,7 @@ SELECT * FROM v1 JOIN v2 FOR KEY (c3) -> v1 (c1);
 ERROR:  key join from referencing relation v2 to referenced relation v1 cannot be proven
 LINE 1: SELECT * FROM v1 JOIN v2 FOR KEY (c3) -> v1 (c1);
                                  ^
-DETAIL:  Referenced relation v1 is filtered before this key join inside view "public.v1", so not every v2 (c3) value can be proven to have a matching v1 row.
+DETAIL:  Referenced relation v1 is filtered before this key join inside view public.v1, so not every v2 (c3) value can be proven to have a matching v1 row.
 -- rejected, reason: referenced-side HAVING filter is not a matched key filter
 SELECT * FROM
 (
@@ -1697,7 +1697,7 @@ JOIN ne3_e FOR KEY (id) <- q (c_e_id);
 ERROR:  key join from referencing relation q to referenced relation ne3_e cannot be proven
 LINE 4: JOIN ne3_e FOR KEY (id) <- q (c_e_id);
                    ^
-DETAIL:  Referencing columns q (c_e_id) can be null because of a preceding outer join that can null-extend it inside view "public.ne3_right_nested_v", so this inner join could filter rows from q.
+DETAIL:  Referencing columns q (c_e_id) can be null because of a preceding outer join that can null-extend it inside view public.ne3_right_nested_v, so this inner join could filter rows from q.
 DROP VIEW ne3_right_nested_v;
 DROP TABLE ne3_b, ne3_c, ne3_e, ne3_a;
 DROP TABLE t2_nn, t1_nn;
@@ -3164,7 +3164,7 @@ JOIN resupplies_gbu FOR KEY (product_id) -> v_sales_multi_group (id);
 ERROR:  key join from referencing relation resupplies_gbu to referenced relation v_sales_multi_group cannot be proven
 LINE 3: JOIN resupplies_gbu FOR KEY (product_id) -> v_sales_multi_gr...
                             ^
-DETAIL:  A preceding join inside view "public.v_sales_multi_group" may duplicate rows from referenced relation v_sales_multi_group, so referenced columns v_sales_multi_group (id) are not proven unique at this point in the query.
+DETAIL:  A preceding join inside view public.v_sales_multi_group may duplicate rows from referenced relation v_sales_multi_group, so referenced columns v_sales_multi_group (id) are not proven unique at this point in the query.
 SELECT *
 FROM (
     SELECT DISTINCT abs(id) AS id
@@ -3568,7 +3568,7 @@ JOIN rowcov_numeric_child c FOR KEY (parent_id) -> p (id);
 ERROR:  key join from referencing relation c to referenced relation p cannot be proven
 LINE 4: JOIN rowcov_numeric_child c FOR KEY (parent_id) -> p (id);
                                     ^
-DETAIL:  Referenced relation p may lose rows before this key join because of GROUP BY inside view "public.rowcov_numeric_group_v", so not every c (parent_id) value can be proven to have a matching p row.
+DETAIL:  Referenced relation p may lose rows before this key join because of GROUP BY inside view public.rowcov_numeric_group_v, so not every c (parent_id) value can be proven to have a matching p row.
 DROP VIEW rowcov_numeric_group_v;
 CREATE VIEW rowcov_numeric_distinct_v AS
 SELECT DISTINCT id FROM rowcov_numeric_parent;
@@ -3579,7 +3579,7 @@ JOIN rowcov_numeric_child c FOR KEY (parent_id) -> p (id);
 ERROR:  key join from referencing relation c to referenced relation p cannot be proven
 LINE 4: JOIN rowcov_numeric_child c FOR KEY (parent_id) -> p (id);
                                     ^
-DETAIL:  Referenced relation p may lose rows before this key join because of DISTINCT inside view "public.rowcov_numeric_distinct_v", so not every c (parent_id) value can be proven to have a matching p row.
+DETAIL:  Referenced relation p may lose rows before this key join because of DISTINCT inside view public.rowcov_numeric_distinct_v, so not every c (parent_id) value can be proven to have a matching p row.
 DROP VIEW rowcov_numeric_distinct_v;
 DROP TABLE rowcov_numeric_child, rowcov_numeric_parent;
 DROP OPERATOR CLASS rowcov_numeric_scale_ops USING btree;
@@ -3658,7 +3658,7 @@ JOIN scalar_array_filter_child_v c FOR KEY (parent_id) -> p (id);
 ERROR:  key join from referencing relation c to referenced relation p cannot be proven
 LINE 4: JOIN scalar_array_filter_child_v c FOR KEY (parent_id) -> p ...
                                            ^
-DETAIL:  Referenced relation p is filtered before this key join inside view "public.scalar_array_filter_parent_v", so not every c (parent_id) value can be proven to have a matching p row.
+DETAIL:  Referenced relation p is filtered before this key join inside view public.scalar_array_filter_parent_v, so not every c (parent_id) value can be proven to have a matching p row.
 DROP VIEW scalar_array_filter_child_v, scalar_array_filter_parent_v;
 DROP TABLE scalar_array_filter_child, scalar_array_filter_parent;
 -- FILTER1b: strict proof-filter value allowlist accepts constants
@@ -3812,7 +3812,7 @@ JOIN filter_func_arg_child_v c FOR KEY (parent_id) -> p (id);
 ERROR:  key join from referencing relation c to referenced relation p cannot be proven
 LINE 4: JOIN filter_func_arg_child_v c FOR KEY (parent_id) -> p (id)...
                                        ^
-DETAIL:  Referenced relation p is filtered before this key join inside view "public.filter_func_arg_parent_v", so not every c (parent_id) value can be proven to have a matching p row.
+DETAIL:  Referenced relation p is filtered before this key join inside view public.filter_func_arg_parent_v, so not every c (parent_id) value can be proven to have a matching p row.
 DROP VIEW filter_func_arg_child_v, filter_func_arg_parent_v;
 DROP TABLE filter_func_child, filter_func_parent;
 DROP FUNCTION filter_stable_identity(int);
@@ -3837,7 +3837,7 @@ JOIN filter_volatile_child_v c FOR KEY (parent_id) -> p (id);
 ERROR:  key join from referencing relation c to referenced relation p cannot be proven
 LINE 4: JOIN filter_volatile_child_v c FOR KEY (parent_id) -> p (id)...
                                        ^
-DETAIL:  Referenced relation p is filtered before this key join inside view "public.filter_volatile_parent_v", so not every c (parent_id) value can be proven to have a matching p row.
+DETAIL:  Referenced relation p is filtered before this key join inside view public.filter_volatile_parent_v, so not every c (parent_id) value can be proven to have a matching p row.
 DROP VIEW filter_volatile_child_v, filter_volatile_parent_v;
 DROP TABLE filter_volatile_child, filter_volatile_parent;
 DROP FUNCTION filter_volatile_identity(int);
@@ -4271,7 +4271,7 @@ JOIN filter_bool_child_or c FOR KEY (parent_id) -> p (id);
 ERROR:  key join from referencing relation c to referenced relation p cannot be proven
 LINE 4: JOIN filter_bool_child_or c FOR KEY (parent_id) -> p (id);
                                     ^
-DETAIL:  Referenced relation p is filtered before this key join inside view "public.filter_bool_parent_or", so not every c (parent_id) value can be proven to have a matching p row.
+DETAIL:  Referenced relation p is filtered before this key join inside view public.filter_bool_parent_or, so not every c (parent_id) value can be proven to have a matching p row.
 CREATE VIEW filter_bool_parent_test AS
 SELECT id FROM filter_bool_parent WHERE id = (true IS TRUE);
 CREATE VIEW filter_bool_child_test AS
@@ -4283,7 +4283,7 @@ JOIN filter_bool_child_test c FOR KEY (parent_id) -> p (id);
 ERROR:  key join from referencing relation c to referenced relation p cannot be proven
 LINE 4: JOIN filter_bool_child_test c FOR KEY (parent_id) -> p (id);
                                       ^
-DETAIL:  Referenced relation p is filtered before this key join inside view "public.filter_bool_parent_test", so not every c (parent_id) value can be proven to have a matching p row.
+DETAIL:  Referenced relation p is filtered before this key join inside view public.filter_bool_parent_test, so not every c (parent_id) value can be proven to have a matching p row.
 DROP VIEW filter_bool_child_test, filter_bool_parent_test,
           filter_bool_child_or, filter_bool_parent_or;
 DROP TABLE filter_bool_child, filter_bool_parent;
@@ -4309,7 +4309,7 @@ ORDER BY p.id;
 ERROR:  key join from referencing relation c to referenced relation p cannot be proven
 LINE 4: JOIN filter_case_child_v c FOR KEY (parent_id) -> p (id)
                                    ^
-DETAIL:  Referenced relation p is filtered before this key join inside view "public.filter_case_parent_v", so not every c (parent_id) value can be proven to have a matching p row.
+DETAIL:  Referenced relation p is filtered before this key join inside view public.filter_case_parent_v, so not every c (parent_id) value can be proven to have a matching p row.
 DROP VIEW filter_case_child_v, filter_case_parent_v;
 CREATE VIEW filter_minmax_parent_v AS
 SELECT id FROM filter_pseudo_parent WHERE id = LEAST(1, 2);
@@ -4322,7 +4322,7 @@ JOIN filter_minmax_child_v c FOR KEY (parent_id) -> p (id);
 ERROR:  key join from referencing relation c to referenced relation p cannot be proven
 LINE 4: JOIN filter_minmax_child_v c FOR KEY (parent_id) -> p (id);
                                      ^
-DETAIL:  Referenced relation p is filtered before this key join inside view "public.filter_minmax_parent_v", so not every c (parent_id) value can be proven to have a matching p row.
+DETAIL:  Referenced relation p is filtered before this key join inside view public.filter_minmax_parent_v, so not every c (parent_id) value can be proven to have a matching p row.
 DROP VIEW filter_minmax_child_v, filter_minmax_parent_v;
 CREATE VIEW filter_coalesce_parent_v AS
 SELECT id FROM filter_pseudo_parent WHERE id = COALESCE(1, 2);
@@ -4335,7 +4335,7 @@ JOIN filter_coalesce_child_v c FOR KEY (parent_id) -> p (id);
 ERROR:  key join from referencing relation c to referenced relation p cannot be proven
 LINE 4: JOIN filter_coalesce_child_v c FOR KEY (parent_id) -> p (id)...
                                        ^
-DETAIL:  Referenced relation p is filtered before this key join inside view "public.filter_coalesce_parent_v", so not every c (parent_id) value can be proven to have a matching p row.
+DETAIL:  Referenced relation p is filtered before this key join inside view public.filter_coalesce_parent_v, so not every c (parent_id) value can be proven to have a matching p row.
 DROP VIEW filter_coalesce_child_v, filter_coalesce_parent_v;
 CREATE VIEW filter_nullif_parent_v AS
 SELECT id FROM filter_pseudo_parent WHERE id = NULLIF(1, 2);
@@ -4348,7 +4348,7 @@ JOIN filter_nullif_child_v c FOR KEY (parent_id) -> p (id);
 ERROR:  key join from referencing relation c to referenced relation p cannot be proven
 LINE 4: JOIN filter_nullif_child_v c FOR KEY (parent_id) -> p (id);
                                      ^
-DETAIL:  Referenced relation p is filtered before this key join inside view "public.filter_nullif_parent_v", so not every c (parent_id) value can be proven to have a matching p row.
+DETAIL:  Referenced relation p is filtered before this key join inside view public.filter_nullif_parent_v, so not every c (parent_id) value can be proven to have a matching p row.
 DROP VIEW filter_nullif_child_v, filter_nullif_parent_v;
 DROP TABLE filter_pseudo_child, filter_pseudo_parent;
 -- FILTER5e: matched-filter propagation skips other same-relation keys
@@ -4523,7 +4523,7 @@ JOIN shadow_child_filter c FOR KEY (parent_id) -> p (id);
 ERROR:  key join from referencing relation c to referenced relation p cannot be proven
 LINE 3: JOIN shadow_child_filter c FOR KEY (parent_id) -> p (id);
                                    ^
-DETAIL:  Referenced relation p is filtered before this key join inside view "key_join_shadow.shadow_parent_filter", so not every c (parent_id) value can be proven to have a matching p row.
+DETAIL:  Referenced relation p is filtered before this key join inside view key_join_shadow.shadow_parent_filter, so not every c (parent_id) value can be proven to have a matching p row.
 DROP VIEW shadow_child_filter, shadow_parent_filter;
 DROP TABLE shadow_child, shadow_parent;
 DROP OPERATOR = (int4, int4);
@@ -4619,7 +4619,7 @@ ORDER BY p.tenant_id, p.id;
 ERROR:  key join from referencing relation c to referenced relation p cannot be proven
 LINE 3: JOIN filter_opfamily_child_big c FOR KEY (tenant_id, parent_...
                                          ^
-DETAIL:  Referenced relation p is filtered before this key join inside view "public.filter_opfamily_parent_right_big", so not every c (tenant_id, parent_id) value can be proven to have a matching p row.
+DETAIL:  Referenced relation p is filtered before this key join inside view public.filter_opfamily_parent_right_big, so not every c (tenant_id, parent_id) value can be proven to have a matching p row.
 DROP VIEW filter_opfamily_parent_right_big, filter_opfamily_child_int,
           filter_opfamily_parent_int, filter_opfamily_parent_big,
           filter_opfamily_child_big,
@@ -4763,7 +4763,7 @@ JOIN filter_collation_child_nondet c FOR KEY (code) -> p (code);
 ERROR:  key join from referencing relation c to referenced relation p cannot be proven
 LINE 3: JOIN filter_collation_child_nondet c FOR KEY (code) -> p (co...
                                              ^
-DETAIL:  Referenced relation p is filtered before this key join inside view "public.filter_collation_parent_nondet", so not every c (code) value can be proven to have a matching p row.
+DETAIL:  Referenced relation p is filtered before this key join inside view public.filter_collation_parent_nondet, so not every c (code) value can be proven to have a matching p row.
 DROP VIEW filter_collation_child_nondet, filter_collation_parent_nondet;
 DROP COLLATION filter_collation_nondet;
 DROP VIEW filter_collation_child_exact, filter_collation_parent_exact,
@@ -6642,7 +6642,7 @@ JOIN kd_child c FOR KEY (parent_id) -> p (id);
 ERROR:  key join from referencing relation c to referenced relation p cannot be proven
 LINE 3: JOIN kd_child c FOR KEY (parent_id) -> p (id);
                         ^
-DETAIL:  Referenced relation p may lose rows before this key join because of a preceding join inside view "key_join_diag.kd_parent_joined", so not every c (parent_id) value can be proven to have a matching p row.
+DETAIL:  Referenced relation p may lose rows before this key join because of a preceding join inside view key_join_diag.kd_parent_joined, so not every c (parent_id) value can be proven to have a matching p row.
 DROP VIEW kd_parent_joined;
 -- Inactivated inside a view: the message names the view to inspect.
 CREATE VIEW kd_parent_limited AS SELECT id FROM kd_parent LIMIT 1;
@@ -6652,7 +6652,7 @@ JOIN kd_child c FOR KEY (parent_id) -> p (id);
 ERROR:  key join from referencing relation c to referenced relation p cannot be proven
 LINE 3: JOIN kd_child c FOR KEY (parent_id) -> p (id);
                         ^
-DETAIL:  Referenced relation p may lose rows before this key join because of HAVING, LIMIT, OFFSET, FOR UPDATE or TABLESAMPLE inside view "key_join_diag.kd_parent_limited", so not every c (parent_id) value can be proven to have a matching p row.
+DETAIL:  Referenced relation p may lose rows before this key join because of HAVING, LIMIT, OFFSET, FOR UPDATE or TABLESAMPLE inside view key_join_diag.kd_parent_limited, so not every c (parent_id) value can be proven to have a matching p row.
 DROP VIEW kd_parent_limited;
 RESET search_path;
 DROP SCHEMA key_join_diag CASCADE;

@@ -424,7 +424,7 @@ JOIN fk_orders FOR KEY (ord_prod_id) -> v (prod_id);
 ERROR:  key join from referencing relation fk_orders to referenced relation v cannot be proven
 LINE 3: JOIN fk_orders FOR KEY (ord_prod_id) -> v (prod_id);
                        ^
-DETAIL:  Referenced relation v is filtered before this key join inside view "public.v_products_filtered", so not every fk_orders (ord_prod_id) value can be proven to have a matching v row.
+DETAIL:  Referenced relation v is filtered before this key join inside view public.v_products_filtered, so not every fk_orders (ord_prod_id) value can be proven to have a matching v row.
 -- rejected, reason: subquery with LIMIT on referenced side (R violated)
 SELECT * FROM (SELECT prod_id FROM ref_products LIMIT 1) AS q
 JOIN fk_orders FOR KEY (ord_prod_id) -> q (prod_id);
