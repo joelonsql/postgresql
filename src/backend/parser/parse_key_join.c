@@ -373,9 +373,6 @@ static void key_join_report_failure(ParseState *pstate, ParseLoc location,
  *
  *		This resolves the named columns, ensures operand RTEs expose proof
  *		facts, proves the key join, and installs strict equality quals.
- *
- * Called by:
- *		no local callers
  */
 void
 transformAndValidateKeyJoin(ParseState *pstate, JoinExpr *j,
@@ -526,9 +523,6 @@ transformAndValidateKeyJoin(ParseState *pstate, JoinExpr *j,
  *
  *		Reject names that are missing, ambiguous, or not exposed by the
  *		operand surface.
- *
- * Called by:
- *		transformAndValidateKeyJoin
  */
 static KeyJoinColumn *
 resolve_columns_on_nsitem(ParseState *pstate,
@@ -606,9 +600,6 @@ resolve_columns_on_nsitem(ParseState *pstate,
  *
  *		Build a Var for a generated key-join qual and mark nullable state
  *		and column read privilege.
- *
- * Called by:
- *		transformAndValidateKeyJoin
  */
 static Var *
 make_var_from_nscolumn(ParseState *pstate, ParseNamespaceColumn *nscol)
@@ -629,11 +620,6 @@ make_var_from_nscolumn(ParseState *pstate, ParseNamespaceColumn *nscol)
  * join_preserves_side
  *
  *		Return true if the join type preserves rows from the requested side.
- *
- * Called by:
- *		transformAndValidateKeyJoin
- *		compute_join_output_facts
- *		revalidate_query_jointree_proofs
  */
 static bool
 join_preserves_side(JoinType jointype, bool leftside)
@@ -646,10 +632,6 @@ join_preserves_side(JoinType jointype, bool leftside)
  * build_key_join_quals
  *
  *		Build the executable equality quals for a proven key join.
- *
- * Called by:
- *		transformAndValidateKeyJoin
- *		revalidate_query_jointree_proofs
  */
 static Node *
 build_key_join_quals(List *referenced_args,
@@ -756,10 +738,6 @@ build_key_join_quals(List *referenced_args,
  * and equality-input identities in key-join column order, and the
  * accumulated dependency lists.  On failure, *match receives diagnostic
  * fields describing the first unmet proof requirement.
- *
- * Called by:
- *		transformAndValidateKeyJoin
- *		revalidate_query_jointree_proofs
  */
 static bool
 find_key_join_match(RangeTblEntry *referencing_rte,
@@ -1153,10 +1131,6 @@ find_key_join_match(RangeTblEntry *referencing_rte,
  *		Map selected surface attnums to base attnums and/or key positions.
  *
  *		Each selected attnum must identify a distinct key position.
- *
- * Called by:
- *		find_key_join_match
- *		compute_join_output_facts
  */
 static bool
 select_key_position_parts(List *selected_attnums, List *keyPositions,
@@ -1209,9 +1183,6 @@ select_key_position_parts(List *selected_attnums, List *keyPositions,
  *		null-containing referenced rows cannot remove a value required by an
  *		all-non-null referencing key.  Extra row-collapse columns do not merge
  *		distinct covered key values.
- *
- * Called by:
- *		project_key_join_facts_from_rte
  */
 static bool
 rowcollapse_preserves_rowcoverage(List *rowcoverage_key_positions,
@@ -1264,10 +1235,6 @@ rowcollapse_preserves_rowcoverage(List *rowcoverage_key_positions,
  *		Return the key-position index containing an attnum.
  *
  *		Returns -1 if no position contains it or it is a duplicate.
- *
- * Called by:
- *		select_key_position_parts
- *		add_filter_conjuncts
  */
 static int
 key_position_index_for_attnum(List *keyPositions, int attno)
@@ -1290,9 +1257,6 @@ key_position_index_for_attnum(List *keyPositions, int attno)
  * key_position_identity_lists_equal
  *
  *		Return true if two key-position lists have matching key identities.
- *
- * Called by:
- *		find_key_join_match
  */
 static bool
 key_position_identity_lists_equal(List *left, List *right)
@@ -1315,11 +1279,6 @@ key_position_identity_lists_equal(List *left, List *right)
  *
  *		Return true if two key positions have the same type/collation/op
  *		identity.
- *
- * Called by:
- *		key_position_identity_lists_equal
- *		project_key_join_facts_from_rte
- *		compute_join_output_facts
  */
 static bool
 key_position_identity_equal(KeyJoinKeyPosition *left, KeyJoinKeyPosition *right)
@@ -1340,10 +1299,6 @@ key_position_identity_equal(KeyJoinKeyPosition *left, KeyJoinKeyPosition *right)
  * int_lists_same_members
  *
  *		Return true if two integer lists contain the same members.
- *
- * Called by:
- *		find_key_join_match
- *		compute_join_output_facts
  */
 static bool
 int_lists_same_members(List *a, List *b)
@@ -1364,10 +1319,6 @@ int_lists_same_members(List *a, List *b)
  *		Build a Param-position map between source and target key lists.
  *
  *		Entries of -1 mark source filters outside the selected key join.
- *
- * Called by:
- *		find_key_join_match
- *		compute_join_output_facts
  */
 static List *
 make_filter_position_map(List *src_base_attnums, List *src_selected_base,
@@ -1409,10 +1360,6 @@ make_filter_position_map(List *src_base_attnums, List *src_selected_base,
  * remap_filter_conjunct
  *
  *		Remap proof-filter Params through a position map.
- *
- * Called by:
- *		find_key_join_match
- *		compute_join_output_facts
  */
 static Node *
 remap_filter_conjunct(Node *conjunct, List *position_map)
@@ -1427,10 +1374,6 @@ remap_filter_conjunct(Node *conjunct, List *position_map)
  *
  *		Return true if every proof-filter Param used by this conjunct has a
  *		target key position in the supplied map.
- *
- * Called by:
- *		find_key_join_match
- *		compute_join_output_facts
  */
 static bool
 filter_conjunct_can_remap(Node *conjunct, List *position_map)
@@ -1444,9 +1387,6 @@ filter_conjunct_can_remap(Node *conjunct, List *position_map)
  * remap_filter_param_mutator
  *
  *		Mutator callback for remapping key-join proof filter Params.
- *
- * Called by:
- *		remap_filter_conjunct
  */
 static Node *
 remap_filter_param_mutator(Node *node, void *context_arg)
@@ -1488,9 +1428,6 @@ remap_filter_param_mutator(Node *node, void *context_arg)
  * filter_conjunct_unremappable_param_walker
  *
  *		Walker callback for finding proof-filter Params that cannot remap.
- *
- * Called by:
- *		filter_conjunct_can_remap
  */
 static bool
 filter_conjunct_unremappable_param_walker(Node *node, void *context_arg)
@@ -1521,10 +1458,6 @@ filter_conjunct_unremappable_param_walker(Node *node, void *context_arg)
  * filter_conjunct_matches_key_positions
  *
  *		Check that a key-join proof filter matches key identity.
- *
- * Called by:
- *		find_key_join_match
- *		compute_join_output_facts
  */
 static bool
 filter_conjunct_matches_key_positions(Node *conjunct, List *keyPositions)
@@ -1574,10 +1507,6 @@ filter_conjunct_matches_key_positions(Node *conjunct, List *keyPositions)
  *		non-volatile scalar functions, and transparent type/collation wrappers
  *		whose arguments are also allowed.  The full after-planning volatility
  *		check runs on the canonical filter after locking its dependencies.
- *
- * Called by:
- *		filter_conjunct_matches_key_positions
- *		add_filter_conjuncts
  */
 static bool
 filter_value_allowed(Node *node)
@@ -1621,9 +1550,6 @@ filter_value_allowed(Node *node)
  * make_canonical_filter_conjunct
  *
  *		Build the stored proof-filter representation for a direct key filter.
- *
- * Called by:
- *		add_filter_conjuncts
  */
 static Node *
 make_canonical_filter_conjunct(KeyJoinKeyPosition *keypos, int pos, OpExpr *op,
@@ -1649,11 +1575,6 @@ make_canonical_filter_conjunct(KeyJoinKeyPosition *keypos, int pos, OpExpr *op,
  * filter_operator_matches_key_position
  *
  *		Check whether a direct key-filter operator is compatible with keypos.
- *
- * Called by:
- *		filter_conjunct_matches_key_positions
- *		add_filter_conjuncts
- *		make_canonical_filter_conjunct
  */
 static bool
 filter_operator_matches_key_position(OpExpr *op, KeyJoinKeyPosition *keypos,
@@ -1732,9 +1653,6 @@ filter_operator_matches_key_position(OpExpr *op, KeyJoinKeyPosition *keypos,
  * filter_operator_is_compatible_equality
  *
  *		Check whether opno is itself an equality operator compatible with keyop.
- *
- * Called by:
- *		filter_operator_matches_key_position
  */
 static bool
 filter_operator_is_compatible_equality(Oid opno, Oid keyop)
@@ -1770,12 +1688,6 @@ filter_operator_is_compatible_equality(Oid opno, Oid keyop)
  * walk restarts after-planning preprocessing inside subqueries, which
  * expression_planner() deliberately does not descend into when called on a
  * standalone expression.
- *
- * Called by:
- *		filter_value_allowed
- *		add_filter_conjuncts
- *		project_key_join_query_facts
- *		compute_join_output_facts
  */
 static bool
 key_join_contains_volatile_after_planning(Node *node)
@@ -1835,11 +1747,6 @@ key_join_nested_query_walker(Node *node, void *context)
  * list_contains_equal_node
  *
  *		Return true if a list already contains an equal expression node.
- *
- * Called by:
- *		find_key_join_match
- *		add_filter_conjuncts
- *		compute_join_output_facts
  */
 static bool
 list_contains_equal_node(List *list, Node *node)
@@ -1856,11 +1763,6 @@ list_contains_equal_node(List *list, Node *node)
  * append_dependencies_unique
  *
  *		Append dependency entries from src to dst, suppressing duplicates.
- *
- * Called by:
- *		find_key_join_match
- *		project_key_join_facts_from_rte
- *		compute_join_output_facts
  */
 static List *
 append_dependencies_unique(List *dst, List *src)
@@ -1877,12 +1779,6 @@ append_dependencies_unique(List *dst, List *src)
  * dependency_member
  *
  *		Return true if a dependency list contains the given object.
- *
- * Called by:
- *		append_dependencies_unique
- *		append_filter_dependency
- *		dependency_list_is_subset
- *		key_join_equality_operator_is_usable
  */
 static bool
 dependency_member(List *deps, Oid classId, Oid objectId)
@@ -1902,11 +1798,6 @@ dependency_member(List *deps, Oid classId, Oid objectId)
  * make_dependency
  *
  *		Build a KeyJoinProofDependency node for a whole-object dependency.
- *
- * Called by:
- *		compute_key_join_relation_facts
- *		append_filter_dependency
- *		key_join_equality_operator_is_usable
  */
 static KeyJoinProofDependency *
 make_dependency(Oid classId, Oid objectId)
@@ -1926,9 +1817,6 @@ make_dependency(Oid classId, Oid objectId)
  *		exists.  Filter expressions can depend on operators and functions only.
  *		Relation and constraint proof dependencies are locked by their fact
  *		builders before publication.
- *
- * Called by:
- *		lock_key_join_dependencies_or_error
  */
 static void
 lock_key_join_dependency_or_error(const KeyJoinProofDependency *dep)
@@ -1959,9 +1847,6 @@ lock_key_join_dependency_or_error(const KeyJoinProofDependency *dep)
  *		Block until every dependency is locked and known to still exist.  Facts
  *		may only publish dependencies that have passed through this helper or an
  *		equivalent lock-and-fetch path.
- *
- * Called by:
- *		add_filter_conjuncts
  */
 static void
 lock_key_join_dependencies_or_error(List *dependencies)
@@ -1977,9 +1862,6 @@ lock_key_join_dependencies_or_error(List *dependencies)
  *
  *		Lock one constraint proof dependency, then return its syscache tuple.
  *		The caller must release the tuple.
- *
- * Called by:
- *		compute_key_join_relation_facts
  */
 static HeapTuple
 lock_and_fetch_key_join_constraint(Oid constraintOid)
@@ -2000,9 +1882,6 @@ lock_and_fetch_key_join_constraint(Oid constraintOid)
  *
  *		Lock one operator proof dependency, then return its syscache tuple.
  *		The caller must release the tuple.
- *
- * Called by:
- *		key_join_equality_operator_is_usable
  */
 static HeapTuple
 lock_and_fetch_key_join_operator(Oid opno)
@@ -2025,9 +1904,6 @@ lock_and_fetch_key_join_operator(Oid opno)
  *
  *		Lock one function proof dependency, then return its syscache tuple.
  *		The caller must release the tuple.
- *
- * Called by:
- *		key_join_equality_operator_is_usable
  */
 static HeapTuple
 lock_and_fetch_key_join_proc(Oid procid)
@@ -2058,13 +1934,6 @@ lock_and_fetch_key_join_proc(Oid procid)
  *		projection, and stored-query revalidation.  Those callers reach the
  *		same RTE graph with different context available (ParseState for live
  *		parsing, copied Query stacks for stored queries).
- *
- * Called by:
- *		transformAndValidateKeyJoin
- *		ensure_key_join_surface_facts
- *		project_key_join_query_facts
- *		compute_join_output_facts
- *		revalidate_query_jointree_proofs
  */
 static void
 ensure_key_join_surface_facts(KeyJoinFactContext *context, RangeTblEntry *rte)
@@ -2380,9 +2249,6 @@ ensure_key_join_surface_facts(KeyJoinFactContext *context, RangeTblEntry *rte)
  *
  *		Validated enforced NOT NULL constraints, validated nondeferrable
  *		FKs, and usable unique indexes become surface facts.
- *
- * Called by:
- *		ensure_key_join_surface_facts
  */
 static void
 compute_key_join_relation_facts(KeyJoinFactContext *context,
@@ -2775,9 +2641,6 @@ compute_key_join_relation_facts(KeyJoinFactContext *context,
  *
  *		Find the range-table index for an RTE pointer in the live ParseState
  *		or saved Query that owns it.
- *
- * Called by:
- *		ensure_key_join_surface_facts
  */
 static Index
 rtindex_for_rte(KeyJoinFactContext *context, RangeTblEntry *rte)
@@ -2811,9 +2674,6 @@ rtindex_for_rte(KeyJoinFactContext *context, RangeTblEntry *rte)
  * find_join_expr_for_rtindex
  *
  *		Find the JoinExpr attached to a JOIN RTE.
- *
- * Called by:
- *		ensure_key_join_surface_facts
  */
 static JoinExpr *
 find_join_expr_for_rtindex(KeyJoinFactContext *context, Index rtindex)
@@ -2842,9 +2702,6 @@ find_join_expr_for_rtindex(KeyJoinFactContext *context, Index rtindex)
  * find_join_expr_in_jointree
  *
  *		Search a saved Query jointree for the JoinExpr with rtindex.
- *
- * Called by:
- *		find_join_expr_for_rtindex
  */
 static JoinExpr *
 find_join_expr_in_jointree(Node *jtnode, Index rtindex)
@@ -2885,9 +2742,6 @@ find_join_expr_in_jointree(Node *jtnode, Index rtindex)
  *
  *		Query shape determines which base facts survive projection and
  *		whether GROUP BY or DISTINCT introduces query-level uniqueness.
- *
- * Called by:
- *		ensure_key_join_surface_facts
  */
 static KeyJoinSurfaceFacts *
 project_key_join_query_facts(KeyJoinFactContext *context, Query *query)
@@ -3132,10 +2986,6 @@ project_key_join_query_facts(KeyJoinFactContext *context, Query *query)
  *		Foreign-key containment projects whenever its key columns survive;
  *		row-coverage projection rejects lossy filter handling because filters
  *		define the referenced multiset.
- *
- * Called by:
- *		project_key_join_query_facts
- *		compute_join_output_facts
  */
 static void
 project_key_join_facts_from_rte(KeyJoinSurfaceFacts *dst, RangeTblEntry *src,
@@ -3305,10 +3155,6 @@ project_key_join_facts_from_rte(KeyJoinSurfaceFacts *dst, RangeTblEntry *src,
  *		Project key positions through an attrmap.
  *
  *		Returns NIL if any key position is lost by the projection.
- *
- * Called by:
- *		project_key_join_facts_from_rte
- *		compute_join_output_facts
  */
 static List *
 project_key_positions(List *keyPositions, List **attrmap)
@@ -3340,9 +3186,6 @@ project_key_positions(List *keyPositions, List **attrmap)
  * make_rowcollapse_key_positions
  *
  *		Build key-position evidence for one row-collapsing stage.
- *
- * Called by:
- *		project_key_join_query_facts
  */
 static List *
 make_rowcollapse_key_positions(Query *query, List *clauses)
@@ -3404,9 +3247,6 @@ make_rowcollapse_key_positions(Query *query, List *clauses)
  *		identity are retained.  If reject_lossy_filter is true, failure to
  *		retain any conjunct makes the whole projection fail; otherwise such
  *		conjuncts are ignored.
- *
- * Called by:
- *		project_key_join_facts_from_rte
  */
 static bool
 add_filter_conjuncts(List **dst, List *keyPositions,
@@ -3571,11 +3411,6 @@ add_filter_conjuncts(List **dst, List *keyPositions,
  * jtnode_surface_rtindex
  *
  *		Return the RTE index for a jointree node surface.
- *
- * Called by:
- *		ensure_key_join_surface_facts
- *		project_key_join_query_facts
- *		revalidate_query_jointree_proofs
  */
 static Index
 jtnode_surface_rtindex(Node *jtnode)
@@ -3593,10 +3428,6 @@ jtnode_surface_rtindex(Node *jtnode)
  * map_var_to_jtnode_surface
  *
  *		Map a Var reference to column numbers on a jointree surface.
- *
- * Called by:
- *		project_key_join_query_facts
- *		add_filter_conjuncts
  */
 static List *
 map_var_to_jtnode_surface(Query *query, Node *jtnode,
@@ -3635,9 +3466,6 @@ map_var_to_jtnode_surface(Query *query, Node *jtnode,
  * append_join_input_mapping
  *
  *		Map input attnums from one join side to JOIN output attnums.
- *
- * Called by:
- *		map_var_to_jtnode_surface
  */
 static List *
 append_join_input_mapping(RangeTblEntry *joinrte, bool leftside,
@@ -3667,10 +3495,6 @@ append_join_input_mapping(RangeTblEntry *joinrte, bool leftside,
  * join_output_attno_for_input
  *
  *		Return the JOIN output attnum for one input column number.
- *
- * Called by:
- *		append_join_input_mapping
- *		build_join_attrmap
  */
 static int
 join_output_attno_for_input(RangeTblEntry *joinrte, bool leftside, int input_colno)
@@ -3693,9 +3517,6 @@ join_output_attno_for_input(RangeTblEntry *joinrte, bool leftside, int input_col
  *		Return a direct Var, rejecting parser coercion wrappers.
  *
  *		Unlike direct_var_from_node, this allows outer Vars.
- *
- * Called by:
- *		direct_var_from_node
  */
 static Var *
 direct_var_from_node_allow_outer(Node *node)
@@ -3733,11 +3554,6 @@ direct_var_from_node_allow_outer(Node *node)
  * direct_var_from_node
  *
  *		Return a direct current-query Var.
- *
- * Called by:
- *		project_key_join_query_facts
- *		make_rowcollapse_key_positions
- *		direct_filter_var_from_node
  */
 static Var *
 direct_var_from_node(Node *node)
@@ -3758,9 +3574,6 @@ direct_var_from_node(Node *node)
  *		equality operators are resolved on the base type, so the parser may
  *		wrap a domain Var in a RelabelType before filter canonicalization sees
  *		the OpExpr.  Other RelabelType shapes are not direct key filters.
- *
- * Called by:
- *		add_filter_conjuncts
  */
 static Var *
 direct_filter_var_from_node(Node *node)
@@ -3809,9 +3622,6 @@ direct_filter_var_from_node(Node *node)
  *		appear only inside transient KeyJoinSurfaceFacts.filterConjuncts.
  *		Accepted KeyJoinNodes carry only the dependencies consumed by the proof,
  *		never these proof filter expressions.
- *
- * Called by:
- *		add_filter_conjuncts
  */
 static Node *
 make_filter_param(KeyJoinKeyPosition *keypos, int pos)
@@ -3831,10 +3641,6 @@ make_filter_param(KeyJoinKeyPosition *keypos, int pos)
  * collect_filter_expr_dependencies_walker
  *
  *		Walker callback for collecting filter expression dependencies.
- *
- * Called by:
- *		add_filter_conjuncts
- *		compute_join_output_facts
  */
 static bool
 collect_filter_expr_dependencies_walker(Node *node, void *context_arg)
@@ -3864,9 +3670,6 @@ collect_filter_expr_dependencies_walker(Node *node, void *context_arg)
  * filter_function_dependency_checker
  *
  *		check_functions_in_node callback for collecting procedure dependencies.
- *
- * Called by:
- *		collect_filter_expr_dependencies_walker
  */
 static bool
 filter_function_dependency_checker(Oid func_id, void *context_arg)
@@ -3882,9 +3685,6 @@ filter_function_dependency_checker(Oid func_id, void *context_arg)
  * add_op_function_deps
  *
  *		Append an operator OID and its underlying function as dependencies.
- *
- * Called by:
- *		collect_filter_expr_dependencies_walker
  */
 static List *
 add_op_function_deps(List *deps, Oid opno, Oid opfuncid)
@@ -3900,10 +3700,6 @@ add_op_function_deps(List *deps, Oid opno, Oid opfuncid)
  * append_filter_dependency
  *
  *		Append one filter dependency if the object OID is valid and new.
- *
- * Called by:
- *		collect_filter_expr_dependencies_walker
- *		add_op_function_deps
  */
 static List *
 append_filter_dependency(List *dependencies, Oid classId, Oid objectId)
@@ -3922,9 +3718,6 @@ append_filter_dependency(List *dependencies, Oid classId, Oid objectId)
  *
  *		Join type, key-join proof, referencing-side uniqueness, and filters
  *		decide which facts survive.
- *
- * Called by:
- *		ensure_key_join_surface_facts
  */
 static void
 compute_join_output_facts(JoinExpr *j,
@@ -4229,9 +4022,6 @@ compute_join_output_facts(JoinExpr *j,
  * build_join_attrmap
  *
  *		Build a mapping from one join input to JOIN output columns.
- *
- * Called by:
- *		compute_join_output_facts
  */
 static List **
 build_join_attrmap(RangeTblEntry *joinrte, bool leftside, int nattrs)
@@ -4257,9 +4047,6 @@ build_join_attrmap(RangeTblEntry *joinrte, bool leftside, int nattrs)
  * join_null_extends_side
  *
  *		Return true if the join type can null-extend the requested side.
- *
- * Called by:
- *		compute_join_output_facts
  */
 static bool
 join_null_extends_side(JoinType jointype, bool leftside)
@@ -4272,9 +4059,6 @@ join_null_extends_side(JoinType jointype, bool leftside)
  * join_filter_for_side
  *
  *		Return the join filter applicable to facts projected from one side.
- *
- * Called by:
- *		compute_join_output_facts
  */
 static Node *
 join_filter_for_side(JoinType jointype, bool leftside, Node *filter)
@@ -4296,9 +4080,6 @@ join_filter_for_side(JoinType jointype, bool leftside, Node *filter)
  *
  *		Report whether a stored query or expression tree contains a
  *		KeyJoinNode.
- *
- * Called by:
- *		no local callers
  */
 bool
 storedNodeContainsKeyJoin(Node *node)
@@ -4310,9 +4091,6 @@ storedNodeContainsKeyJoin(Node *node)
  * stored_node_contains_key_join_walker
  *
  *		Walk stored query and expression nodes looking for KeyJoinNodes.
- *
- * Called by:
- *		storedNodeContainsKeyJoin
  */
 static bool
 stored_node_contains_key_join_walker(Node *node, void *context)
@@ -4354,9 +4132,6 @@ stored_node_contains_key_join_walker(Node *node, void *context)
  *
  *		This may mutate the revalidated copy by restoring old dependency
  *		lists before the final equality check.  Callers discard that copy.
- *
- * Called by:
- *		no local callers
  */
 bool
 revalidatedStoredKeyJoinProofsAreSafe(Node *stored, Node *revalidated)
@@ -4405,9 +4180,6 @@ revalidatedStoredKeyJoinProofsAreSafe(Node *stored, Node *revalidated)
  * collect_key_join_nodes
  *
  *		Return KeyJoinNodes in tree-walk order.
- *
- * Called by:
- *		revalidatedStoredKeyJoinProofsAreSafe
  */
 static List *
 collect_key_join_nodes(Node *node)
@@ -4422,9 +4194,6 @@ collect_key_join_nodes(Node *node)
  * collect_key_join_nodes_walker
  *
  *		Walk stored query and expression nodes collecting KeyJoinNodes.
- *
- * Called by:
- *		collect_key_join_nodes
  */
 static bool
 collect_key_join_nodes_walker(Node *node, void *context)
@@ -4461,9 +4230,6 @@ collect_key_join_nodes_walker(Node *node, void *context)
  *
  *		Return true if every dependency entry in candidate also appears in
  *		superset.
- *
- * Called by:
- *		revalidatedStoredKeyJoinProofsAreSafe
  */
 static bool
 dependency_list_is_subset(List *candidate, List *superset)
@@ -4481,9 +4247,6 @@ dependency_list_is_subset(List *candidate, List *superset)
  *
  *		Revalidate and rebuild key-join proofs contained in a copied stored
  *		query or expression tree.
- *
- * Called by:
- *		no local callers
  */
 void
 revalidateStoredKeyJoinProofsInNode(Node *node)
@@ -4498,10 +4261,6 @@ revalidateStoredKeyJoinProofsInNode(Node *node)
  *		supplied owning-query stack, if any.  A top-level Query is handled by
  *		revalidateStoredKeyJoinProofsInQuery(), which performs query-specific
  *		fact rebuilding and recurses into its own subqueries.
- *
- * Called by:
- *		revalidateStoredKeyJoinProofsInNode
- *		revalidate_stored_key_join_proofs_in_query
  */
 static bool
 revalidate_stored_key_join_node_walker(Node *node, void *context)
@@ -4524,9 +4283,6 @@ revalidate_stored_key_join_node_walker(Node *node, void *context)
  * revalidateStoredKeyJoinProofsInQuery
  *
  *		Revalidate and rebuild key-join proofs in a copied stored query tree.
- *
- * Called by:
- *		no local callers
  */
 void
 revalidateStoredKeyJoinProofsInQuery(Query *query)
@@ -4550,10 +4306,6 @@ revalidateStoredKeyJoinProofsInQuery(Query *query)
  *
  *		Demand-driven RTE projection depends on these owner-aware passes and
  *		must not call back here for CTE or FROM-subquery bodies.
- *
- * Called by:
- *		revalidate_stored_key_join_node_walker
- *		revalidateStoredKeyJoinProofsInQuery
  */
 static void
 revalidate_stored_key_join_proofs_in_query(Query *query,
@@ -4607,9 +4359,6 @@ revalidate_stored_key_join_proofs_in_query(Query *query,
  * revalidate_query_jointree_proofs
  *
  *		Recompute join facts and revalidate stored KeyJoinNode proofs.
- *
- * Called by:
- *		revalidate_stored_key_join_proofs_in_query
  */
 static void
 revalidate_query_jointree_proofs(Query *query, Node *jtnode,
@@ -4787,9 +4536,6 @@ revalidate_query_jointree_proofs(Query *query, Node *jtnode,
  *		Extract one stored key equality.  The parser constructs key equality
  *		operators as referenced-column argument first, referencing-column
  *		argument second.
- *
- * Called by:
- *		revalidate_query_jointree_proofs
  */
 static void
 extract_key_join_qual_arg(Node *qual, List **referenced_args,
@@ -4812,11 +4558,6 @@ extract_key_join_qual_arg(Node *qual, List **referenced_args,
  * add_fact
  *
  *		Append a fresh surface fact of the given kind to a fact set.
- *
- * Called by:
- *		compute_key_join_relation_facts
- *		project_key_join_query_facts
- *		add_paired_row_coverage
  */
 static KeyJoinFact *
 add_fact(KeyJoinSurfaceFacts *set, KeyJoinFactKind kind)
@@ -4835,9 +4576,6 @@ add_fact(KeyJoinSurfaceFacts *set, KeyJoinFactKind kind)
  * add_paired_row_coverage
  *
  *		Append a row-coverage fact paired with the current unique or FK fact.
- *
- * Called by:
- *		compute_key_join_relation_facts
  */
 static void
 add_paired_row_coverage(KeyJoinSurfaceFacts *set, List *keypositions,
@@ -4855,10 +4593,6 @@ add_paired_row_coverage(KeyJoinSurfaceFacts *set, List *keypositions,
  * key_join_collation_is_usable
  *
  *		Return true for noncollatable keys or deterministic collations.
- *
- * Called by:
- *		compute_key_join_relation_facts
- *		project_key_join_query_facts
  */
 static bool
 key_join_collation_is_usable(Oid collationOid)
@@ -4876,11 +4610,6 @@ key_join_collation_is_usable(Oid collationOid)
  *		The exposed proof identity remains exact, but some opclasses execute
  *		equality through a binary-compatible input type.  In core this matters
  *		for varchar_ops, whose btree opclass uses text equality.
- *
- * Called by:
- *		compute_key_join_relation_facts
- *		project_key_join_query_facts
- *		make_rowcollapse_key_positions
  */
 static bool
 key_join_equality_identity_is_usable(Oid typeOid, int32 typmod,
@@ -4917,11 +4646,6 @@ key_join_equality_identity_is_usable(Oid typeOid, int32 typmod,
  *		The operator must be immutable, strict, boolean, non-set-returning,
  *		and accept exactly one equality input type.  If expectedTypeOid is
  *		valid, the operator must accept that exact type.
- *
- * Called by:
- *		compute_key_join_relation_facts
- *		project_key_join_query_facts
- *		make_rowcollapse_key_positions
  */
 static bool
 key_join_equality_operator_is_usable(Oid opno, Oid expectedTypeOid,
@@ -4987,10 +4711,6 @@ key_join_equality_operator_is_usable(Oid opno, Oid expectedTypeOid,
  *		Return the type identity used by equality operators for a key value.
  *		Domains remain the exposed proof identity, but their equality
  *		operators are resolved and executed on the base type.
- *
- * Called by:
- *		direct_filter_var_from_node
- *		key_join_equality_identity_is_usable
  */
 static Oid
 key_join_equality_type(Oid typeOid, int32 typmod, int32 *eqTypmod)
@@ -5008,9 +4728,6 @@ key_join_equality_type(Oid typeOid, int32 typmod, int32 *eqTypmod)
  * make_key_positions_from_attrnums
  *
  *		Build key-position descriptors for relation attribute numbers.
- *
- * Called by:
- *		compute_key_join_relation_facts
  */
 static List *
 make_key_positions_from_attrnums(const TupleDesc tupdesc, const AttrNumber *attnums,
@@ -5040,12 +4757,6 @@ make_key_positions_from_attrnums(const TupleDesc tupdesc, const AttrNumber *attn
  * make_key_position
  *
  *		Build one KeyJoinKeyPosition node.
- *
- * Called by:
- *		project_key_join_query_facts
- *		project_key_positions
- *		make_rowcollapse_key_positions
- *		make_key_positions_from_attrnums
  */
 static KeyJoinKeyPosition *
 make_key_position(List *attnums, Oid typeOid, int32 typmod,
@@ -5068,9 +4779,6 @@ make_key_position(List *attnums, Oid typeOid, int32 typmod,
  * list_make_attrnums
  *
  *		Build an integer list from an AttrNumber array.
- *
- * Called by:
- *		compute_key_join_relation_facts
  */
 static List *
 list_make_attrnums(const AttrNumber *attnums, int nattnums)
@@ -5090,9 +4798,6 @@ list_make_attrnums(const AttrNumber *attnums, int nattnums)
  *		active fact is stamped now (first death wins); an already-inactive fact
  *		keeps its earlier stamp.  A fact whose columns the projection does not
  *		carry is dropped.
- *
- * Called by:
- *		project_key_join_facts_from_rte
  */
 static void
 add_inactive_projected(KeyJoinSurfaceFacts *dst, KeyJoinFact *old,
