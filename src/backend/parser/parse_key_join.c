@@ -5167,124 +5167,116 @@ key_join_failure_detail(KeyJoinReq req, bool inactivated,
 
 		Assert(relname != NULL);
 		Assert(nspname != NULL);
-		origin_view_name = psprintf("%s.%s", nspname, relname);
+		origin_view_name = quote_qualified_identifier(nspname, relname);
 		origin_sentence =
-			psprintf("The relevant operation occurs inside view \"%s\".",
+			psprintf(_("The relevant operation occurs inside view %s."),
 					 origin_view_name);
 	}
 
-	if (req == REQ_FKPAIR)
-		requirement_sentence =
-			psprintf("The matching foreign key for %s references different columns than %s.",
-					 referencing_relcols, referenced_relcols);
-	else if (req == REQ_FILTER)
+	switch (req)
 	{
-		requirement_sentence =
-			psprintf("Not every %s value can be proven to have a matching %s row.",
-					 referencing_relcols, referenced_relation);
-		reason_sentence =
-			psprintf("Referenced relation %s has a filter that is not matched by referencing relation %s.",
-					 referenced_relation, referencing_relation);
+		case REQ_NONE:
+		case REQ_FK:
+			requirement_sentence =
+				psprintf(_("There is no matching foreign key constraint for %s referencing %s."),
+						 referencing_relcols, referenced_relcols);
+			break;
+		case REQ_FKPAIR:
+			requirement_sentence =
+				psprintf(_("The matching foreign key for %s references different columns than %s."),
+						 referencing_relcols, referenced_relcols);
+			break;
+		case REQ_FILTER:
+		case REQ_COVERAGE:
+			requirement_sentence =
+				psprintf(_("Not every %s value can be proven to have a matching %s row."),
+						 referencing_relcols, referenced_relation);
+			break;
+		case REQ_UNIQUE:
+			requirement_sentence =
+				psprintf(_("Referenced columns %s are not proven unique."),
+						 referenced_relcols);
+			break;
+		case REQ_NOTNULL:
+			requirement_sentence =
+				psprintf(_("This %s could filter rows from %s."),
+						 join_name, referencing_relation);
+			break;
 	}
-	else if (req == REQ_UNIQUE && inactivated)
-	{
-		/* KJI_JOIN_FANOUT is unique-specific. */
-		Assert(reason == KJI_JOIN_FANOUT);
 
-		requirement_sentence =
-			psprintf("Referenced columns %s are not proven unique.",
-					 referenced_relcols);
-		reason_sentence =
-			psprintf("A preceding join may duplicate rows from referenced relation %s.",
-					 referenced_relation);
-	}
-	else if (req == REQ_UNIQUE)
-		requirement_sentence =
-			psprintf("Referenced columns %s are not proven unique.",
-					 referenced_relcols);
-	else if (req == REQ_COVERAGE && inactivated &&
-			 reason == KJI_UNACCOUNTED_FILTER)
+	switch (req)
 	{
-		requirement_sentence =
-			psprintf("Not every %s value can be proven to have a matching %s row.",
-					 referencing_relcols, referenced_relation);
-		reason_sentence =
-			psprintf("Referenced relation %s is filtered before this key join.",
-					 referenced_relation);
+		case REQ_NONE:
+		case REQ_FK:
+		case REQ_FKPAIR:
+			break;
+		case REQ_FILTER:
+			reason_sentence =
+				psprintf(_("Referenced relation %s has a filter that is not matched by referencing relation %s."),
+						 referenced_relation, referencing_relation);
+			break;
+		case REQ_UNIQUE:
+			if (inactivated)
+			{
+				/* KJI_JOIN_FANOUT is unique-specific. */
+				Assert(reason == KJI_JOIN_FANOUT);
+				reason_sentence =
+					psprintf(_("A preceding join may duplicate rows from referenced relation %s."),
+							 referenced_relation);
+			}
+			break;
+		case REQ_COVERAGE:
+			if (inactivated)
+			{
+				switch (reason)
+				{
+					case KJI_UNACCOUNTED_FILTER:
+						reason_sentence =
+							psprintf(_("Referenced relation %s is filtered before this key join."),
+									 referenced_relation);
+						break;
+					case KJI_JOIN_NOT_PRESERVED:
+						reason_sentence =
+							psprintf(_("Referenced relation %s may lose rows before this key join because of a preceding join."),
+									 referenced_relation);
+						break;
+					case KJI_ROW_REMOVING_CLAUSE:
+						reason_sentence =
+							psprintf(_("Referenced relation %s may lose rows before this key join because of HAVING, LIMIT, OFFSET, FOR UPDATE or TABLESAMPLE."),
+									 referenced_relation);
+						break;
+					case KJI_GROUP_BY:
+						reason_sentence =
+							psprintf(_("Referenced relation %s may lose rows before this key join because of GROUP BY."),
+									 referenced_relation);
+						break;
+					default:
+						Assert(reason == KJI_DISTINCT);
+						reason_sentence =
+							psprintf(_("Referenced relation %s may lose rows before this key join because of DISTINCT."),
+									 referenced_relation);
+						break;
+				}
+			}
+			else
+				reason_sentence =
+					psprintf(_("Referenced relation %s is not proven to contain every referenced key row."),
+							 referenced_relation);
+			break;
+		case REQ_NOTNULL:
+			if (inactivated)
+			{
+				Assert(reason == KJI_NULL_EXTENDING_JOIN);
+				reason_sentence =
+					psprintf(_("Referencing columns %s can be null because a preceding outer join can null-extend the referencing side."),
+							 referencing_relcols);
+			}
+			else
+				reason_sentence =
+					psprintf(_("Referencing columns %s can be null."),
+							 referencing_relcols);
+			break;
 	}
-	else if (req == REQ_COVERAGE && inactivated &&
-			 reason == KJI_JOIN_NOT_PRESERVED)
-	{
-		requirement_sentence =
-			psprintf("Not every %s value can be proven to have a matching %s row.",
-					 referencing_relcols, referenced_relation);
-		reason_sentence =
-			psprintf("Referenced relation %s may lose rows before this key join because of a preceding join.",
-					 referenced_relation);
-	}
-	else if (req == REQ_COVERAGE && inactivated &&
-			 reason == KJI_ROW_REMOVING_CLAUSE)
-	{
-		requirement_sentence =
-			psprintf("Not every %s value can be proven to have a matching %s row.",
-					 referencing_relcols, referenced_relation);
-		reason_sentence =
-			psprintf("Referenced relation %s may lose rows before this key join because of HAVING, LIMIT, OFFSET, FOR UPDATE or TABLESAMPLE.",
-					 referenced_relation);
-	}
-	else if (req == REQ_COVERAGE && inactivated && reason == KJI_GROUP_BY)
-	{
-		requirement_sentence =
-			psprintf("Not every %s value can be proven to have a matching %s row.",
-					 referencing_relcols, referenced_relation);
-		reason_sentence =
-			psprintf("Referenced relation %s may lose rows before this key join because of GROUP BY.",
-					 referenced_relation);
-	}
-	else if (req == REQ_COVERAGE && inactivated)
-	{
-		Assert(reason == KJI_DISTINCT);
-
-		requirement_sentence =
-			psprintf("Not every %s value can be proven to have a matching %s row.",
-					 referencing_relcols, referenced_relation);
-		reason_sentence =
-			psprintf("Referenced relation %s may lose rows before this key join because of DISTINCT.",
-					 referenced_relation);
-	}
-	else if (req == REQ_COVERAGE)
-	{
-		requirement_sentence =
-			psprintf("Not every %s value can be proven to have a matching %s row.",
-					 referencing_relcols, referenced_relation);
-		reason_sentence =
-			psprintf("Referenced relation %s is not proven to contain every referenced key row.",
-					 referenced_relation);
-	}
-	else if (req == REQ_NOTNULL && inactivated)
-	{
-		Assert(reason == KJI_NULL_EXTENDING_JOIN);
-
-		requirement_sentence =
-			psprintf("This %s could filter rows from %s.",
-					 join_name, referencing_relation);
-		reason_sentence =
-			psprintf("Referencing columns %s can be null because a preceding outer join can null-extend the referencing side.",
-					 referencing_relcols);
-	}
-	else if (req == REQ_NOTNULL)
-	{
-		requirement_sentence =
-			psprintf("This %s could filter rows from %s.",
-					 join_name, referencing_relation);
-		reason_sentence =
-			psprintf("Referencing columns %s can be null.",
-					 referencing_relcols);
-	}
-	else
-		requirement_sentence =
-			psprintf("There is no matching foreign key constraint for %s referencing %s.",
-					 referencing_relcols, referenced_relcols);
 
 	initStringInfo(&detail);
 	appendStringInfoString(&detail, requirement_sentence);
@@ -5373,6 +5365,6 @@ key_join_report_failure(ParseState *pstate, ParseLoc location,
 			(errcode(ERRCODE_INVALID_FOREIGN_KEY),
 			 errmsg("key join from referencing relation %s to referenced relation %s cannot be proven",
 					relations[0], relations[1]),
-			 errdetail("%s", detail),
+			 errdetail_internal("%s", detail),
 			 pstate != NULL ? parser_errposition(pstate, location) : 0));
 }
